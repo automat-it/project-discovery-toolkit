@@ -4,36 +4,23 @@ This repository contains database administration (DBA) related scripts and utili
 
 This repository is created and maintained by **Automat-IT** and is used internally to support delivery, operational excellence, and database engineering activities across customer environments.
 
-## Purpose
+## Repository structure
 
-The main goal of this repository is to provide reusable and practical scripts that help with:
+- `dms/`  
+  Scripts related to AWS Database Migration Service (DMS), including compatibility and readiness checks.
+  - `dms/postgres/`
+    - `dms_postgres_compatibility_report.sql` — Generates a DMS compatibility report for PostgreSQL schemas and exports a detailed CSV report. Includes a console summary by status (OK / REVIEW / RISK / UNKNOWN).
 
-- Database diagnostics and health checks
-- Performance analysis and optimization
-- Migration readiness and compatibility checks
-- Maintenance and automation tasks
-- Metadata and schema analysis
-- Operational reporting
+- `postgres/`  
+  PostgreSQL DBA scripts (maintenance, diagnostics, performance, operations).
 
-## Scope
-
-Scripts may cover multiple database platforms and environments, including but not limited to:
-
-- PostgreSQL
-- MySQL / Aurora MySQL
-- MS SQL Server
-- Oracle
-- Cloud-managed databases (AWS RDS, Aurora, GCP CloudSQL, Azure SQL)
+- `mysql/`  
+  MySQL / Aurora MySQL DBA scripts (maintenance, diagnostics, performance, operations).
 
 ## Usage
 
-Each script is self-contained and intended to be executed in read-only mode unless explicitly stated otherwise.  
-Refer to individual script headers or inline documentation for:
-
-- Prerequisites
-- Required permissions
-- Execution instructions
-- Expected output
+Each script is intended to be executed in read-only mode unless explicitly stated otherwise.  
+Refer to the header block in each script for prerequisites, required permissions, and execution examples.
 
 ## Disclaimer
 
@@ -42,7 +29,6 @@ These scripts are provided as-is and should be reviewed and tested in non-produc
 ## Contribution
 
 Contributions and improvements are welcome. When adding new scripts, please ensure:
-
 - Clear naming
 - Readability
 - Safety (avoid destructive operations unless clearly documented)
@@ -51,3 +37,4 @@ Contributions and improvements are welcome. When adding new scripts, please ensu
 ---
 
 **Maintained by Automat-IT DBA team**
+

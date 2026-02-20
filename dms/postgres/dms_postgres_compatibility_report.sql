@@ -1,3 +1,33 @@
+/*
+Purpose:
+  Generate an AWS DMS compatibility report for a PostgreSQL database by inspecting schemas, tables, and column data types.
+  Prints an aggregated summary (OK / REVIEW / RISK / UNKNOWN) to the console and exports a detailed CSV report to the
+  current working directory with a timestamped filename.
+
+Safety:
+  Read-only analysis. No changes to application data.
+  The script creates a TEMP VIEW (session-scoped) to deduplicate logic; it is dropped automatically at session end.
+
+Required permissions (minimum practical):
+  - CONNECT on the database
+  - USAGE on schemas being inspected
+  - Metadata visibility for table columns:
+      Recommended: role membership in pg_read_all_data (PostgreSQL 14+) OR SELECT on all tables to be assessed
+  - Read access to system catalogs (default for regular users)
+
+Recommended execution:
+  psql -d <db_name> -f dms_postgres_compatibility_report.sql
+
+Output:
+  - Console: aggregated summary by status
+  - CSV file: dms_report_YYYYMMDD_HHMMSS.csv in the current working directory
+
+Notes:
+  - Status mapping is conservative. REVIEW indicates types that may require validation/transformations depending on target
+    engine and DMS settings.
+  - If using a restricted user, ensure it can see all schemas/tables intended for assessment.
+*/
+
 \set ON_ERROR_STOP on
 \pset pager off
 \pset format aligned

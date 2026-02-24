@@ -1,8 +1,6 @@
 
 ---
 
-# README.md
-
 ```markdown
 # DBA Scripts Repository
 

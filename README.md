@@ -1,7 +1,7 @@
 
 ---
 
-# Root README.md (regenerated)
+# README.md
 
 ```markdown
 # DBA Scripts Repository

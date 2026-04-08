@@ -110,8 +110,8 @@ SELECT
     pg_size_pretty((table_bytes - expected_bytes)::bigint)
                                                          AS bloat_size,
     CASE WHEN table_bytes > 0
-         THEN round(100.0 * (table_bytes - expected_bytes)
-                          / table_bytes, 2)
+         THEN round((100.0 * (table_bytes - expected_bytes)
+                          / table_bytes)::numeric, 2)
          ELSE 0
     END                                                  AS bloat_pct
 FROM table_estimates

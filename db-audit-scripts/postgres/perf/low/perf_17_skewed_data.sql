@@ -44,6 +44,7 @@ ORDER BY n_distinct;
 -- ---------------------------------------------------------------------------
 -- Columns where most_common_freqs has very high values (heavy hitters)
 -- A value > 0.5 means one MCV dominates the column.
+-- Safe version: avoid unnest(anyarray) on pg_stats.most_common_vals.
 -- ---------------------------------------------------------------------------
 SELECT
     schemaname,
@@ -51,8 +52,9 @@ SELECT
     attname                                              AS column,
     null_frac,
     n_distinct,
-    most_common_vals[1:5]                                AS top_values,
-    most_common_freqs[1:5]                               AS top_freqs
+    most_common_freqs[1]                                 AS top_freq,
+    most_common_vals::text                               AS top_values_raw,
+    most_common_freqs::text                              AS top_freqs_raw
 FROM pg_stats
 WHERE schemaname NOT IN ('pg_catalog', 'information_schema')
   AND most_common_freqs IS NOT NULL

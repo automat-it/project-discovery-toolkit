@@ -5,10 +5,27 @@
 --          and dblink usage. These are network egress points and may
 --          carry credentials.
 -- Read-only.
+--
+-- Usage:
+--   Default (safe, masked only):
+--     psql -X -v ON_ERROR_STOP=1 -f sec_15_external_integrations.sql
+--
+--   Unmasked secrets (authorized review only):
+--     psql -X -v ON_ERROR_STOP=1 -v unmask_secrets=true -f sec_15_external_integrations.sql
+--
+-- Notes:
+--   * Safe if "unmask_secrets" is not provided.
+--   * Masked section always runs.
+--   * Unmasked section runs only when explicitly enabled.
 -- =============================================================================
 
+\if :{?unmask_secrets}
+\else
+\set unmask_secrets false
+\endif
+
 -- ---------------------------------------------------------------------------
--- Installed FDW extensions
+-- Installed FDW / external integration extensions
 -- ---------------------------------------------------------------------------
 SELECT
     extname                                              AS extension,
@@ -38,10 +55,11 @@ SELECT
     fdwvalidator::regproc                                AS validator,
     fdwacl                                               AS acl,
     fdwoptions                                           AS options
-FROM pg_foreign_data_wrapper;
+FROM pg_foreign_data_wrapper
+ORDER BY fdwname;
 
 -- ---------------------------------------------------------------------------
--- Foreign servers (the destinations)
+-- Foreign servers
 -- ---------------------------------------------------------------------------
 SELECT
     s.srvname                                            AS server,
@@ -52,119 +70,125 @@ SELECT
     s.srvacl                                             AS acl,
     s.srvoptions                                         AS options
 FROM pg_foreign_server s
-JOIN pg_foreign_data_wrapper fdw ON fdw.oid = s.srvfdw
+JOIN pg_foreign_data_wrapper fdw
+  ON fdw.oid = s.srvfdw
 ORDER BY s.srvname;
 
 -- ---------------------------------------------------------------------------
--- User mappings (local user -> foreign credentials) — MASKED VERSION.
--- WARNING: umoptions can contain plaintext passwords for the foreign
--- system. This block masks any option that looks like a credential
--- (password, secret, key, token) so the result can be safely shared.
--- For the unmasked version, see the next block (run only as authorized
--- security reviewer and do NOT export the result).
+-- User mappings (MASKED)
 -- ---------------------------------------------------------------------------
 SELECT
-    pg_get_userbyid(um.umuser)                           AS local_user,
+    CASE
+        WHEN um.umuser = 0 THEN 'PUBLIC'
+        ELSE pg_get_userbyid(um.umuser)
+    END                                                  AS local_user,
     s.srvname                                            AS foreign_server,
     fdw.fdwname                                          AS fdw,
-    (
-        SELECT string_agg(
-            CASE
-                WHEN opt ~* '^(password|passwd|pwd|secret|api_?key|token|auth)='
-                    THEN regexp_replace(opt, '=.*$', '=***MASKED***')
-                ELSE opt
-            END, ', '
-        )
-        FROM unnest(coalesce(um.umoptions, ARRAY[]::text[])) AS opt
+    COALESCE(
+        (
+            SELECT string_agg(
+                CASE
+                    WHEN opt ~* '^(password|passwd|pwd|secret|api_?key|token|auth|access_key|secret_key)='
+                        THEN regexp_replace(opt, '=(.*)$', '=***MASKED***')
+                    ELSE opt
+                END,
+                ', ' ORDER BY ord
+            )
+            FROM unnest(COALESCE(um.umoptions, ARRAY[]::text[])) WITH ORDINALITY AS u(opt, ord)
+        ),
+        ''
     )                                                    AS options_masked
 FROM pg_user_mapping um
-JOIN pg_foreign_server s        ON s.oid = um.umserver
-JOIN pg_foreign_data_wrapper fdw ON fdw.oid = s.srvfdw
+JOIN pg_foreign_server s
+  ON s.oid = um.umserver
+JOIN pg_foreign_data_wrapper fdw
+  ON fdw.oid = s.srvfdw
 ORDER BY local_user, foreign_server;
 
 -- ---------------------------------------------------------------------------
--- User mappings — UNMASKED VERSION.
--- Disabled by default. Set :unmask_secrets to true on the psql command line
--- to enable: psql -v unmask_secrets=true -f sec_15_external_integrations.sql
+-- User mappings (UNMASKED) — authorized review only
 -- ---------------------------------------------------------------------------
-SELECT coalesce(:'unmask_secrets', 'false')::boolean AS unmask_secrets
-\gset
 \if :unmask_secrets
 SELECT
-    pg_get_userbyid(um.umuser)                           AS local_user,
+    'UNMASKED OUTPUT ENABLED — handle with care'         AS warning;
+
+SELECT
+    CASE
+        WHEN um.umuser = 0 THEN 'PUBLIC'
+        ELSE pg_get_userbyid(um.umuser)
+    END                                                  AS local_user,
     s.srvname                                            AS foreign_server,
-    array_to_string(um.umoptions, ', ')                  AS options_full
+    fdw.fdwname                                          AS fdw,
+    COALESCE(array_to_string(um.umoptions, ', '), '')    AS options_unmasked
 FROM pg_user_mapping um
-JOIN pg_foreign_server s ON s.oid = um.umserver
+JOIN pg_foreign_server s
+  ON s.oid = um.umserver
+JOIN pg_foreign_data_wrapper fdw
+  ON fdw.oid = s.srvfdw
 ORDER BY local_user, foreign_server;
 \else
-SELECT 'unmasked user mappings skipped — set -v unmask_secrets=true to view' AS note;
+SELECT
+    'Unmasked user-mapping options skipped. Re-run with -v unmask_secrets=true if explicitly needed.' AS note;
 \endif
 
 -- ---------------------------------------------------------------------------
--- Foreign tables (data exposed via FDW)
+-- Foreign tables
 -- ---------------------------------------------------------------------------
 SELECT
     n.nspname                                            AS schema,
     c.relname                                            AS foreign_table,
-    pg_get_userbyid(c.relowner)                          AS owner,
     s.srvname                                            AS foreign_server,
-    ft.ftoptions                                         AS table_options
+    ft.ftoptions                                         AS options
 FROM pg_foreign_table ft
-JOIN pg_class c           ON c.oid = ft.ftrelid
-JOIN pg_namespace n       ON n.oid = c.relnamespace
-JOIN pg_foreign_server s  ON s.oid = ft.ftserver
+JOIN pg_class c
+  ON c.oid = ft.ftrelid
+JOIN pg_namespace n
+  ON n.oid = c.relnamespace
+JOIN pg_foreign_server s
+  ON s.oid = ft.ftserver
 ORDER BY n.nspname, c.relname;
 
 -- ---------------------------------------------------------------------------
--- dblink connections currently established (function exists only if dblink extension loaded)
+-- dblink extension installed?
 -- ---------------------------------------------------------------------------
 SELECT
-    p.proname                                            AS dblink_function,
-    n.nspname                                            AS schema
+    extname,
+    extversion
+FROM pg_extension
+WHERE extname = 'dblink';
+
+-- ---------------------------------------------------------------------------
+-- Functions / procedures whose definition references dblink
+-- Exclude aggregates, window funcs, etc. to avoid pg_get_functiondef errors.
+-- ---------------------------------------------------------------------------
+SELECT
+    n.nspname                                            AS schema,
+    p.proname                                            AS routine,
+    CASE p.prokind
+        WHEN 'f' THEN 'FUNCTION'
+        WHEN 'p' THEN 'PROCEDURE'
+        WHEN 'w' THEN 'WINDOW'
+        WHEN 'a' THEN 'AGGREGATE'
+        ELSE p.prokind::text
+    END                                                  AS routine_type,
+    pg_get_userbyid(p.proowner)                          AS owner,
+    l.lanname                                            AS language
 FROM pg_proc p
-JOIN pg_namespace n ON n.oid = p.pronamespace
-WHERE p.proname IN ('dblink_connect', 'dblink', 'dblink_exec', 'dblink_get_connections')
+JOIN pg_namespace n
+  ON n.oid = p.pronamespace
+JOIN pg_language l
+  ON l.oid = p.prolang
+WHERE n.nspname NOT IN ('pg_catalog', 'information_schema')
+  AND p.prokind IN ('f', 'p')
+  AND pg_get_functiondef(p.oid) ILIKE '%dblink%'
 ORDER BY n.nspname, p.proname;
 
 -- ---------------------------------------------------------------------------
--- Logical replication subscriptions (incoming external data) — MASKED.
--- subconninfo is a libpq connection string that often includes password=...
--- This block masks credential parameters; for the unmasked view set
--- -v unmask_secrets=true on the psql command line.
+-- Summary
 -- ---------------------------------------------------------------------------
 SELECT
-    subname                                              AS subscription,
-    pg_get_userbyid(subowner)                            AS owner,
-    subenabled                                           AS enabled,
-    regexp_replace(
-        regexp_replace(subconninfo, '(password|sslpassword)=[^ ]*', '\1=***MASKED***', 'gi'),
-        '(://[^:]+:)[^@]+(@)', '\1***MASKED***\2', 'g'
-    )                                                    AS connection_info_masked,
-    subslotname                                          AS slot,
-    subpublications                                      AS publications
-FROM pg_subscription;
-
-SELECT coalesce(:'unmask_secrets', 'false')::boolean AS unmask_secrets
-\gset
-\if :unmask_secrets
-SELECT
-    subname                                              AS subscription,
-    subconninfo                                          AS connection_info_full
-FROM pg_subscription;
-\else
-SELECT 'unmasked subscription conninfo skipped — set -v unmask_secrets=true to view' AS note;
-\endif
-
--- ---------------------------------------------------------------------------
--- Logical replication publications (outgoing external data)
--- ---------------------------------------------------------------------------
-SELECT
-    pubname                                              AS publication,
-    pg_get_userbyid(pubowner)                            AS owner,
-    puballtables                                         AS all_tables,
-    pubinsert,
-    pubupdate,
-    pubdelete,
-    pubtruncate
-FROM pg_publication;
+    (SELECT count(*) FROM pg_foreign_data_wrapper)       AS fdw_count,
+    (SELECT count(*) FROM pg_foreign_server)             AS foreign_server_count,
+    (SELECT count(*) FROM pg_user_mapping)               AS user_mapping_count,
+    (SELECT count(*) FROM pg_foreign_table)              AS foreign_table_count,
+    (SELECT count(*) FROM pg_extension WHERE extname = 'dblink') AS dblink_installed;

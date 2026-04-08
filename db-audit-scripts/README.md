@@ -23,7 +23,6 @@ db-audit-scripts/
 * Every script is **read-only** — `SELECT` and `SHOW` only.
   No `CREATE / ALTER / DROP / INSERT / UPDATE / DELETE / GRANT / REVOKE`.
 * No temporary tables, no functions, no objects of any kind are created.
-* All comments inside SQL files are in English.
 * Filenames are prefixed with their audit number for ordering,
   e.g. `perf_01_top_sql.sql`, `sec_03_admin_and_superusers.sql`.
 

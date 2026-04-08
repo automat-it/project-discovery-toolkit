@@ -4,21 +4,24 @@
 -- Purpose: Inspect authentication configuration, password policy,
 --          and accounts with weak / missing / expired credentials.
 --
--- Privileges (IMPORTANT):
---   * pg_settings, pg_roles, expiration data    — work for any login role
---   * pg_authid (rolpassword hashes)            — superuser / rds_superuser
---                                                 / pg_read_server_files
---   * pg_hba_file_rules, pg_ident_file_mappings — superuser / rds_superuser
+-- Privileges:
+--   * pg_settings, pg_roles, expiration data:
+--       work for any login role
+--   * pg_authid (rolpassword hashes):
+--       requires superuser / rds_superuser / equivalent elevated access
+--   * pg_hba_file_rules, pg_ident_file_mappings:
+--       may require superuser / elevated access depending on environment
 --
--- Each block that needs elevated access is guarded by a runtime privilege
--- check and falls back to a "skipped" note instead of erroring out.
+-- This script is guarded so privileged blocks are skipped instead of failing.
 -- Read-only.
 -- =============================================================================
 
 -- ---------------------------------------------------------------------------
--- Password encryption method in use
+-- Password / auth-related settings
 -- ---------------------------------------------------------------------------
-SELECT name, setting
+SELECT
+    name,
+    setting
 FROM pg_settings
 WHERE name IN (
     'password_encryption',
@@ -29,104 +32,140 @@ WHERE name IN (
 ORDER BY name;
 
 -- ---------------------------------------------------------------------------
--- The next three blocks read pg_authid.rolpassword. Guarded by privilege
--- check so the script does not fail for non-privileged login roles.
+-- Can current user read pg_authid?
 -- ---------------------------------------------------------------------------
 SELECT has_table_privilege(current_user, 'pg_authid', 'SELECT') AS can_read_pg_authid
 \gset
+
+-- ---------------------------------------------------------------------------
+-- Accounts with NO password set
+-- Guarded by pg_authid access check.
+-- ---------------------------------------------------------------------------
 \if :can_read_pg_authid
-
--- ---------------------------------------------------------------------------
--- Accounts with NO password set (rely on host-based / peer / IAM auth)
--- This may be intentional (IAM, certificate auth) — verify each.
--- ---------------------------------------------------------------------------
 SELECT
-    rolname                                              AS role,
-    rolcanlogin,
-    rolsuper,
-    rolvaliduntil
-FROM pg_roles
-LEFT JOIN pg_authid USING (rolname)
-WHERE rolcanlogin
-  AND rolpassword IS NULL
-ORDER BY rolname;
-
--- ---------------------------------------------------------------------------
--- Accounts with non-SCRAM password hashes
--- (md5 is deprecated, plain is never acceptable)
--- ---------------------------------------------------------------------------
-SELECT
-    rolname                                              AS role,
-    CASE
-        WHEN rolpassword IS NULL THEN 'none'
-        WHEN rolpassword LIKE 'SCRAM-SHA-256$%' THEN 'SCRAM-SHA-256'
-        WHEN rolpassword LIKE 'md5%' THEN 'MD5 (deprecated)'
-        ELSE 'plain or unknown'
-    END                                                  AS password_type,
-    rolcanlogin,
-    rolsuper
-FROM pg_roles
-LEFT JOIN pg_authid USING (rolname)
-WHERE rolcanlogin
-ORDER BY password_type, rolname;
-
+    r.rolname                                            AS role,
+    r.rolcanlogin,
+    r.rolsuper,
+    r.rolvaliduntil
+FROM pg_roles r
+LEFT JOIN pg_authid a
+  ON a.oid = r.oid
+WHERE r.rolcanlogin
+  AND a.rolpassword IS NULL
+ORDER BY r.rolname;
 \else
-SELECT 'pg_authid blocks skipped — current user cannot read password hashes' AS note;
+SELECT
+    'Skipped: pg_authid is not readable by ' || current_user
+    || '. Re-run as superuser / rds_superuser to inspect password presence.' AS note;
 \endif
 
 -- ---------------------------------------------------------------------------
--- Expired accounts (rolvaliduntil in the past)
+-- Accounts with non-SCRAM password hashes
+-- Guarded by pg_authid access check.
+-- ---------------------------------------------------------------------------
+\if :can_read_pg_authid
+SELECT
+    r.rolname                                            AS role,
+    CASE
+        WHEN a.rolpassword IS NULL THEN 'none'
+        WHEN a.rolpassword LIKE 'SCRAM-SHA-256$%' THEN 'SCRAM-SHA-256'
+        WHEN a.rolpassword LIKE 'md5%' THEN 'MD5 (deprecated)'
+        ELSE 'plain or unknown'
+    END                                                  AS password_type,
+    r.rolcanlogin,
+    r.rolsuper
+FROM pg_roles r
+LEFT JOIN pg_authid a
+  ON a.oid = r.oid
+WHERE r.rolcanlogin
+ORDER BY password_type, r.rolname;
+\else
+SELECT
+    'Skipped: pg_authid is not readable by ' || current_user
+    || '. Re-run as superuser / rds_superuser to inspect hash types.' AS note;
+\endif
+
+-- ---------------------------------------------------------------------------
+-- Roles with password set but no expiry
+-- Guarded by pg_authid access check.
+-- ---------------------------------------------------------------------------
+\if :can_read_pg_authid
+SELECT
+    r.rolname                                            AS role,
+    r.rolsuper,
+    r.rolcreaterole,
+    r.rolcreatedb,
+    r.rolreplication
+FROM pg_roles r
+LEFT JOIN pg_authid a
+  ON a.oid = r.oid
+WHERE r.rolcanlogin
+  AND a.rolpassword IS NOT NULL
+  AND r.rolvaliduntil IS NULL
+ORDER BY r.rolsuper DESC, r.rolname;
+\else
+SELECT
+    'Skipped: pg_authid is not readable by ' || current_user
+    || '. Re-run as superuser / rds_superuser to inspect password+expiry posture.' AS note;
+\endif
+
+-- ---------------------------------------------------------------------------
+-- Expired accounts
 -- ---------------------------------------------------------------------------
 SELECT
-    rolname                                              AS role,
-    rolcanlogin,
-    rolvaliduntil                                        AS expired_at,
-    now() - rolvaliduntil                                AS expired_for
-FROM pg_roles
-WHERE rolvaliduntil IS NOT NULL
-  AND rolvaliduntil < now()
-ORDER BY rolvaliduntil;
+    r.rolname                                            AS role,
+    r.rolcanlogin,
+    r.rolvaliduntil                                      AS expired_at,
+    now() - r.rolvaliduntil                              AS expired_for
+FROM pg_roles r
+WHERE r.rolcanlogin
+  AND r.rolvaliduntil IS NOT NULL
+  AND r.rolvaliduntil < now()
+ORDER BY r.rolvaliduntil;
 
 -- ---------------------------------------------------------------------------
 -- Accounts expiring soon (within 30 days)
 -- ---------------------------------------------------------------------------
 SELECT
-    rolname                                              AS role,
-    rolcanlogin,
-    rolvaliduntil                                        AS expires_at,
-    rolvaliduntil - now()                                AS expires_in
-FROM pg_roles
-WHERE rolvaliduntil IS NOT NULL
-  AND rolvaliduntil > now()
-  AND rolvaliduntil < now() + interval '30 days'
-ORDER BY rolvaliduntil;
+    r.rolname                                            AS role,
+    r.rolcanlogin,
+    r.rolvaliduntil                                      AS expires_at,
+    r.rolvaliduntil - now()                              AS time_left
+FROM pg_roles r
+WHERE r.rolcanlogin
+  AND r.rolvaliduntil IS NOT NULL
+  AND r.rolvaliduntil >= now()
+  AND r.rolvaliduntil < now() + interval '30 days'
+ORDER BY r.rolvaliduntil;
 
 -- ---------------------------------------------------------------------------
--- Accounts with NO expiration (potentially long-lived credentials)
+-- High-privilege login roles with no expiry
 -- ---------------------------------------------------------------------------
 SELECT
-    rolname                                              AS role,
-    rolsuper,
-    rolcanlogin,
-    rolvaliduntil
-FROM pg_roles
-WHERE rolcanlogin
-  AND rolvaliduntil IS NULL
-  AND rolname NOT LIKE 'pg\_%' ESCAPE '\'
-ORDER BY rolname;
+    r.rolname                                            AS role,
+    r.rolsuper,
+    r.rolcreaterole,
+    r.rolcreatedb,
+    r.rolreplication,
+    r.rolbypassrls,
+    r.rolvaliduntil
+FROM pg_roles r
+WHERE r.rolcanlogin
+  AND (r.rolsuper OR r.rolcreaterole OR r.rolcreatedb OR r.rolreplication OR r.rolbypassrls)
+  AND r.rolvaliduntil IS NULL
+ORDER BY r.rolname;
 
 -- ---------------------------------------------------------------------------
--- The next two blocks read pg_hba_file_rules. Guarded by privilege check
--- because this catalog requires superuser / rds_superuser access.
+-- Can current user read pg_hba_file_rules?
 -- ---------------------------------------------------------------------------
-SELECT has_table_privilege(current_user, 'pg_hba_file_rules', 'SELECT') AS can_read_hba
+SELECT has_table_privilege(current_user, 'pg_hba_file_rules', 'SELECT') AS can_read_pg_hba
 \gset
-\if :can_read_hba
 
 -- ---------------------------------------------------------------------------
--- pg_hba.conf rules (PG 10+ via pg_hba_file_rules)
--- Look for: trust, password (plain), broad CIDR, host instead of hostssl
+-- pg_hba rules
+-- Guarded by access check.
 -- ---------------------------------------------------------------------------
+\if :can_read_pg_hba
 SELECT
     line_number,
     type,
@@ -139,10 +178,17 @@ SELECT
     error
 FROM pg_hba_file_rules
 ORDER BY line_number;
+\else
+SELECT
+    'Skipped: pg_hba_file_rules is not readable by ' || current_user
+    || '. Re-run as superuser / elevated role to inspect HBA rules.' AS note;
+\endif
 
 -- ---------------------------------------------------------------------------
--- Insecure pg_hba.conf rules (trust, password, very broad networks)
+-- Risky HBA entries
+-- Guarded by access check.
 -- ---------------------------------------------------------------------------
+\if :can_read_pg_hba
 SELECT
     line_number,
     type,
@@ -151,22 +197,68 @@ SELECT
     address,
     auth_method,
     CASE
-        WHEN auth_method = 'trust'    THEN 'CRITICAL: trust (no auth)'
-        WHEN auth_method = 'password' THEN 'HIGH: cleartext password'
-        WHEN auth_method = 'ident'    THEN 'MEDIUM: ident is weak'
-        WHEN address IN ('0.0.0.0/0', '::/0') THEN 'HIGH: open to internet'
-        WHEN address LIKE '0.0.0.0/%' AND substring(address from '/(\d+)')::int < 16
-                                      THEN 'HIGH: very broad CIDR'
-        WHEN type = 'host' AND auth_method NOT IN ('reject', 'cert')
-                                      THEN 'MEDIUM: non-SSL host entry'
+        WHEN auth_method = 'trust'
+            THEN 'CRITICAL: trust authentication'
+        WHEN auth_method = 'password'
+            THEN 'HIGH: cleartext password auth'
+        WHEN auth_method = 'md5'
+            THEN 'MEDIUM: deprecated, migrate to SCRAM'
+        WHEN type = 'hostnossl'
+            THEN 'HIGH: non-SSL host access'
+        WHEN address IN ('0.0.0.0/0', '::/0')
+            THEN 'HIGH: open network scope'
+        WHEN address = 'all'
+            THEN 'HIGH: unrestricted address token'
         ELSE 'review'
     END                                                  AS finding
 FROM pg_hba_file_rules
-WHERE auth_method IN ('trust', 'password', 'ident')
+WHERE
+      auth_method IN ('trust', 'password', 'md5')
+   OR type = 'hostnossl'
    OR address IN ('0.0.0.0/0', '::/0')
-   OR (type = 'host' AND auth_method NOT IN ('reject', 'cert', 'scram-sha-256'))
+   OR address = 'all'
 ORDER BY line_number;
-
 \else
-SELECT 'pg_hba_file_rules blocks skipped — current user cannot read pg_hba.conf catalog' AS note;
+SELECT
+    'Skipped: pg_hba_file_rules is not readable by ' || current_user
+    || '. Re-run as superuser / elevated role to inspect risky auth rules.' AS note;
 \endif
+
+-- ---------------------------------------------------------------------------
+-- Can current user read pg_ident_file_mappings?
+-- ---------------------------------------------------------------------------
+SELECT has_table_privilege(current_user, 'pg_ident_file_mappings', 'SELECT') AS can_read_pg_ident
+\gset
+
+-- ---------------------------------------------------------------------------
+-- pg_ident mappings
+-- Guarded by access check.
+-- ---------------------------------------------------------------------------
+\if :can_read_pg_ident
+SELECT
+    line_number,
+    map_name,
+    sys_name                                             AS system_user,
+    pg_username                                          AS database_user,
+    error
+FROM pg_ident_file_mappings
+ORDER BY line_number;
+\else
+SELECT
+    'Skipped: pg_ident_file_mappings is not readable by ' || current_user
+    || '. Re-run as superuser / elevated role to inspect ident mappings.' AS note;
+\endif
+
+-- ---------------------------------------------------------------------------
+-- Summary
+-- ---------------------------------------------------------------------------
+SELECT
+    (SELECT setting FROM pg_settings WHERE name = 'password_encryption') AS password_encryption,
+    (SELECT count(*) FROM pg_roles r
+      WHERE r.rolcanlogin
+        AND r.rolvaliduntil IS NOT NULL
+        AND r.rolvaliduntil < now())                                    AS expired_accounts,
+    (SELECT count(*) FROM pg_roles r
+      WHERE r.rolcanlogin
+        AND (r.rolsuper OR r.rolcreaterole OR r.rolcreatedb OR r.rolreplication OR r.rolbypassrls)
+        AND r.rolvaliduntil IS NULL)                                    AS high_priv_no_expiry;

@@ -84,8 +84,8 @@ ORDER BY client_addr;
 SELECT
     line_number,
     map_name,
-    sys_name                                             AS system_user,
-    pg_user                                              AS db_user,
+    sys_name      AS system_user,
+    pg_username   AS db_user,
     error
 FROM pg_ident_file_mappings
 ORDER BY line_number;

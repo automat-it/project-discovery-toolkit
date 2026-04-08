@@ -18,12 +18,12 @@ WHERE name = 'password_encryption';
 -- ---------------------------------------------------------------------------
 SELECT
     rolname                                              AS role,
-    rolcanlogin,
-    rolsuper
-FROM pg_roles
-LEFT JOIN pg_authid USING (rolname)
-WHERE rolcanlogin
-  AND rolpassword LIKE 'md5%'
+    r.rolcanlogin,
+    r.rolsuper
+FROM pg_roles r
+LEFT JOIN pg_authid a USING (rolname)
+WHERE r.rolcanlogin
+  AND a.rolpassword LIKE 'md5%'
 ORDER BY rolname;
 
 -- ---------------------------------------------------------------------------

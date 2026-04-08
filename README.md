@@ -1,7 +1,3 @@
-
----
-
-```markdown
 # DBA Scripts Repository
 
 This repository contains database administration (DBA) scripts and utilities used for operational support, diagnostics, automation, and migration readiness assessments.

@@ -1,0 +1,185 @@
+-- =============================================================================
+-- perf_06_index_audit.sql
+-- Priority: HIGH
+-- Purpose: Find unused, duplicate, invalid, and missing indexes.
+--          Direct impact on read latency and write overhead.
+-- Read-only.
+-- =============================================================================
+
+-- NOTE: MySQL index statistics come from information_schema.STATISTICS and
+--       performance_schema / sys.schema_unused_indexes. There is no
+--       pg_stat_user_indexes equivalent with idx_scan counters per index
+--       unless performance_schema table_io_waits_summary_by_index_usage
+--       is used. Unused index detection relies on
+--       performance_schema.table_io_waits_summary_by_index_usage.
+--       sys.schema_unused_indexes is a convenience view (requires sys schema).
+
+-- ---------------------------------------------------------------------------
+-- Unused indexes (zero I/O waits recorded since last stats reset)
+-- Requires: performance_schema = ON and table_io_waits instrumented.
+-- Excludes PRIMARY KEY indexes.
+-- ---------------------------------------------------------------------------
+SELECT
+    object_schema                                           AS schema_name,
+    object_name                                             AS table_name,
+    index_name,
+    -- NOTE: MySQL does not store index sizes in information_schema directly;
+    --       see sys.schema_index_statistics for size approximations.
+    count_read                                              AS reads,
+    count_write                                             AS writes,
+    count_fetch                                             AS fetches
+FROM performance_schema.table_io_waits_summary_by_index_usage
+WHERE index_name IS NOT NULL
+  AND index_name <> 'PRIMARY'
+  AND count_star = 0
+  AND object_schema NOT IN ('mysql', 'information_schema',
+                             'performance_schema', 'sys')
+ORDER BY object_schema, object_name, index_name;
+
+-- ---------------------------------------------------------------------------
+-- sys convenience view for unused indexes
+-- NOTE: sys schema must be installed (default in MySQL 8.0).
+-- ---------------------------------------------------------------------------
+SELECT
+    object_schema,
+    object_name                                             AS table_name,
+    index_name
+FROM sys.schema_unused_indexes
+WHERE object_schema NOT IN ('mysql', 'information_schema',
+                             'performance_schema', 'sys')
+ORDER BY object_schema, object_name, index_name;
+
+-- ---------------------------------------------------------------------------
+-- All user-defined indexes (full inventory)
+-- ---------------------------------------------------------------------------
+SELECT
+    TABLE_SCHEMA                                            AS schema_name,
+    TABLE_NAME,
+    INDEX_NAME,
+    INDEX_TYPE,
+    NON_UNIQUE,
+    SEQ_IN_INDEX,
+    COLUMN_NAME,
+    CARDINALITY,
+    NULLABLE,
+    INDEX_COMMENT
+FROM information_schema.STATISTICS
+WHERE TABLE_SCHEMA NOT IN ('mysql', 'information_schema',
+                            'performance_schema', 'sys')
+ORDER BY TABLE_SCHEMA, TABLE_NAME, INDEX_NAME, SEQ_IN_INDEX;
+
+-- ---------------------------------------------------------------------------
+-- Duplicate indexes: same table + same column set (first columns match)
+-- NOTE: MySQL allows duplicate indexes — they impose write overhead and
+--       waste space but are not automatically prevented.
+-- ---------------------------------------------------------------------------
+SELECT
+    s1.TABLE_SCHEMA                                         AS schema_name,
+    s1.TABLE_NAME,
+    s1.INDEX_NAME                                           AS index_a,
+    s2.INDEX_NAME                                           AS index_b,
+    s1.COLUMN_NAME                                          AS column_name,
+    s1.SEQ_IN_INDEX                                         AS position,
+    'Review — indexes share the same leading columns' AS note
+FROM information_schema.STATISTICS s1
+JOIN information_schema.STATISTICS s2
+  ON  s1.TABLE_SCHEMA   = s2.TABLE_SCHEMA
+  AND s1.TABLE_NAME     = s2.TABLE_NAME
+  AND s1.SEQ_IN_INDEX   = s2.SEQ_IN_INDEX
+  AND s1.COLUMN_NAME    = s2.COLUMN_NAME
+  AND s1.INDEX_NAME    <> s2.INDEX_NAME
+  AND s1.INDEX_NAME     < s2.INDEX_NAME
+WHERE s1.TABLE_SCHEMA NOT IN ('mysql', 'information_schema',
+                               'performance_schema', 'sys')
+  AND s1.INDEX_NAME <> 'PRIMARY'
+ORDER BY s1.TABLE_SCHEMA, s1.TABLE_NAME, s1.INDEX_NAME, s2.INDEX_NAME;
+
+-- ---------------------------------------------------------------------------
+-- Tables with no indexes at all (excluding small tables by row estimate)
+-- ---------------------------------------------------------------------------
+SELECT
+    t.TABLE_SCHEMA,
+    t.TABLE_NAME,
+    t.ENGINE,
+    t.TABLE_ROWS                                            AS approx_rows,
+    ROUND(t.DATA_LENGTH / 1024 / 1024, 2)                   AS data_mb
+FROM information_schema.TABLES t
+WHERE t.TABLE_TYPE = 'BASE TABLE'
+  AND t.TABLE_SCHEMA NOT IN ('mysql', 'information_schema',
+                              'performance_schema', 'sys')
+  AND NOT EXISTS (
+      SELECT 1
+      FROM information_schema.STATISTICS s
+      WHERE s.TABLE_SCHEMA = t.TABLE_SCHEMA
+        AND s.TABLE_NAME   = t.TABLE_NAME
+  )
+  AND t.TABLE_ROWS > 1000
+ORDER BY t.TABLE_ROWS DESC;
+
+-- ---------------------------------------------------------------------------
+-- Missing index hints: tables with high full-scan I/O (rows fetched with
+-- no index use vs total rows fetched)
+-- ---------------------------------------------------------------------------
+SELECT
+    object_schema                                           AS schema_name,
+    object_name                                             AS table_name,
+    count_read                                              AS full_table_reads,
+    count_fetch                                             AS index_fetches,
+    ROUND(100.0 * count_read
+          / NULLIF(count_read + count_fetch, 0), 2)         AS full_scan_pct
+FROM performance_schema.table_io_waits_summary_by_index_usage
+WHERE index_name IS NULL        -- NULL index_name = full table scan (no index)
+  AND count_read > 100
+  AND object_schema NOT IN ('mysql', 'information_schema',
+                             'performance_schema', 'sys')
+ORDER BY count_read DESC
+LIMIT 25;
+
+-- ---------------------------------------------------------------------------
+-- Foreign keys without a supporting index
+-- NOTE: MySQL (InnoDB) REQUIRES an index on the referencing column for
+--       foreign keys and creates one automatically if none exists.
+--       This query identifies FK columns and their indexes for review.
+-- ---------------------------------------------------------------------------
+SELECT
+    kcu.TABLE_SCHEMA                                        AS schema_name,
+    kcu.TABLE_NAME,
+    kcu.CONSTRAINT_NAME                                     AS fk_name,
+    kcu.COLUMN_NAME,
+    kcu.REFERENCED_TABLE_SCHEMA,
+    kcu.REFERENCED_TABLE_NAME,
+    kcu.REFERENCED_COLUMN_NAME,
+    CASE WHEN s.INDEX_NAME IS NOT NULL
+         THEN s.INDEX_NAME
+         ELSE 'NO INDEX FOUND (unexpected for InnoDB)'
+    END                                                     AS supporting_index
+FROM information_schema.KEY_COLUMN_USAGE kcu
+LEFT JOIN information_schema.STATISTICS s
+  ON  s.TABLE_SCHEMA = kcu.TABLE_SCHEMA
+  AND s.TABLE_NAME   = kcu.TABLE_NAME
+  AND s.COLUMN_NAME  = kcu.COLUMN_NAME
+  AND s.SEQ_IN_INDEX = 1
+WHERE kcu.REFERENCED_TABLE_NAME IS NOT NULL
+  AND kcu.TABLE_SCHEMA NOT IN ('mysql', 'information_schema',
+                                'performance_schema', 'sys')
+ORDER BY kcu.TABLE_SCHEMA, kcu.TABLE_NAME, kcu.CONSTRAINT_NAME;
+
+-- ---------------------------------------------------------------------------
+-- Index usage statistics (top by reads — most used indexes)
+-- ---------------------------------------------------------------------------
+SELECT
+    object_schema                                           AS schema_name,
+    object_name                                             AS table_name,
+    index_name,
+    count_star                                              AS total_io,
+    count_read                                              AS reads,
+    count_write                                             AS writes,
+    count_fetch                                             AS fetches,
+    ROUND(sum_timer_wait / 1e12, 2)                         AS total_wait_ms
+FROM performance_schema.table_io_waits_summary_by_index_usage
+WHERE index_name IS NOT NULL
+  AND count_star > 0
+  AND object_schema NOT IN ('mysql', 'information_schema',
+                             'performance_schema', 'sys')
+ORDER BY count_read DESC
+LIMIT 30;

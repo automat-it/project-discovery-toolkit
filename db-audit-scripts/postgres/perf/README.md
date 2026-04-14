@@ -16,6 +16,22 @@ PostgreSQL 13+. A few queries reference catalogs added in newer versions
 (`pg_stat_wal` in 14+); those blocks are guarded by a server-version
 check and degrade to a `skipped` note instead of erroring out.
 
+### PG17 column moves (documented inside the scripts)
+
+- `pg_stat_statements.blk_read_time` / `blk_write_time` were split in
+  PG17 into `shared_blk_read_time` / `shared_blk_write_time` (and
+  `local_blk_*`). `perf_01` and `perf_04` use the pre-17 names; the
+  adjacent comment in each file lists the rename.
+- `pg_stat_bgwriter` checkpoint counters (`checkpoints_timed`,
+  `checkpoints_req`, `checkpoint_write_time`, `checkpoint_sync_time`,
+  `buffers_checkpoint`, `buffers_backend`, `buffers_backend_fsync`)
+  moved to the new `pg_stat_checkpointer` view in PG17. `perf_14`
+  uses the pre-17 view; a comment next to the query explains the
+  PG17 substitution.
+- `pg_stat_statements_info` was added in PG14; `perf_01` uses it at
+  the top, which will error on PG13 — skip that block or wrap it in
+  a `server_version_num` guard for PG13 compatibility.
+
 ## Required privileges
 
 Most scripts work for **any login role** with default privileges.
@@ -99,8 +115,13 @@ pressure on write latency.
 
 ### `perf_11_bloat_estimation.sql`
 
-Heuristic table and index bloat estimation based on row width and tuple
-count — affects I/O and cache efficiency.
+Heuristic table bloat estimation (ioguix / check_postgres style)
+based on row width, tuple count, and block size; joins back to
+`pg_class` **via `pg_namespace`** so identically-named tables in
+different schemas are not double-counted. Also shows index-to-heap
+size ratio as a secondary bloat indicator. For exact numbers use the
+`pgstattuple` extension; this script stays pure-SQL and extension-
+free.
 
 ### `perf_12_sequential_scans.sql`
 

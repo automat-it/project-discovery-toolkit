@@ -25,12 +25,13 @@ Specific elevated requirements:
 
 * Reading `pg_authid` (password hashes) requires superuser /
   `rds_superuser` / `pg_read_server_files`. Affected scripts:
-  `sec_01`, `sec_05`. Both are guarded — they fall back to a `skipped`
-  note when the current role cannot read `pg_authid`.
+  `sec_01`, `sec_05`, `sec_12`, `sec_17`. All are guarded — they fall
+  back to a `skipped` note when the current role cannot read
+  `pg_authid`.
 * Reading `pg_hba_file_rules` and `pg_ident_file_mappings` requires
-  superuser. Affected scripts: `sec_05`, `sec_07`, `sec_08`. The
-  `pg_hba` blocks in `sec_05` are guarded; the others will return
-  empty results for non-privileged roles.
+  superuser / `pg_read_server_files`. Affected scripts: `sec_05`,
+  `sec_07`, `sec_08`, `sec_17`. All are guarded and skip cleanly
+  for non-privileged roles.
 * On AWS RDS use the `rds_superuser` role for elevated blocks.
 
 ## Recommended execution order
@@ -111,7 +112,12 @@ wrappers and user mappings — privilege escalation paths.
 ### `sec_11_role_inheritance_chains.sql`
 
 Direct role membership, full transitive recursive chain, users with
-most effective roles, NOINHERIT roles, and cyclic membership detection.
+most effective roles, NOINHERIT roles, and cyclic membership
+detection. The cycle-detection CTE carries an explicit `closed` flag
+that flips when the walk reaches an already-visited role, and
+surfaces only closed paths — an earlier version filtered visited
+roles out before the membership edge was evaluated, making real
+cycles invisible.
 
 ### `sec_12_dormant_users.sql`
 

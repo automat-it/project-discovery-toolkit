@@ -53,8 +53,11 @@ and `mysql.default_roles`. Foundation for all security analysis.
 ### `sec_02_effective_privileges.sql`
 
 Direct grants at global, schema, and table level from `mysql.user`,
-`mysql.db`, and `information_schema.TABLE_PRIVILEGES`. Role membership
-and effective privilege expansion via `mysql.role_edges`. MySQL 8.0's
+`mysql.db`, and `information_schema.TABLE_PRIVILEGES` /
+`COLUMN_PRIVILEGES`. **Routine grants** are read from
+`mysql.procs_priv` — `information_schema.ROUTINE_PRIVILEGES` was
+dropped in MySQL 8.0 and is no longer populated. Role membership and
+effective privilege expansion via `mysql.role_edges`. MySQL 8.0's
 `SHOW GRANTS FOR user USING role` is noted for interactive effective-
 access verification.
 
@@ -120,10 +123,16 @@ Security (RLS) or policies — the script notes this and lists views with
 ### `sec_10_dangerous_objects.sql`
 
 `DEFINER`-privilege routines and views from `information_schema.ROUTINES`
-and `VIEWS`; UDFs from `mysql.func` (untrusted native code); scheduled
+and `VIEWS`. Routines whose definer holds `SUPER` are matched on both
+user **and** host so accounts that happen to share a name on a
+different host do not generate false positives. UDFs from `mysql.func`
+(columns `name, ret, dl, type` — the `User / Host / Aggregate`
+columns that existed in MySQL 5.x were removed in 8.0). Scheduled
 events from `information_schema.EVENTS`; DML triggers from
 `information_schema.TRIGGERS`; FEDERATED engine tables and external
-server definitions from `mysql.servers` — all privilege escalation paths.
+server definitions from `mysql.servers`. Routines executable by
+wildcard-host grantees are read from `mysql.procs_priv` (replacing
+the removed `ROUTINE_PRIVILEGES` view).
 
 ## Medium priority
 
@@ -162,11 +171,13 @@ or `pg_basebackup`-style slot concept.
 
 ### `sec_15_external_integrations.sql`
 
-FEDERATED engine tables from `information_schema.TABLES`; external server
-definitions from `mysql.servers` (connection strings **masked by
-default** — see credential masking note below); linked server users from
-`mysql.servers.Username`; `mysql.func` UDFs as shared-library integration
-points; replication subscriptions.
+FEDERATED engine tables from `information_schema.TABLES`; external
+server definitions from `mysql.servers` (connection strings **masked
+by default** — see credential masking note below); linked server
+users from `mysql.servers.Username`. UDFs from `mysql.func` using
+the current column set (`name, ret, dl, type`); the `Aggregate`
+column was removed in MySQL 8.0 and its meaning is now encoded in
+the `type` enum. Replication subscriptions.
 
 ## Low priority
 

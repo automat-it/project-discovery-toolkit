@@ -1,21 +1,24 @@
 # mssql audit scripts
 
-Read-only diagnostic scripts for mssql.
+**Status: not yet implemented.** The `perf/` and `sec/` subdirectories
+exist to keep layout symmetrical with `postgres/` and `mysql/`, but no
+audit scripts have been committed for SQL Server yet.
 
-## Categories
+The categories and priorities follow the same convention as the
+PostgreSQL and MySQL trees:
 
 | Category  | Purpose                                                   |
 |-----------|-----------------------------------------------------------|
-| `perf/` | Performance audit (top SQL, locks, indexes, vacuum, etc.) |
-| `sec/`  | Security audit (roles, privileges, auth, encryption, etc.)|
+| `perf/`   | Performance audit — top SQL, locks, indexes, statistics   |
+| `sec/`    | Security audit — logins, permissions, auth, encryption    |
 
-## Priority order
+| Priority   | Intent                                                    |
+|------------|-----------------------------------------------------------|
+| `critical` | First — highest signal-to-noise                           |
+| `high`     | After critical issues are resolved                        |
+| `medium`   | Tuning and stability                                      |
+| `low`      | Deeper investigation                                      |
 
-Run in this order for the most efficient audit:
-
-1. `critical/` — first, highest signal-to-noise
-2. `high/` — after critical issues are resolved
-3. `medium/` — tuning and stability
-4. `low/` — deeper investigation
-
-See `perf/README.md` and `sec/README.md` for the full script catalog.
+Contributions welcome. Target engine: Microsoft SQL Server 2019 and
+newer (including Azure SQL Database / Managed Instance). Use the
+existing PostgreSQL and MySQL scripts as a structural reference.

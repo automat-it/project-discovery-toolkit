@@ -104,9 +104,13 @@ query cache, and binary log settings. Non-default variables via
 ### `perf_06_index_audit.sql`
 
 Unused and never-used indexes from `sys.schema_unused_indexes` and
-`performance_schema.table_io_waits_summary_by_index_usage`; duplicate
-indexes (same table + same column set) from `information_schema.STATISTICS`;
-foreign keys without supporting indexes; redundant prefix indexes.
+`performance_schema.table_io_waits_summary_by_index_usage`. Duplicate
+indexes (same table + matching column at same position) from
+`information_schema.STATISTICS`. **Foreign-key coverage check**:
+aggregates the ordered FK column list and compares it against every
+candidate index's leading prefix, so composite FKs whose first column
+is indexed but whose full key is not are correctly flagged as
+unsupported.
 
 ### `perf_07_table_stats_health.sql`
 
@@ -134,12 +138,24 @@ counters in `events_statements_summary_by_digest`
 
 ### `perf_10_replication_and_backup_impact.sql`
 
-Replication lag and applier status from
-`performance_schema.replication_connection_status` and
-`replication_applier_status_by_worker`; binary log size and retention
-from `SHOW BINARY LOGS`; InnoDB redo log activity from `global_status`.
-Results differ between source and replica — some blocks are empty on one
-side; this is expected.
+Replication lag and applier status:
+- Connection state from `performance_schema.replication_connection_status`.
+- Applier (SQL thread) status from `replication_applier_status`, with
+  `LAST_ERROR_*` columns pulled via LEFT JOIN from
+  `replication_applier_status_by_coordinator` (single-threaded apply)
+  and `replication_applier_status_by_worker` (parallel replication) —
+  the base view does not expose them in MySQL 8.0+.
+- Per-worker progress from `replication_applier_status_by_worker`.
+- Connection configuration from `replication_connection_configuration`
+  using current column names (`AUTO_POSITION`, `SSL_CERTIFICATE`,
+  `CONNECTION_RETRY_INTERVAL` / `CONNECTION_RETRY_COUNT`).
+- Binary log size and retention from `SHOW BINARY LOGS`.
+- Connected replicas from `SHOW REPLICAS` (MySQL 8.0.22+; on earlier
+  minor versions use `SHOW SLAVE HOSTS`).
+- InnoDB redo log activity from `global_status`.
+
+Results differ between source and replica — some blocks are empty on
+one side; this is expected.
 
 ## Medium priority
 

@@ -103,7 +103,12 @@ ORDER BY heap_blks_read + idx_blks_read DESC
 LIMIT 30;
 
 -- ---------------------------------------------------------------------------
--- Per-statement I/O (top by physical reads from pg_stat_statements)
+-- Per-statement I/O (top by physical reads from pg_stat_statements).
+--
+-- Version note: in PostgreSQL 17 the blk_read_time / blk_write_time columns
+-- were split into shared_blk_read_time / shared_blk_write_time (and
+-- local_blk_read_time / local_blk_write_time). On PG 17+ replace the two
+-- columns below with their shared_* counterparts.
 -- ---------------------------------------------------------------------------
 SELECT
     shared_blks_read                                     AS disk_reads,

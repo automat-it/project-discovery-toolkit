@@ -5,6 +5,14 @@
 --          call frequency, CPU, and I/O. This is the single most useful
 --          query for finding the real cause of database load.
 -- Requires: pg_stat_statements extension loaded via shared_preload_libraries.
+--
+-- Version notes:
+--   * total_exec_time / mean_exec_time / stddev_exec_time / min_exec_time /
+--     max_exec_time and wal_records / wal_bytes are the PostgreSQL 13+
+--     column names. On PG 12 and earlier use total_time / mean_time / etc.
+--   * pg_stat_statements_info is PostgreSQL 14+; the query below will fail
+--     on PG 13 and earlier. Skip that query or wrap it in a
+--     server_version_num guard if you need PG 13 compatibility.
 -- Read-only.
 -- =============================================================================
 

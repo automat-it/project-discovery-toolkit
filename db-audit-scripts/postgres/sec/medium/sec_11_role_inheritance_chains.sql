@@ -92,21 +92,38 @@ WHERE NOT rolinherit
 ORDER BY rolname;
 
 -- ---------------------------------------------------------------------------
--- Cyclic role membership detection (should always return zero rows)
+-- Cyclic role membership detection (should always return zero rows).
+--
+-- We walk edges roleid -> member transitively from each starting node and
+-- detect a cycle when the walk reaches a role we have already visited.
+-- The previous version filtered out visited nodes BEFORE the membership
+-- check, which made the closing edge of the cycle unreachable and caused
+-- the query to always return zero rows even when real cycles existed.
+-- Now we attach a "closed" flag as soon as we traverse into an already-
+-- visited node, and surface only those rows.
 -- ---------------------------------------------------------------------------
 WITH RECURSIVE walk AS (
-    SELECT roleid, member, ARRAY[member] AS visited
-    FROM pg_auth_members
+    SELECT
+        am.roleid                                        AS start_role,
+        am.member                                        AS current_role,
+        ARRAY[am.roleid, am.member]                      AS visited,
+        false                                            AS closed
+    FROM pg_auth_members am
     UNION ALL
-    SELECT am.roleid, w.member, w.visited || am.member
+    SELECT
+        w.start_role,
+        am.member,
+        w.visited || am.member,
+        am.member = ANY(w.visited)                       AS closed
     FROM walk w
-    JOIN pg_auth_members am ON am.member = w.roleid
-    WHERE NOT am.roleid = ANY(w.visited)
+    JOIN pg_auth_members am ON am.roleid = w.current_role
+    WHERE NOT w.closed
       AND array_length(w.visited, 1) < 20
 )
 SELECT
-    pg_get_userbyid(member)                              AS member,
-    pg_get_userbyid(roleid)                              AS cycles_back_to,
-    array_length(visited, 1)                             AS cycle_length
+    pg_get_userbyid(start_role)                          AS start_role,
+    pg_get_userbyid(current_role)                        AS cycles_back_to,
+    array_length(visited, 1)                             AS cycle_length,
+    visited                                              AS path
 FROM walk
-WHERE member = roleid;
+WHERE closed;

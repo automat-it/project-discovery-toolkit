@@ -136,33 +136,78 @@ ORDER BY count_read DESC
 LIMIT 25;
 
 -- ---------------------------------------------------------------------------
--- Foreign keys without a supporting index
--- NOTE: MySQL (InnoDB) REQUIRES an index on the referencing column for
---       foreign keys and creates one automatically if none exists.
---       This query identifies FK columns and their indexes for review.
+-- Foreign keys and their supporting indexes.
+-- InnoDB requires an index on the referencing column(s) and creates one
+-- automatically if none exists, but for a COMPOSITE foreign key a manually
+-- chosen index may cover only the leading column — leaving the FK unsupported
+-- for cascades / lookups on the full column set. The previous query matched
+-- ONLY on SEQ_IN_INDEX = 1, so it always returned "supported" for any FK
+-- whose first column was indexed, hiding exactly the case that matters.
+--
+-- This version aggregates the FK column list (in KEY position order) and the
+-- leading prefix of every candidate index on the same table, then flags any
+-- FK whose full ordered column list is NOT a prefix of at least one index.
 -- ---------------------------------------------------------------------------
+WITH fk_cols AS (
+    SELECT
+        kcu.TABLE_SCHEMA,
+        kcu.TABLE_NAME,
+        kcu.CONSTRAINT_NAME,
+        kcu.REFERENCED_TABLE_SCHEMA,
+        kcu.REFERENCED_TABLE_NAME,
+        GROUP_CONCAT(kcu.COLUMN_NAME
+                     ORDER BY kcu.ORDINAL_POSITION
+                     SEPARATOR ',')                          AS fk_col_list,
+        GROUP_CONCAT(kcu.REFERENCED_COLUMN_NAME
+                     ORDER BY kcu.ORDINAL_POSITION
+                     SEPARATOR ',')                          AS ref_col_list,
+        MAX(kcu.ORDINAL_POSITION)                            AS fk_col_count
+    FROM information_schema.KEY_COLUMN_USAGE kcu
+    WHERE kcu.REFERENCED_TABLE_NAME IS NOT NULL
+      AND kcu.TABLE_SCHEMA NOT IN ('mysql', 'information_schema',
+                                    'performance_schema', 'sys')
+    GROUP BY kcu.TABLE_SCHEMA, kcu.TABLE_NAME, kcu.CONSTRAINT_NAME,
+             kcu.REFERENCED_TABLE_SCHEMA, kcu.REFERENCED_TABLE_NAME
+),
+idx_prefixes AS (
+    -- For every index, materialize the leading-column prefix (in order).
+    -- We only need prefixes up to the largest FK width we'll check against.
+    SELECT
+        s.TABLE_SCHEMA,
+        s.TABLE_NAME,
+        s.INDEX_NAME,
+        GROUP_CONCAT(s.COLUMN_NAME
+                     ORDER BY s.SEQ_IN_INDEX
+                     SEPARATOR ',')                          AS index_col_list
+    FROM information_schema.STATISTICS s
+    WHERE s.TABLE_SCHEMA NOT IN ('mysql', 'information_schema',
+                                  'performance_schema', 'sys')
+    GROUP BY s.TABLE_SCHEMA, s.TABLE_NAME, s.INDEX_NAME
+)
 SELECT
-    kcu.TABLE_SCHEMA                                        AS schema_name,
-    kcu.TABLE_NAME,
-    kcu.CONSTRAINT_NAME                                     AS fk_name,
-    kcu.COLUMN_NAME,
-    kcu.REFERENCED_TABLE_SCHEMA,
-    kcu.REFERENCED_TABLE_NAME,
-    kcu.REFERENCED_COLUMN_NAME,
-    CASE WHEN s.INDEX_NAME IS NOT NULL
-         THEN s.INDEX_NAME
-         ELSE 'NO INDEX FOUND (unexpected for InnoDB)'
-    END                                                     AS supporting_index
-FROM information_schema.KEY_COLUMN_USAGE kcu
-LEFT JOIN information_schema.STATISTICS s
-  ON  s.TABLE_SCHEMA = kcu.TABLE_SCHEMA
-  AND s.TABLE_NAME   = kcu.TABLE_NAME
-  AND s.COLUMN_NAME  = kcu.COLUMN_NAME
-  AND s.SEQ_IN_INDEX = 1
-WHERE kcu.REFERENCED_TABLE_NAME IS NOT NULL
-  AND kcu.TABLE_SCHEMA NOT IN ('mysql', 'information_schema',
-                                'performance_schema', 'sys')
-ORDER BY kcu.TABLE_SCHEMA, kcu.TABLE_NAME, kcu.CONSTRAINT_NAME;
+    f.TABLE_SCHEMA                                           AS schema_name,
+    f.TABLE_NAME,
+    f.CONSTRAINT_NAME                                        AS fk_name,
+    f.fk_col_list                                            AS fk_columns,
+    f.REFERENCED_TABLE_SCHEMA,
+    f.REFERENCED_TABLE_NAME,
+    f.ref_col_list                                           AS referenced_columns,
+    COALESCE(
+        (
+            SELECT GROUP_CONCAT(ip.INDEX_NAME SEPARATOR ', ')
+            FROM idx_prefixes ip
+            WHERE ip.TABLE_SCHEMA = f.TABLE_SCHEMA
+              AND ip.TABLE_NAME   = f.TABLE_NAME
+              -- Require the index's leading column list to START WITH the
+              -- FK column list in order. Appending a comma avoids matching
+              -- "col1" when FK is "col1_extra".
+              AND (ip.index_col_list = f.fk_col_list
+                OR ip.index_col_list LIKE CONCAT(f.fk_col_list, ',%'))
+        ),
+        'NO FULL COVERING INDEX'
+    )                                                         AS supporting_indexes
+FROM fk_cols f
+ORDER BY f.TABLE_SCHEMA, f.TABLE_NAME, f.CONSTRAINT_NAME;
 
 -- ---------------------------------------------------------------------------
 -- Index usage statistics (top by reads — most used indexes)

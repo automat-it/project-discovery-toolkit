@@ -80,8 +80,14 @@ WHERE a.backend_type = 'client backend'
 ORDER BY a.client_addr;
 
 -- ---------------------------------------------------------------------------
--- pg_hba.conf entries — look for 'host' (no SSL required) vs 'hostssl'
+-- pg_hba.conf entries — look for 'host' (no SSL required) vs 'hostssl'.
+-- pg_hba_file_rules is restricted to superusers / pg_read_server_files on
+-- most deployments; guard so the script does not error on RDS / least-privilege
+-- audit roles.
 -- ---------------------------------------------------------------------------
+SELECT has_table_privilege(current_user, 'pg_hba_file_rules', 'SELECT') AS can_read_pg_hba
+\gset
+\if :can_read_pg_hba
 SELECT
     line_number,
     type,
@@ -100,6 +106,10 @@ SELECT
 FROM pg_hba_file_rules
 WHERE type IN ('host', 'hostssl', 'hostnossl')
 ORDER BY line_number;
+\else
+SELECT 'Skipped: pg_hba_file_rules is not readable by ' || current_user
+       || ' — re-run as superuser / pg_read_server_files to inspect HBA SSL rules.' AS note;
+\endif
 
 -- ---------------------------------------------------------------------------
 -- pgcrypto extension (column-level encryption helper)

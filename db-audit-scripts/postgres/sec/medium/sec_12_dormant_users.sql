@@ -46,8 +46,15 @@ ORDER BY rolvaliduntil;
 
 -- ---------------------------------------------------------------------------
 -- Login accounts with no password and no IAM-style auth indicator
--- (cannot actually authenticate via password — possibly dormant or external)
+-- (cannot actually authenticate via password — possibly dormant or external).
+--
+-- pg_authid.rolpassword requires superuser / rds_superuser access. Guard the
+-- lookup so a non-privileged audit role gets a clean skip instead of a hard
+-- "permission denied for table pg_authid" error that aborts the script.
 -- ---------------------------------------------------------------------------
+SELECT has_table_privilege(current_user, 'pg_authid', 'SELECT') AS can_read_pg_authid
+\gset
+\if :can_read_pg_authid
 SELECT
     r.rolname                                            AS user,
     r.rolsuper,
@@ -65,6 +72,10 @@ WHERE r.rolcanlogin
         AND g.rolname IN ('rds_iam', 'azure_ad_admin')
   )
 ORDER BY r.rolname;
+\else
+SELECT 'Skipped: pg_authid is not readable by ' || current_user
+       || ' — re-run as superuser / rds_superuser to inspect passwordless roles.' AS note;
+\endif
 
 -- ---------------------------------------------------------------------------
 -- Roles never granted any membership (orphans)

@@ -25,7 +25,11 @@ SELECT
     COUNT(*)                                                AS table_count
 FROM information_schema.TABLES
 WHERE TABLE_TYPE = 'BASE TABLE'
-  AND TABLE_SCHEMA NOT IN ('information_schema', 'performance_schema', 'sys')
+  -- Every other block in this script excludes the `mysql` schema as well;
+  -- keeping it in the schema-level roll-up inflates totals with system
+  -- tables and is inconsistent with downstream numbers.
+  AND TABLE_SCHEMA NOT IN ('mysql', 'information_schema',
+                            'performance_schema', 'sys')
 GROUP BY TABLE_SCHEMA
 ORDER BY SUM(DATA_LENGTH + INDEX_LENGTH) DESC;
 

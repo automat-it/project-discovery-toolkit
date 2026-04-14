@@ -7,7 +7,15 @@
 -- =============================================================================
 
 -- ---------------------------------------------------------------------------
--- Background writer / checkpointer cumulative stats
+-- Background writer / checkpointer cumulative stats.
+--
+-- Version note: PostgreSQL 17 split the bgwriter / checkpointer counters.
+-- Checkpoint columns (checkpoints_timed, checkpoints_req, checkpoint_write_time,
+-- checkpoint_sync_time, buffers_checkpoint, buffers_backend,
+-- buffers_backend_fsync) moved to the new pg_stat_checkpointer view and were
+-- removed from pg_stat_bgwriter. On PG 17+ run this block against
+-- pg_stat_checkpointer (for checkpoint metrics) and keep pg_stat_bgwriter
+-- only for buffers_clean / maxwritten_clean / buffers_alloc / stats_reset.
 -- ---------------------------------------------------------------------------
 SELECT
     checkpoints_timed                                    AS scheduled_checkpoints,

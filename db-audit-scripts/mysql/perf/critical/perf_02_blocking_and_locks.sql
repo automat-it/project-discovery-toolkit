@@ -21,7 +21,10 @@ SELECT
     r.PROCESSLIST_USER                                      AS blocked_user,
     r.PROCESSLIST_HOST                                      AS blocked_host,
     r.PROCESSLIST_DB                                        AS blocked_db,
-    ROUND(dlw.REQUESTING_ENGINE_LOCK_ID,0)                 AS blocked_lock_id,
+    -- REQUESTING_ENGINE_LOCK_ID is VARCHAR (e.g. "140013:1:3:2"); wrapping
+    -- it in ROUND() silently truncated the value to the leading digits and
+    -- lost the full lock-space coordinates. Pass the string through as-is.
+    dlw.REQUESTING_ENGINE_LOCK_ID                          AS blocked_lock_id,
     b.THREAD_ID                                             AS blocking_thread_id,
     b.PROCESSLIST_ID                                        AS blocking_pid,
     b.PROCESSLIST_USER                                      AS blocking_user,

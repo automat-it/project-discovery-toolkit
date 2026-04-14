@@ -22,8 +22,18 @@ WHERE name IN (
 ORDER BY name;
 
 -- ---------------------------------------------------------------------------
--- pg_hba.conf — all host-based rules with risk classification
+-- pg_hba.conf — all host-based rules with risk classification.
+-- pg_hba_file_rules is restricted to elevated roles on most deployments;
+-- guard so a limited-privilege audit user gets a clear skip message instead
+-- of a permission-denied error that aborts the rest of the file.
+--
+-- Also switched the CIDR comparison to numeric extraction so any /0..//15
+-- (class-A-ish and broader) lands in the "broad CIDR" bucket, regardless of
+-- the number of digits in the netmask.
 -- ---------------------------------------------------------------------------
+SELECT has_table_privilege(current_user, 'pg_hba_file_rules', 'SELECT') AS can_read_pg_hba
+\gset
+\if :can_read_pg_hba
 SELECT
     line_number,
     type,
@@ -34,8 +44,7 @@ SELECT
     auth_method,
     CASE
         WHEN address IN ('0.0.0.0/0', '::/0')      THEN 'CRITICAL: open to internet'
-        WHEN address LIKE '0.0.0.0/_'              THEN 'HIGH: very broad'
-        WHEN address LIKE '0.0.0.0/__'
+        WHEN address ~ '^0\.0\.0\.0/\d+$'
              AND substring(address from '/(\d+)')::int < 16
                                                    THEN 'HIGH: broad CIDR'
         WHEN type IN ('local')                     THEN 'LOW: unix socket'
@@ -45,6 +54,10 @@ SELECT
 FROM pg_hba_file_rules
 WHERE type IN ('host', 'hostssl', 'hostnossl', 'local')
 ORDER BY line_number;
+\else
+SELECT 'Skipped: pg_hba_file_rules is not readable by ' || current_user
+       || ' — re-run as superuser / pg_read_server_files to inspect HBA rules.' AS note;
+\endif
 
 -- ---------------------------------------------------------------------------
 -- Distinct client networks currently connected
@@ -79,8 +92,13 @@ WHERE backend_type = 'client backend'
 ORDER BY client_addr;
 
 -- ---------------------------------------------------------------------------
--- pg_ident.conf mappings (user name mapping for external auth)
+-- pg_ident.conf mappings (user name mapping for external auth).
+-- Same privilege model as pg_hba_file_rules — guard access so non-privileged
+-- runs skip cleanly instead of erroring.
 -- ---------------------------------------------------------------------------
+SELECT has_table_privilege(current_user, 'pg_ident_file_mappings', 'SELECT') AS can_read_pg_ident
+\gset
+\if :can_read_pg_ident
 SELECT
     line_number,
     map_name,
@@ -89,3 +107,7 @@ SELECT
     error
 FROM pg_ident_file_mappings
 ORDER BY line_number;
+\else
+SELECT 'Skipped: pg_ident_file_mappings is not readable by ' || current_user
+       || ' — re-run as superuser / pg_read_server_files to inspect ident mappings.' AS note;
+\endif

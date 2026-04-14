@@ -14,8 +14,12 @@ FROM pg_settings
 WHERE name = 'password_encryption';
 
 -- ---------------------------------------------------------------------------
--- Accounts still using MD5 password hashes
+-- Accounts still using MD5 password hashes.
+-- pg_authid requires elevated privileges; skip cleanly when not available.
 -- ---------------------------------------------------------------------------
+SELECT has_table_privilege(current_user, 'pg_authid', 'SELECT') AS can_read_pg_authid
+\gset
+\if :can_read_pg_authid
 SELECT
     rolname                                              AS role,
     r.rolcanlogin,
@@ -25,10 +29,18 @@ LEFT JOIN pg_authid a USING (rolname)
 WHERE r.rolcanlogin
   AND a.rolpassword LIKE 'md5%'
 ORDER BY rolname;
+\else
+SELECT 'Skipped: pg_authid is not readable by ' || current_user
+       || ' — re-run as superuser / rds_superuser to detect MD5 hashes.' AS note;
+\endif
 
 -- ---------------------------------------------------------------------------
--- pg_hba.conf entries using deprecated auth methods
+-- pg_hba.conf entries using deprecated auth methods.
+-- pg_hba_file_rules is restricted to elevated roles; guard access.
 -- ---------------------------------------------------------------------------
+SELECT has_table_privilege(current_user, 'pg_hba_file_rules', 'SELECT') AS can_read_pg_hba
+\gset
+\if :can_read_pg_hba
 SELECT
     line_number,
     type,
@@ -62,6 +74,10 @@ WHERE type = 'host'
   AND address NOT IN ('127.0.0.1/32', '::1/128')
   AND (SELECT setting FROM pg_settings WHERE name = 'ssl') = 'on'
 ORDER BY line_number;
+\else
+SELECT 'Skipped: pg_hba_file_rules is not readable by ' || current_user
+       || ' — re-run as superuser / pg_read_server_files to inspect HBA auth methods.' AS note;
+\endif
 
 -- ---------------------------------------------------------------------------
 -- Untrusted procedural languages installed (deprecated in favor of trusted variants)

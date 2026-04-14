@@ -99,7 +99,8 @@ SELECT
     SUBSTRING_INDEX(HOST, ':', 1)                           AS client_host,
     COUNT(*)                                                AS sessions,
     GROUP_CONCAT(DISTINCT USER ORDER BY USER SEPARATOR ', ') AS users,
-    GROUP_CONCAT(DISTINCT DB ORDER BY DB SEPARATOR ', ')    AS databases
+    -- `databases` is a reserved keyword in MySQL; quote the alias.
+    GROUP_CONCAT(DISTINCT DB ORDER BY DB SEPARATOR ', ')    AS `databases`
 FROM information_schema.PROCESSLIST
 GROUP BY SUBSTRING_INDEX(HOST, ':', 1)
 ORDER BY sessions DESC;

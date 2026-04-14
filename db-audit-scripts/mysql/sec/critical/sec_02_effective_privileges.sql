@@ -76,17 +76,22 @@ ORDER BY GRANTEE, TABLE_SCHEMA, TABLE_NAME, COLUMN_NAME, PRIVILEGE_TYPE;
 -- ---------------------------------------------------------------------------
 -- Routine-level privileges (GRANT EXECUTE ON PROCEDURE/FUNCTION)
 -- ---------------------------------------------------------------------------
+-- NOTE: information_schema.ROUTINE_PRIVILEGES was dropped in MySQL 8.0 as
+-- part of the data-dictionary migration and is no longer populated on
+-- current MySQL / Aurora MySQL. Query mysql.procs_priv directly instead;
+-- it is the authoritative source for routine grants.
 SELECT
-    GRANTEE,
-    ROUTINE_SCHEMA,
-    ROUTINE_NAME,
-    ROUTINE_TYPE,
-    PRIVILEGE_TYPE,
-    IS_GRANTABLE
-FROM information_schema.ROUTINE_PRIVILEGES
-WHERE ROUTINE_SCHEMA NOT IN ('mysql', 'information_schema',
-                              'performance_schema', 'sys')
-ORDER BY GRANTEE, ROUTINE_SCHEMA, ROUTINE_NAME, PRIVILEGE_TYPE;
+    CONCAT('''', pp.User, '''@''', pp.Host, '''')            AS GRANTEE,
+    pp.Db                                                    AS ROUTINE_SCHEMA,
+    pp.Routine_name                                          AS ROUTINE_NAME,
+    pp.Routine_type                                          AS ROUTINE_TYPE,
+    pp.Proc_priv                                             AS PRIVILEGE_TYPES,
+    pp.Grantor                                               AS GRANTOR,
+    pp.Timestamp                                             AS GRANTED_AT
+FROM mysql.procs_priv pp
+WHERE pp.Db NOT IN ('mysql', 'information_schema',
+                    'performance_schema', 'sys')
+ORDER BY pp.User, pp.Host, pp.Db, pp.Routine_name;
 
 -- ---------------------------------------------------------------------------
 -- Object ownership (tables, views, routines)
@@ -185,7 +190,7 @@ SELECT
      WHERE TABLE_SCHEMA NOT IN ('mysql', 'information_schema',
                                  'performance_schema', 'sys'))
                                                             AS column_grants,
-    (SELECT COUNT(*) FROM information_schema.ROUTINE_PRIVILEGES
-     WHERE ROUTINE_SCHEMA NOT IN ('mysql', 'information_schema',
-                                   'performance_schema', 'sys'))
+    (SELECT COUNT(*) FROM mysql.procs_priv
+     WHERE Db NOT IN ('mysql', 'information_schema',
+                      'performance_schema', 'sys'))
                                                             AS routine_grants;

@@ -25,8 +25,10 @@ SELECT
     index_name,
     -- NOTE: MySQL does not store index sizes in information_schema directly;
     --       see sys.schema_index_statistics for size approximations.
-    count_read                                              AS reads,
-    count_write                                             AS writes,
+    -- `reads` and `writes` are reserved in MySQL (READS SQL DATA clause
+    -- for routines); quote the aliases so the statement parses.
+    count_read                                              AS `reads`,
+    count_write                                             AS `writes`,
     count_fetch                                             AS fetches
 FROM performance_schema.table_io_waits_summary_by_index_usage
 WHERE index_name IS NOT NULL
@@ -217,8 +219,8 @@ SELECT
     object_name                                             AS table_name,
     index_name,
     count_star                                              AS total_io,
-    count_read                                              AS reads,
-    count_write                                             AS writes,
+    count_read                                              AS `reads`,
+    count_write                                             AS `writes`,
     count_fetch                                             AS fetches,
     ROUND(sum_timer_wait / 1e12, 2)                         AS total_wait_ms
 FROM performance_schema.table_io_waits_summary_by_index_usage

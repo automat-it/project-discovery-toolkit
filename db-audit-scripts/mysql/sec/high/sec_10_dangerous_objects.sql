@@ -69,15 +69,18 @@ ORDER BY r.ROUTINE_SCHEMA, r.ROUTINE_NAME;
 -- These can execute arbitrary OS code — the highest privilege escalation risk.
 -- (Analogous to PostgreSQL plperlu / plpythonu / C language functions)
 -- ---------------------------------------------------------------------------
+-- NOTE: in MySQL 8.0+ mysql.func has only (name, ret, dl, type). The
+-- User / Host / Aggregate columns existed on MySQL 5.x and were removed
+-- as part of the data-dictionary rework, so the previous SELECT failed
+-- with "Unknown column 'User'". UDFs in MySQL are installed globally
+-- (not per-user), so User/Host were never meaningful here.
 SELECT
-    User,
-    Host,
+    name                                                    AS udf_name,
     dl                                                      AS library,
-    Name                                                    AS udf_name,
-    Type                                                    AS udf_type,
-    Aggregate
+    ret                                                     AS return_type,
+    type                                                    AS udf_type
 FROM mysql.func
-ORDER BY Name;
+ORDER BY name;
 
 -- ---------------------------------------------------------------------------
 -- Installed plugins (can affect server behavior at a deep level)
@@ -193,20 +196,25 @@ ORDER BY PLUGIN_NAME;
 -- Routines executable by any user (GRANT EXECUTE TO '%'@'%' or similar)
 -- These allow privilege escalation via SECURITY DEFINER.
 -- ---------------------------------------------------------------------------
+-- NOTE: information_schema.ROUTINE_PRIVILEGES was dropped in MySQL 8.0
+-- and is not populated on current MySQL / Aurora. Read routine grants
+-- from mysql.procs_priv — the authoritative source in the data dictionary.
+-- Flag grants whose host is the global wildcard '%' and whose routine is
+-- SECURITY DEFINER (same escalation surface we were probing before).
 SELECT
-    rp.GRANTEE,
-    rp.ROUTINE_SCHEMA,
-    rp.ROUTINE_NAME,
-    rp.ROUTINE_TYPE,
-    rp.PRIVILEGE_TYPE,
-    rp.IS_GRANTABLE
-FROM information_schema.ROUTINE_PRIVILEGES rp
+    CONCAT('''', pp.User, '''@''', pp.Host, '''')           AS GRANTEE,
+    pp.Db                                                   AS ROUTINE_SCHEMA,
+    pp.Routine_name                                         AS ROUTINE_NAME,
+    pp.Routine_type                                         AS ROUTINE_TYPE,
+    pp.Proc_priv                                            AS PRIVILEGE_TYPES,
+    r.SECURITY_TYPE
+FROM mysql.procs_priv pp
 JOIN information_schema.ROUTINES r
-  ON  r.ROUTINE_SCHEMA = rp.ROUTINE_SCHEMA
-  AND r.ROUTINE_NAME   = rp.ROUTINE_NAME
-WHERE rp.ROUTINE_SCHEMA NOT IN ('mysql', 'information_schema',
-                                 'performance_schema', 'sys')
+  ON  r.ROUTINE_SCHEMA = pp.Db
+  AND r.ROUTINE_NAME   = pp.Routine_name
+  AND r.ROUTINE_TYPE   = pp.Routine_type
+WHERE pp.Db NOT IN ('mysql', 'information_schema',
+                    'performance_schema', 'sys')
   AND r.SECURITY_TYPE = 'DEFINER'
-  AND (rp.GRANTEE LIKE "'%'@%"
-    OR rp.GRANTEE LIKE "''@%")
-ORDER BY rp.ROUTINE_SCHEMA, rp.ROUTINE_NAME;
+  AND (pp.Host = '%' OR pp.User = '')
+ORDER BY pp.Db, pp.Routine_name;

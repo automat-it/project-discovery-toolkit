@@ -101,13 +101,16 @@ ORDER BY Server_name;
 -- ---------------------------------------------------------------------------
 -- User-defined functions (UDFs) — can call external libraries/services
 -- ---------------------------------------------------------------------------
+-- NOTE: mysql.func lost the `aggregate` column in MySQL 8.0 (it is now
+-- encoded in the `type` enum). Expose `ret` instead so the query works on
+-- both 5.x and 8.0+ without erroring with "Unknown column 'Aggregate'".
 SELECT
-    Name                                                    AS udf_name,
+    name                                                    AS udf_name,
     dl                                                      AS library,
-    Type                                                    AS udf_type,
-    Aggregate
+    ret                                                     AS return_type,
+    type                                                    AS udf_type
 FROM mysql.func
-ORDER BY Name;
+ORDER BY name;
 
 -- ---------------------------------------------------------------------------
 -- Spider engine tables (distributed MySQL — connects to shards)

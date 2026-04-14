@@ -102,10 +102,15 @@ ORDER BY rolname;
 -- Now we attach a "closed" flag as soon as we traverse into an already-
 -- visited node, and surface only those rows.
 -- ---------------------------------------------------------------------------
+-- NOTE: do NOT use `current_role` as a column alias. It is a reserved
+-- SQL keyword that resolves to the built-in function returning the current
+-- session user (type name), so any later reference such as
+-- `pg_get_userbyid(current_role)` is bound to the function, not the column,
+-- and the query fails with "function pg_get_userbyid(name) does not exist".
 WITH RECURSIVE walk AS (
     SELECT
         am.roleid                                        AS start_role,
-        am.member                                        AS current_role,
+        am.member                                        AS at_role,
         ARRAY[am.roleid, am.member]                      AS visited,
         false                                            AS closed
     FROM pg_auth_members am
@@ -116,13 +121,13 @@ WITH RECURSIVE walk AS (
         w.visited || am.member,
         am.member = ANY(w.visited)                       AS closed
     FROM walk w
-    JOIN pg_auth_members am ON am.roleid = w.current_role
+    JOIN pg_auth_members am ON am.roleid = w.at_role
     WHERE NOT w.closed
       AND array_length(w.visited, 1) < 20
 )
 SELECT
     pg_get_userbyid(start_role)                          AS start_role,
-    pg_get_userbyid(current_role)                        AS cycles_back_to,
+    pg_get_userbyid(at_role)                             AS cycles_back_to,
     array_length(visited, 1)                             AS cycle_length,
     visited                                              AS path
 FROM walk

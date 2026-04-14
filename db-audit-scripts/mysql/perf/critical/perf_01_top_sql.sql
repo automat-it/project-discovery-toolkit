@@ -62,7 +62,9 @@ SELECT
     ROUND(MAX_TIMER_WAIT / 1e9, 2)                          AS max_ms,
     COUNT_STAR                                               AS calls,
     ROUND(SUM_TIMER_WAIT / 1e9, 2)                          AS total_ms,
-    SUM_ROWS_SENT                                            AS rows,
+    -- `rows` is a reserved keyword in MySQL 8.0+ (window-function clause),
+    -- so the alias must be quoted with backticks to parse.
+    SUM_ROWS_SENT                                            AS `rows`,
     DIGEST                                                   AS queryid,
     LEFT(DIGEST_TEXT, 300)                                   AS query
 FROM performance_schema.events_statements_summary_by_digest
@@ -78,7 +80,7 @@ SELECT
     COUNT_STAR                                               AS calls,
     ROUND(SUM_TIMER_WAIT / 1e9, 2)                          AS total_ms,
     ROUND(AVG_TIMER_WAIT / 1e9, 2)                          AS mean_ms,
-    SUM_ROWS_SENT                                            AS rows,
+    SUM_ROWS_SENT                                            AS `rows`,
     ROUND(SUM_ROWS_SENT / NULLIF(COUNT_STAR, 0), 2)         AS rows_per_call,
     DIGEST                                                   AS queryid,
     LEFT(DIGEST_TEXT, 300)                                   AS query

@@ -57,18 +57,32 @@ FROM performance_schema.replication_connection_status
 ORDER BY CHANNEL_NAME;
 
 -- ---------------------------------------------------------------------------
--- REPLICA: Applier (SQL thread) status per channel
+-- REPLICA: Applier (SQL thread) status per channel.
+--
+-- NOTE: performance_schema.replication_applier_status only exposes
+-- CHANNEL_NAME, SERVICE_STATE, REMAINING_DELAY, COUNT_TRANSACTIONS_RETRIES.
+-- LAST_ERROR_* columns live on replication_applier_status_by_coordinator
+-- (multithreaded apply) and replication_applier_status_by_worker; we pull
+-- the latest non-zero error from whichever view applies to this topology.
 -- ---------------------------------------------------------------------------
 SELECT
-    CHANNEL_NAME,
-    SERVICE_STATE                                           AS sql_thread_state,
-    REMAINING_DELAY                                         AS delay_remaining_sec,
-    COUNT_TRANSACTIONS_RETRIES,
-    LAST_ERROR_NUMBER,
-    LAST_ERROR_MESSAGE,
-    LAST_ERROR_TIMESTAMP
-FROM performance_schema.replication_applier_status
-ORDER BY CHANNEL_NAME;
+    s.CHANNEL_NAME,
+    s.SERVICE_STATE                                         AS sql_thread_state,
+    s.REMAINING_DELAY                                       AS delay_remaining_sec,
+    s.COUNT_TRANSACTIONS_RETRIES,
+    COALESCE(c.LAST_ERROR_NUMBER,
+             w.LAST_ERROR_NUMBER)                           AS last_error_number,
+    COALESCE(c.LAST_ERROR_MESSAGE,
+             w.LAST_ERROR_MESSAGE)                          AS last_error_message,
+    COALESCE(c.LAST_ERROR_TIMESTAMP,
+             w.LAST_ERROR_TIMESTAMP)                        AS last_error_timestamp
+FROM performance_schema.replication_applier_status s
+LEFT JOIN performance_schema.replication_applier_status_by_coordinator c
+  ON c.CHANNEL_NAME = s.CHANNEL_NAME
+LEFT JOIN performance_schema.replication_applier_status_by_worker w
+  ON  w.CHANNEL_NAME     = s.CHANNEL_NAME
+  AND w.LAST_ERROR_NUMBER <> 0
+ORDER BY s.CHANNEL_NAME;
 
 -- ---------------------------------------------------------------------------
 -- REPLICA: Per-worker applier status (parallel replication)
@@ -93,20 +107,26 @@ FROM performance_schema.replication_applier_status_by_worker
 ORDER BY CHANNEL_NAME, WORKER_ID;
 
 -- ---------------------------------------------------------------------------
--- REPLICA: Connection configuration (source host, port, SSL settings)
+-- REPLICA: Connection configuration (source host, port, SSL settings).
+--
+-- NOTE: the original column list was borrowed from an older MySQL release.
+-- In MySQL 8.0+ replication_connection_configuration does not expose
+-- USING_GTID, SSL_CERT_FILE, or CONNECT_RETRY. The current names are
+-- AUTO_POSITION (0/1 — replaces USING_GTID for status purposes),
+-- SSL_CERTIFICATE, and CONNECTION_RETRY_INTERVAL / CONNECTION_RETRY_COUNT.
 -- ---------------------------------------------------------------------------
 SELECT
     CHANNEL_NAME,
     HOST                                                    AS source_host,
     PORT                                                    AS source_port,
     USER                                                    AS replication_user,
-    USING_GTID,
+    AUTO_POSITION,
     GTID_ONLY,
     SSL_ALLOWED,
     SSL_CA_FILE,
-    SSL_CERT_FILE,
-    AUTO_POSITION,
-    CONNECT_RETRY,
+    SSL_CERTIFICATE                                         AS ssl_cert_file,
+    CONNECTION_RETRY_INTERVAL                               AS connect_retry_interval,
+    CONNECTION_RETRY_COUNT                                  AS connect_retry_count,
     HEARTBEAT_INTERVAL
 FROM performance_schema.replication_connection_configuration
 ORDER BY CHANNEL_NAME;

@@ -1,6 +1,12 @@
 #!/bin/bash
 
 # ==============================================================================
+# Safety: fail fast, surface errors in pipelines, catch unset variables
+# ==============================================================================
+set -euo pipefail
+trap 'echo "[ERROR] $0: failed at line $LINENO" >&2' ERR
+
+# ==============================================================================
 # Default Variables & Usage Function
 # ==============================================================================
 DB_HOST="localhost"
@@ -40,6 +46,33 @@ fi
 # Prompt securely for the password
 read -sp "Enter MySQL Password for $DB_USER@$DB_HOST: " DB_PASS
 echo -e "\n"
+
+# Pass the password via MYSQL_PWD rather than the -p flag.
+# The -p"$DB_PASS" form is visible in `ps`, /proc/<pid>/cmdline, and
+# accounting logs on shared hosts; MYSQL_PWD is only exposed to the
+# spawned mysql process and its children.
+export MYSQL_PWD="$DB_PASS"
+
+# Helper: run mysql with consistent flags. All subsequent calls MUST go
+# through this function so we don't accidentally reintroduce -p on the
+# command line.
+run_mysql() {
+    mysql --protocol=TCP \
+          -u "$DB_USER" \
+          -h "$DB_HOST" \
+          -P "$DB_PORT" \
+          "$DB_NAME" \
+          -N -B \
+          -e "$1"
+}
+
+# Verify credentials / connectivity up-front so we fail loudly instead of
+# silently producing an empty CSV when the connection is wrong.
+if ! run_mysql "SELECT 1" >/dev/null 2>&1; then
+    echo "[ERROR] Could not connect to MySQL as '$DB_USER'@'$DB_HOST:$DB_PORT'." >&2
+    echo "        Check host, port, user, password, and network reachability." >&2
+    exit 2
+fi
 
 # Create the dynamic timestamped CSV filename (Timestamp at the end)
 TIMESTAMP=$(date +"%Y%m%d_%H%M%S")
@@ -148,13 +181,15 @@ FROM report
 GROUP BY status
 ORDER BY CASE status WHEN 'RISK' THEN 1 WHEN 'UNKNOWN' THEN 2 WHEN 'REVIEW' THEN 3 ELSE 4 END;"
 
-# Execute query and format output
-mysql -u "$DB_USER" -p"$DB_PASS" -h "$DB_HOST" -P "$DB_PORT" "$DB_NAME" -N -B -e "$SUMMARY_QUERY" | while IFS=$'\t' read -r status count pct; do
+# Execute query and format output.
+# Note: the `while read` loop runs in a subshell under pipe; with
+# `set -o pipefail` a failure of `run_mysql` will propagate.
+run_mysql "$SUMMARY_QUERY" | while IFS=$'\t' read -r status count pct; do
     printf " %-7s | %12s | %10s\n" "$status" "$count" "$pct"
 done
 
 # Calculate total rows dynamically
-ROW_COUNT=$(mysql -u "$DB_USER" -p"$DB_PASS" -h "$DB_HOST" -P "$DB_PORT" "$DB_NAME" -N -B -e "${BASE_CTE} SELECT COUNT(DISTINCT status) FROM report;")
+ROW_COUNT=$(run_mysql "${BASE_CTE} SELECT COUNT(DISTINCT status) FROM report;")
 echo "($ROW_COUNT rows)"
 echo ""
 
@@ -195,8 +230,15 @@ SELECT CONCAT_WS(',',
 )
 FROM ordered_report;"
 
-# Save the CSV to file
-mysql -u "$DB_USER" -p"$DB_PASS" -h "$DB_HOST" -P "$DB_PORT" "$DB_NAME" -N -B -e "$CSV_QUERY" > "$CSV_FILE"
+# Save the CSV to file. Write to a temp file first and rename on success
+# so a failing query doesn't leave behind a truncated/empty report.
+CSV_TMP="${CSV_FILE}.partial"
+if ! run_mysql "$CSV_QUERY" > "$CSV_TMP"; then
+    rm -f "$CSV_TMP"
+    echo "[ERROR] CSV query failed; no report written." >&2
+    exit 3
+fi
+mv "$CSV_TMP" "$CSV_FILE"
 
 echo "================================================================================"
 echo "Detailed CSV report generated locally as: $CSV_FILE"

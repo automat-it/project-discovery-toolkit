@@ -123,7 +123,7 @@ SELECT
     WHEN r.base_type IN (
       'money','interval','xml','json','jsonb','hstore','tsvector','tsquery',
       'point','line','lseg','box','path','polygon','circle',
-      'int4range','int8range','numrange','strrange','tstzrange'
+      'int4range','int8range','numrange','tsrange','tstzrange','daterange'
     ) THEN 'REVIEW'
     WHEN r.is_array OR r.is_composite OR r.is_range THEN 'REVIEW'
     WHEN r.is_domain OR r.is_enum THEN 'REVIEW'

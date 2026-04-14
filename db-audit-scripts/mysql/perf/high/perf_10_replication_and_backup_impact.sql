@@ -29,6 +29,8 @@ SHOW MASTER STATUS;
 
 -- ---------------------------------------------------------------------------
 -- PRIMARY: Connected replicas
+-- NOTE: SHOW REPLICAS requires MySQL 8.0.22+. On 5.7 and 8.0.0–8.0.21 use
+--       SHOW SLAVE HOSTS instead (same output shape, deprecated alias).
 -- ---------------------------------------------------------------------------
 SHOW REPLICAS;
 

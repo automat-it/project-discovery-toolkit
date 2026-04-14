@@ -95,11 +95,11 @@ table_estimates AS (
                     then ma else datahdr % ma end)
             ) / (bs - 20::float)) * bs                   AS expected_bytes
     FROM data_headers
-    JOIN pg_class
-        ON tablename = relname
     JOIN pg_namespace
-        ON relnamespace = pg_namespace.oid
-       AND schemaname  = nspname
+        ON schemaname = pg_namespace.nspname
+    JOIN pg_class
+        ON pg_class.relname      = tablename
+       AND pg_class.relnamespace = pg_namespace.oid
     WHERE pg_class.relkind = 'r'
 )
 SELECT

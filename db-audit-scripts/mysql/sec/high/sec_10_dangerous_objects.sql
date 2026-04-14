@@ -51,8 +51,13 @@ SELECT
     u.Grant_priv                                            AS definer_can_grant
 FROM information_schema.ROUTINES r
 LEFT JOIN mysql.user u
-  ON CONCAT(u.User, '@', u.Host) = r.DEFINER
-  OR u.User = SUBSTRING_INDEX(r.DEFINER, '@', 1)
+  -- DEFINER in information_schema is stored as 'user@host' (no quotes).
+  -- We must match BOTH user and host; matching on User alone produces
+  -- false positives whenever any account with the same username (on a
+  -- different host) has SUPER, falsely flagging routines whose actual
+  -- definer does not.
+  ON u.User = SUBSTRING_INDEX(r.DEFINER, '@', 1)
+ AND u.Host = SUBSTRING_INDEX(r.DEFINER, '@', -1)
 WHERE r.SECURITY_TYPE = 'DEFINER'
   AND r.ROUTINE_SCHEMA NOT IN ('mysql', 'information_schema',
                                 'performance_schema', 'sys')
@@ -148,7 +153,11 @@ SELECT
     tr.EVENT_MANIPULATION
 FROM information_schema.TRIGGERS tr
 LEFT JOIN mysql.user u
+  -- Match both user and host parts of DEFINER ('user@host'); matching
+  -- on User alone falsely flags any trigger whose definer username
+  -- happens to equal a SUPER user's username on a different host.
   ON u.User = SUBSTRING_INDEX(tr.DEFINER, '@', 1)
+ AND u.Host = SUBSTRING_INDEX(tr.DEFINER, '@', -1)
 WHERE tr.TRIGGER_SCHEMA NOT IN ('mysql', 'information_schema',
                                  'performance_schema', 'sys')
   AND u.Super_priv = 'Y'

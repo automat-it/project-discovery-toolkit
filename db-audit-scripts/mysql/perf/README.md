@@ -242,5 +242,5 @@ forecasting tools. Covers data size, row counts, index sizes, and
   columns because MySQL does not expose those in standard catalogs. Treat
   all duplicate pairs as candidates for manual review before dropping.
 * **`sys` schema must be installed.** It ships by default in MySQL 8.0
-  but may be missing in minimal or containerised installs. Check with:
+  but may be missing in minimal installs. Check with:
   `SELECT schema_name FROM information_schema.schemata WHERE schema_name = 'sys';`

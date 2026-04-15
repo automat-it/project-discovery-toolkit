@@ -27,6 +27,8 @@
 # IDE
 .vscode/
 .idea/
+.dbeaver/
+.project
 
 # Python (if you later add scripts)
 __pycache__/

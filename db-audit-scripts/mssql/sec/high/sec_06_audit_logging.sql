@@ -15,6 +15,9 @@ SET TRANSACTION ISOLATION LEVEL READ UNCOMMITTED;  -- read-only audit; avoid tak
 -- ---------------------------------------------------------------------------
 -- Server Audits defined on the instance
 -- ---------------------------------------------------------------------------
+-- max_rollover_files / max_size live on sys.server_file_audits, not
+-- sys.server_audits — LEFT JOIN so non-file destinations (application log,
+-- security log) still appear with NULL rollover / size.
 SELECT
     sa.name                                           AS audit_name,
     sa.audit_guid,
@@ -23,22 +26,31 @@ SELECT
     sa.type_desc                                      AS destination,
     sa.on_failure_desc                                AS on_failure,
     sa.queue_delay,
-    sa.max_rollover_files,
-    sa.max_size
+    sfa.max_rollover_files,
+    sfa.max_files,
+    sfa.max_file_size,
+    sfa.log_file_path
 FROM sys.server_audits sa
+LEFT JOIN sys.server_file_audits sfa ON sfa.audit_guid = sa.audit_guid
 ORDER BY sa.name;
 
 -- ---------------------------------------------------------------------------
 -- Current runtime status of each Server Audit
 -- ---------------------------------------------------------------------------
+-- dm_server_audit_status surfaces runtime status; queue_delay is a
+-- static configuration property on sys.server_audits (joined here).
 SELECT
-    audit_id,
-    name                                              AS audit_name,
-    status_desc,
-    status_time,
-    queue_delay,
-    event_session_address IS NOT NULL                 AS is_event_session_bound
-FROM sys.dm_server_audit_status;
+    s.audit_id,
+    s.name                                            AS audit_name,
+    s.status_desc,
+    s.status_time,
+    sa.queue_delay,
+    s.audit_file_path,
+    s.audit_file_size,
+    CASE WHEN s.event_session_address IS NOT NULL
+         THEN 1 ELSE 0 END                             AS is_event_session_bound
+FROM sys.dm_server_audit_status s
+LEFT JOIN sys.server_audits sa ON sa.audit_id = s.audit_id;
 
 -- ---------------------------------------------------------------------------
 -- Server Audit Specifications (what events are captured server-wide)
@@ -105,7 +117,7 @@ FROM sys.traces;
 SELECT
     xs.name                                           AS session_name,
     xs.create_time,
-    COUNT(DISTINCT xe.name)                           AS event_count
+    COUNT(DISTINCT xe.event_name)                     AS event_count
 FROM sys.dm_xe_sessions xs
 LEFT JOIN sys.dm_xe_session_events xe ON xe.event_session_address = xs.address
 GROUP BY xs.name, xs.create_time

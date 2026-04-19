@@ -10,23 +10,26 @@
 
 SET NOCOUNT ON;
 SET TRANSACTION ISOLATION LEVEL READ UNCOMMITTED;  -- read-only audit; avoid taking shared locks on hot objects
+SET QUOTED_IDENTIFIER ON;                          -- required for FOR XML PATH / XML type methods used below
 
 -- ---------------------------------------------------------------------------
 -- Direct blocking pairs (who is blocking whom right now)
 -- ---------------------------------------------------------------------------
+-- login_name / host_name / program_name live on sys.dm_exec_sessions,
+-- not sys.dm_exec_requests. JOIN through sessions for both sides.
 SELECT
     blocked.session_id                       AS blocked_spid,
-    blocked.login_name                       AS blocked_user,
-    blocked.host_name                        AS blocked_host,
-    blocked.program_name                     AS blocked_app,
+    blocked_sess.login_name                  AS blocked_user,
+    blocked_sess.host_name                   AS blocked_host,
+    blocked_sess.program_name                AS blocked_app,
     DB_NAME(blocked.database_id)             AS blocked_db,
     blocked.wait_type                        AS wait_type,
     blocked.wait_time                        AS wait_ms,
     blocked.wait_resource                    AS wait_resource,
     blocking.session_id                      AS blocking_spid,
-    blocking.login_name                      AS blocking_user,
-    blocking.host_name                       AS blocking_host,
-    blocking.program_name                    AS blocking_app,
+    blocking_sess.login_name                 AS blocking_user,
+    blocking_sess.host_name                  AS blocking_host,
+    blocking_sess.program_name               AS blocking_app,
     DATEDIFF(second, blocking_sess.last_request_start_time, SYSUTCDATETIME())
                                              AS blocker_last_request_age_sec,
     LEFT(blocked_txt.text, 300)              AS blocked_statement,
@@ -34,6 +37,8 @@ SELECT
 FROM sys.dm_exec_requests blocked
 JOIN sys.dm_exec_requests blocking
       ON blocked.blocking_session_id = blocking.session_id
+JOIN sys.dm_exec_sessions blocked_sess
+      ON blocked_sess.session_id = blocked.session_id
 JOIN sys.dm_exec_sessions blocking_sess
       ON blocking_sess.session_id = blocking.session_id
 OUTER APPLY sys.dm_exec_sql_text(blocked.sql_handle)   blocked_txt
@@ -122,8 +127,11 @@ SELECT
     s.open_transaction_count,
     DB_NAME(s.database_id)                                 AS database_name,
     LEFT(txt.text, 300)                                    AS last_statement
+-- most_recent_sql_handle lives on sys.dm_exec_connections, not on
+-- sys.dm_exec_sessions. Join through connections to resolve the text.
 FROM sys.dm_exec_sessions s
-OUTER APPLY sys.dm_exec_sql_text(s.most_recent_sql_handle) txt
+LEFT JOIN sys.dm_exec_connections c ON c.session_id = s.session_id
+OUTER APPLY sys.dm_exec_sql_text(c.most_recent_sql_handle) txt
 WHERE s.is_user_process   = 1
   AND s.status            = 'sleeping'
   AND s.open_transaction_count > 0
@@ -156,7 +164,16 @@ SELECT TOP 30
     COUNT(*)                                               AS total_locks,
     SUM(CASE WHEN l.request_status = 'WAIT' THEN 1 ELSE 0 END) AS waiting_locks,
     COUNT(DISTINCT l.request_session_id)                   AS distinct_sessions,
-    STRING_AGG(DISTINCT l.request_mode, ', ')              AS lock_modes
+    -- SQL Server's STRING_AGG does not accept DISTINCT; fold distinct
+    -- values with a correlated APPLY before aggregation.
+    STUFF((
+        SELECT ', ' + request_mode
+          FROM (SELECT DISTINCT request_mode
+                  FROM sys.dm_tran_locks l2
+                 WHERE l2.resource_database_id = l.resource_database_id
+                   AND l2.resource_associated_entity_id = l.resource_associated_entity_id
+                   AND l2.resource_type = 'OBJECT') d
+         FOR XML PATH(''), TYPE).value('.', 'nvarchar(max)'), 1, 2, '') AS lock_modes
 FROM sys.dm_tran_locks l
 WHERE l.resource_type = 'OBJECT'
   AND l.resource_associated_entity_id > 0

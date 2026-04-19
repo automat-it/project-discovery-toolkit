@@ -80,7 +80,8 @@ ORDER BY name;
 SELECT
     d.name                                            AS database_name,
     d.is_cdc_enabled,
-    ct.database_id IS NOT NULL                        AS has_change_tracking,
+    CASE WHEN ct.database_id IS NOT NULL
+         THEN 1 ELSE 0 END                             AS has_change_tracking,
     ct.retention_period,
     ct.retention_period_units_desc
 FROM sys.databases d
@@ -105,7 +106,7 @@ SELECT
     xs.name                                           AS session_name,
     xs.create_time,
     xs.pending_buffers,
-    COUNT(DISTINCT xe.name)                           AS events_captured
+    COUNT(DISTINCT xe.event_name)                     AS events_captured
 FROM sys.dm_xe_sessions xs
 LEFT JOIN sys.dm_xe_session_events xe ON xe.event_session_address = xs.address
 GROUP BY xs.name, xs.create_time, xs.pending_buffers

@@ -159,8 +159,9 @@ IF EXISTS (SELECT 1 FROM sys.database_query_store_options WHERE actual_state <> 
 BEGIN
     SELECT TOP 25
         ws.wait_category_desc,
-        SUM(ws.total_query_wait_time_ms) AS total_wait_ms,
-        SUM(ws.execution_type_desc = 'Regular') AS regular_executions
+        SUM(ws.total_query_wait_time_ms)                   AS total_wait_ms,
+        SUM(CASE WHEN ws.execution_type_desc = 'Regular'
+                 THEN 1 ELSE 0 END)                        AS regular_executions
     FROM sys.query_store_wait_stats ws
     GROUP BY ws.wait_category_desc
     ORDER BY total_wait_ms DESC;

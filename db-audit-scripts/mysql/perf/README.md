@@ -205,6 +205,16 @@ inventory (`INNODB_TABLESPACES` + `INNODB_DATAFILES` file paths), per-
 database and top-30 largest-table size, non-InnoDB tables that need
 different backup handling, buffer-pool-to-data-footprint ratio.
 
+### `perf_20_workload_management.sql`
+
+Resource Groups (MySQL 8.0+) probed with a prepared statement so the
+query still runs on 5.7; concurrency knobs (thread pool, InnoDB
+threads, replica parallel workers); per-account rate caps from
+`mysql.user` (MAX_QUERIES/UPDATES/CONNECTIONS_PER_HOUR,
+MAX_USER_CONNECTIONS); timeouts; current activity snapshot by
+`PROCESSLIST.STATE`; statements running >60s; in-flight progress
+from `events_stages_current`.
+
 ## Low priority
 
 ### `perf_16_plan_instability.sql`

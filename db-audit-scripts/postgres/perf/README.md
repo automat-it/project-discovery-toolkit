@@ -150,6 +150,15 @@ objects placed off the default tablespace, per-schema size roll-up,
 replication-slot WAL retention, per-database temp-file spill.
 Essential for DR planning and I/O balancing.
 
+### `perf_20_workload_management.sql`
+
+Concurrency and worker limits (max_connections, max_parallel_workers,
+autovacuum_max_workers), per-role caps from `pg_roles`, per-role / per-
+database GUC overrides, activity breakdown by state + wait class,
+autovacuum workers in flight, progress from every `pg_stat_progress_*`
+view (vacuum, analyze, cluster, create_index, basebackup, copy),
+and prepared transactions.
+
 ## Low priority
 
 ### `perf_16_plan_instability.sql`

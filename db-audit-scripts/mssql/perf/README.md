@@ -155,6 +155,15 @@ filegroup placement, per-file I/O latency from
 up. All `sys.master_files` blocks are wrapped in TRY/CATCH so the
 script degrades cleanly on Azure SQL Database.
 
+### `perf_20_workload_management.sql`
+
+Resource Governor configuration + runtime (pools, workload groups,
+memory-grant stats), parallelism / memory knobs from
+`sys.configurations` (MAXDOP, CTFP, max server memory, max worker
+threads, blocked-process threshold), session-to-workload-group
+mapping, long-running user requests (>60s) with current statement,
+Query Store wait-category summary when Query Store is enabled.
+
 ## Low priority
 
 ### `perf_16_plan_instability.sql`

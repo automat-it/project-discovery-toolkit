@@ -9,6 +9,7 @@
 -- =============================================================================
 
 SET NOCOUNT ON;
+SET TRANSACTION ISOLATION LEVEL READ UNCOMMITTED;  -- read-only audit; avoid taking shared locks on hot objects
 
 -- ---------------------------------------------------------------------------
 -- Direct blocking pairs (who is blocking whom right now)
@@ -141,7 +142,12 @@ GROUP BY resource_type, request_mode, request_status
 ORDER BY lock_count DESC;
 
 -- ---------------------------------------------------------------------------
--- Tables with the most current lock contention
+-- Tables with the most current lock contention.
+-- Edge case: when l.resource_database_id points at a database other than
+-- the one this script is running from, OBJECT_SCHEMA_NAME / OBJECT_NAME
+-- return NULL because the resolver cannot cross databases from the
+-- current context. This is fine for a per-database audit; for server-
+-- wide lock investigation run the script once per impacted database.
 -- ---------------------------------------------------------------------------
 SELECT TOP 30
     DB_NAME(l.resource_database_id)                        AS database_name,

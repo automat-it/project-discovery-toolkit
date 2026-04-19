@@ -13,6 +13,7 @@
 -- =============================================================================
 
 SET NOCOUNT ON;
+SET TRANSACTION ISOLATION LEVEL READ UNCOMMITTED;  -- read-only audit; avoid taking shared locks on hot objects
 
 -- ---------------------------------------------------------------------------
 -- Disabled logins (explicitly inactive)
@@ -116,17 +117,25 @@ ORDER BY sp.create_date;
 -- ---------------------------------------------------------------------------
 -- Logins that own nothing (no database, no job, no endpoint)
 -- ---------------------------------------------------------------------------
-SELECT
-    sp.name                                           AS login_name,
-    sp.type_desc,
-    sp.is_disabled
-FROM sys.server_principals sp
-WHERE sp.type IN ('S','U','G')
-  AND sp.name NOT IN ('sa')
-  AND NOT EXISTS (SELECT 1 FROM sys.databases WHERE owner_sid = sp.sid)
-  AND NOT EXISTS (SELECT 1 FROM sys.endpoints WHERE principal_id = sp.principal_id)
-  AND NOT EXISTS (SELECT 1 FROM msdb.dbo.sysjobs WHERE owner_sid = sp.sid)
-ORDER BY sp.name;
+-- msdb is not present on Azure SQL Database; the Agent-job ownership
+-- predicate is wrapped so the query degrades gracefully there.
+BEGIN TRY
+    SELECT
+        sp.name                                       AS login_name,
+        sp.type_desc,
+        sp.is_disabled
+    FROM sys.server_principals sp
+    WHERE sp.type IN ('S','U','G')
+      AND sp.name NOT IN ('sa')
+      AND NOT EXISTS (SELECT 1 FROM sys.databases WHERE owner_sid = sp.sid)
+      AND NOT EXISTS (SELECT 1 FROM sys.endpoints WHERE principal_id = sp.principal_id)
+      AND NOT EXISTS (SELECT 1 FROM msdb.dbo.sysjobs WHERE owner_sid = sp.sid)
+    ORDER BY sp.name;
+END TRY
+BEGIN CATCH
+    PRINT '[note] logins-owning-nothing query failed (msdb may be absent): '
+          + ERROR_MESSAGE();
+END CATCH;
 
 -- ---------------------------------------------------------------------------
 -- Summary

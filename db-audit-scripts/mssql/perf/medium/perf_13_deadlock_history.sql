@@ -9,6 +9,7 @@
 -- =============================================================================
 
 SET NOCOUNT ON;
+SET TRANSACTION ISOLATION LEVEL READ UNCOMMITTED;  -- read-only audit; avoid taking shared locks on hot objects
 -- Parsing the XE ring-buffer XML requires QUOTED_IDENTIFIER ON.
 SET QUOTED_IDENTIFIER ON;
 
@@ -93,15 +94,20 @@ ORDER BY event_time DESC;
 -- Agent jobs that execute every minute or faster (often contain the
 -- deadlock monitor / cleanup routines)
 -- ---------------------------------------------------------------------------
-SELECT
-    j.name                                            AS job_name,
-    s.name                                            AS schedule_name,
-    s.freq_type,
-    s.freq_subday_type,
-    s.freq_subday_interval
-FROM msdb.dbo.sysjobs j
-JOIN msdb.dbo.sysjobschedules js ON js.job_id = j.job_id
-JOIN msdb.dbo.sysschedules     s ON s.schedule_id = js.schedule_id
-WHERE j.enabled = 1
-  AND s.freq_subday_type IN (2, 4)                     -- seconds or minutes
-ORDER BY j.name;
+BEGIN TRY
+    SELECT
+        j.name                                        AS job_name,
+        s.name                                        AS schedule_name,
+        s.freq_type,
+        s.freq_subday_type,
+        s.freq_subday_interval
+    FROM msdb.dbo.sysjobs j
+    JOIN msdb.dbo.sysjobschedules js ON js.job_id = j.job_id
+    JOIN msdb.dbo.sysschedules     s ON s.schedule_id = js.schedule_id
+    WHERE j.enabled = 1
+      AND s.freq_subday_type IN (2, 4)                 -- seconds or minutes
+    ORDER BY j.name;
+END TRY
+BEGIN CATCH
+    PRINT '[note] msdb job schedule inventory failed: ' + ERROR_MESSAGE();
+END CATCH;

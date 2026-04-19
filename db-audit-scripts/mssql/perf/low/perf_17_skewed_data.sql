@@ -9,6 +9,7 @@
 -- =============================================================================
 
 SET NOCOUNT ON;
+SET TRANSACTION ISOLATION LEVEL READ UNCOMMITTED;  -- read-only audit; avoid taking shared locks on hot objects
 
 -- ---------------------------------------------------------------------------
 -- Columns with very low cardinality (n_distinct approx) — read from the

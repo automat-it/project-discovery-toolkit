@@ -9,6 +9,7 @@
 -- =============================================================================
 
 SET NOCOUNT ON;
+SET TRANSACTION ISOLATION LEVEL READ UNCOMMITTED;  -- read-only audit; avoid taking shared locks on hot objects
 
 -- ---------------------------------------------------------------------------
 -- Authentication mode (Mixed vs Windows-only)
@@ -140,9 +141,17 @@ ORDER BY sp.name;
 
 -- ---------------------------------------------------------------------------
 -- Login audit level (must be 2 = failed and successful, or 3 = both w/ pwd)
--- for best forensic coverage
+-- for best forensic coverage. xp_instance_regread is sysadmin-only on
+-- Windows and not available on SQL Server on Linux or Azure SQL — wrap
+-- so the script keeps going with a [note] line on those platforms.
 -- ---------------------------------------------------------------------------
-EXEC xp_instance_regread
-    N'HKEY_LOCAL_MACHINE',
-    N'Software\Microsoft\MSSQLServer\MSSQLServer',
-    N'AuditLevel';
+BEGIN TRY
+    EXEC xp_instance_regread
+        N'HKEY_LOCAL_MACHINE',
+        N'Software\Microsoft\MSSQLServer\MSSQLServer',
+        N'AuditLevel';
+END TRY
+BEGIN CATCH
+    PRINT '[note] xp_instance_regread unavailable or not permitted: '
+          + ERROR_MESSAGE();
+END CATCH;

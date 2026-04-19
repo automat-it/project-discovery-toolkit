@@ -9,6 +9,7 @@
 -- =============================================================================
 
 SET NOCOUNT ON;
+SET TRANSACTION ISOLATION LEVEL READ UNCOMMITTED;  -- read-only audit; avoid taking shared locks on hot objects
 
 -- ---------------------------------------------------------------------------
 -- Queries with multiple plans over time (Query Store)
@@ -58,8 +59,11 @@ BEGIN
 END;
 
 -- ---------------------------------------------------------------------------
--- Queries with regressed plans (current plan slower than a prior plan)
+-- Queries with regressed plans (current plan slower than a prior plan).
 -- Requires Query Store Plan Forcing hints / visible history.
+-- The `;WITH plan_stats ...` CTE is nested inside the IF/BEGIN block — the
+-- leading semicolon is required to terminate the preceding batch start
+-- so the CTE parses correctly.
 -- ---------------------------------------------------------------------------
 IF EXISTS (SELECT 1 FROM sys.database_query_store_options WHERE actual_state <> 0)
 BEGIN

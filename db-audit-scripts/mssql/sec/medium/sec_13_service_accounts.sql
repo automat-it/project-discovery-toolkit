@@ -12,6 +12,7 @@
 -- =============================================================================
 
 SET NOCOUNT ON;
+SET TRANSACTION ISOLATION LEVEL READ UNCOMMITTED;  -- read-only audit; avoid taking shared locks on hot objects
 
 -- ---------------------------------------------------------------------------
 -- Likely service accounts by naming pattern
@@ -112,14 +113,21 @@ WHERE sp.type = 'S'
 ORDER BY password_last_set_time;
 
 -- ---------------------------------------------------------------------------
--- Object ownership by likely service accounts
+-- Object ownership by likely service accounts.
+--
+-- NOTE: sys.objects.principal_id is NULL for objects that inherit
+-- ownership from their schema (the default when CREATE omits AUTHORIZATION).
+-- Join through sys.schemas.principal_id to pick up the effective owner;
+-- COALESCE(o.principal_id, s.principal_id) gives the correct value in
+-- both cases.
 -- ---------------------------------------------------------------------------
 SELECT
     pr.name                                           AS owner,
     SCHEMA_NAME(o.schema_id)                          AS schema_name,
     COUNT(*)                                          AS owned_objects
 FROM sys.objects o
-JOIN sys.database_principals pr ON pr.principal_id = o.principal_id
+JOIN sys.schemas s              ON s.schema_id = o.schema_id
+JOIN sys.database_principals pr ON pr.principal_id = COALESCE(o.principal_id, s.principal_id)
 WHERE (pr.name LIKE '%svc%' OR pr.name LIKE '%service%'
     OR pr.name LIKE '%_app%' OR pr.name LIKE '%_bot%')
   AND o.is_ms_shipped = 0

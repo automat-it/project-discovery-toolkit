@@ -11,6 +11,7 @@
 -- =============================================================================
 
 SET NOCOUNT ON;
+SET TRANSACTION ISOLATION LEVEL READ UNCOMMITTED;  -- read-only audit; avoid taking shared locks on hot objects
 
 -- ---------------------------------------------------------------------------
 -- Stored procedures / functions declared WITH EXECUTE AS OWNER / SELF /
@@ -143,7 +144,13 @@ ORDER BY name;
 
 -- ---------------------------------------------------------------------------
 -- Functions and procedures that reference xp_ / sp_OA / xp_regread
--- (quick text scan — heuristic, may miss dynamic SQL)
+-- (quick text scan — heuristic, may miss dynamic SQL).
+--
+-- LIMITATION: sys.sql_modules.definition is NULL for objects created
+-- WITH ENCRYPTION. Encrypted procedures will not match these LIKE
+-- patterns; inventory them separately via
+--   SELECT OBJECT_SCHEMA_NAME(object_id), OBJECT_NAME(object_id)
+--     FROM sys.sql_modules WHERE definition IS NULL;
 -- ---------------------------------------------------------------------------
 SELECT
     OBJECT_SCHEMA_NAME(sm.object_id)                  AS schema_name,

@@ -10,6 +10,7 @@
 -- =============================================================================
 
 SET NOCOUNT ON;
+SET TRANSACTION ISOLATION LEVEL READ UNCOMMITTED;  -- read-only audit; avoid taking shared locks on hot objects
 
 -- ---------------------------------------------------------------------------
 -- Direct server-role membership (single hop)
@@ -126,6 +127,11 @@ ORDER BY database_user, depth DESC;
 -- Cyclic server-role membership detection.
 -- We carry an explicit "closed" flag that flips when we would revisit an
 -- already-seen role, then surface only closed paths.
+--
+-- IMPLEMENTATION NOTE: the "visited" set is stored as a comma-delimited
+-- NVARCHAR and searched with LIKE. On very large role graphs the LIKE
+-- scan is O(depth * path_length); sufficient in practice (role graphs
+-- are small) but a junction table would be faster at scale.
 -- ---------------------------------------------------------------------------
 ;WITH walk AS (
     SELECT

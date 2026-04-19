@@ -9,6 +9,7 @@
 -- =============================================================================
 
 SET NOCOUNT ON;
+SET TRANSACTION ISOLATION LEVEL READ UNCOMMITTED;  -- read-only audit; avoid taking shared locks on hot objects
 
 -- ---------------------------------------------------------------------------
 -- Endpoints (TCP listeners, dedicated admin, service broker, etc.)
@@ -24,14 +25,21 @@ SELECT
 FROM sys.endpoints e
 ORDER BY e.type_desc, e.name;
 
--- TCP endpoint detail (port + IP bindings)
-SELECT
-    e.name                                            AS endpoint_name,
-    te.port,
-    te.is_dynamic_port,
-    te.ip_address
-FROM sys.endpoints e
-JOIN sys.tcp_endpoints te ON te.endpoint_id = e.endpoint_id;
+-- TCP endpoint detail (port + IP bindings). sys.tcp_endpoints does not
+-- exist on Azure SQL Database — guard so those audits keep going.
+BEGIN TRY
+    SELECT
+        e.name                                        AS endpoint_name,
+        te.port,
+        te.is_dynamic_port,
+        te.ip_address
+    FROM sys.endpoints e
+    JOIN sys.tcp_endpoints te ON te.endpoint_id = e.endpoint_id;
+END TRY
+BEGIN CATCH
+    PRINT '[note] sys.tcp_endpoints unavailable (Azure SQL DB or restricted): '
+          + ERROR_MESSAGE();
+END CATCH;
 
 -- ---------------------------------------------------------------------------
 -- Remote (non-loopback) current connections

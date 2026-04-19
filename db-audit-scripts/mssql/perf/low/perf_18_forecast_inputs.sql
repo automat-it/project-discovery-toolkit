@@ -10,7 +10,12 @@
 -- Read-only.
 -- =============================================================================
 
+-- Portability: this script reads sys.master_files, which is NOT
+-- supported on Azure SQL Database (single DB). It works on SQL
+-- Server 2019+ on-prem, SQL Managed Instance, and Azure SQL DB
+-- Hyperscale. Skip this script on Azure SQL DB.
 SET NOCOUNT ON;
+SET TRANSACTION ISOLATION LEVEL READ UNCOMMITTED;  -- read-only audit; avoid taking shared locks on hot objects
 
 -- ---------------------------------------------------------------------------
 -- Single-row snapshot of cluster-wide usage indicators
@@ -134,4 +139,6 @@ WHERE counter_name IN (
     'Index Searches/sec',
     'Forwarded Records/sec',
     'Transactions/sec')
-  AND (instance_name = '' OR instance_name = '_Total' OR instance_name = 'master');
+  -- Only server-level and _Total rows are useful as aggregate inputs;
+  -- 'master' is just one database and isn't representative.
+  AND instance_name IN ('', '_Total');

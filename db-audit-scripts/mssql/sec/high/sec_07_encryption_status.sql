@@ -10,6 +10,7 @@
 -- =============================================================================
 
 SET NOCOUNT ON;
+SET TRANSACTION ISOLATION LEVEL READ UNCOMMITTED;  -- read-only audit; avoid taking shared locks on hot objects
 
 -- ---------------------------------------------------------------------------
 -- Connection-level encryption state (TLS per active session)
@@ -149,16 +150,23 @@ ORDER BY schema_name, table_name, name;
 -- ---------------------------------------------------------------------------
 -- Last N backups — whether they were encrypted
 -- ---------------------------------------------------------------------------
-SELECT TOP 50
-    bs.database_name,
-    bs.type                                           AS backup_type,
-    bs.backup_finish_date,
-    bs.encryptor_type,
-    bs.encryptor_thumbprint,
-    bs.key_algorithm                                  AS key_alg,
-    bs.is_password_protected
-FROM msdb.dbo.backupset bs
-ORDER BY bs.backup_finish_date DESC;
+-- msdb is not present on Azure SQL Database; guard so the audit keeps
+-- going with a [note] line on that platform.
+BEGIN TRY
+    SELECT TOP 50
+        bs.database_name,
+        bs.type                                       AS backup_type,
+        bs.backup_finish_date,
+        bs.encryptor_type,
+        bs.encryptor_thumbprint,
+        bs.key_algorithm                              AS key_alg,
+        bs.is_password_protected
+    FROM msdb.dbo.backupset bs
+    ORDER BY bs.backup_finish_date DESC;
+END TRY
+BEGIN CATCH
+    PRINT '[note] msdb.dbo.backupset unavailable: ' + ERROR_MESSAGE();
+END CATCH;
 
 -- ---------------------------------------------------------------------------
 -- Summary

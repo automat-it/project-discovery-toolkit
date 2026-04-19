@@ -9,6 +9,7 @@
 -- =============================================================================
 
 SET NOCOUNT ON;
+SET TRANSACTION ISOLATION LEVEL READ UNCOMMITTED;  -- read-only audit; avoid taking shared locks on hot objects
 -- FOR XML PATH / .value() require QUOTED_IDENTIFIER ON. sqlcmd defaults
 -- to OFF, so this has to be set explicitly for the XML aggregation to
 -- run without "SELECT failed because ... QUOTED_IDENTIFIER" errors.

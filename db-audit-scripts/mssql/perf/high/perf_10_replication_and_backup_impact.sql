@@ -10,6 +10,7 @@
 -- =============================================================================
 
 SET NOCOUNT ON;
+SET TRANSACTION ISOLATION LEVEL READ UNCOMMITTED;  -- read-only audit; avoid taking shared locks on hot objects
 
 -- ---------------------------------------------------------------------------
 -- Is this an AlwaysOn AG member? (NULL = standalone)
@@ -63,18 +64,24 @@ FROM sys.databases
 WHERE database_id > 4
 ORDER BY name;
 
--- CDC capture / cleanup jobs (if exposed at instance level)
-SELECT
-    j.name                                            AS job_name,
-    j.enabled,
-    j.description,
-    js.last_run_outcome,
-    js.last_run_date,
-    js.last_run_time
-FROM msdb.dbo.sysjobs j
-LEFT JOIN msdb.dbo.sysjobservers js ON js.job_id = j.job_id
-WHERE j.name LIKE 'cdc.%'
-ORDER BY j.name;
+-- CDC capture / cleanup jobs (if exposed at instance level). msdb is not
+-- present on Azure SQL Database — guard so the rest of the script runs.
+BEGIN TRY
+    SELECT
+        j.name                                        AS job_name,
+        j.enabled,
+        j.description,
+        js.last_run_outcome,
+        js.last_run_date,
+        js.last_run_time
+    FROM msdb.dbo.sysjobs j
+    LEFT JOIN msdb.dbo.sysjobservers js ON js.job_id = j.job_id
+    WHERE j.name LIKE 'cdc.%'
+    ORDER BY j.name;
+END TRY
+BEGIN CATCH
+    PRINT '[note] msdb.dbo.sysjobs unavailable: ' + ERROR_MESSAGE();
+END CATCH;
 
 -- CDC enabled tables in this database + last LSN seen
 -- Run this script with USE <db> for each database you care about.
@@ -146,29 +153,41 @@ WHERE r.command IN ('BACKUP DATABASE','BACKUP LOG','BACKUP DIFFERENTIAL',
 ORDER BY r.start_time;
 
 -- ---------------------------------------------------------------------------
--- Last successful backup per database (from msdb backup history)
+-- Last successful backup per database (from msdb backup history).
 -- ---------------------------------------------------------------------------
-SELECT
-    d.name                                            AS database_name,
-    d.recovery_model_desc,
-    MAX(CASE WHEN bs.type = 'D' THEN bs.backup_finish_date END) AS last_full,
-    MAX(CASE WHEN bs.type = 'I' THEN bs.backup_finish_date END) AS last_differential,
-    MAX(CASE WHEN bs.type = 'L' THEN bs.backup_finish_date END) AS last_log,
-    DATEDIFF(hour,
-             ISNULL(MAX(CASE WHEN bs.type = 'D' THEN bs.backup_finish_date END),
-                    '1900-01-01'),
-             SYSUTCDATETIME())                        AS hours_since_full
-FROM sys.databases d
-LEFT JOIN msdb.dbo.backupset bs
-      ON bs.database_name = d.name
-WHERE d.database_id > 4
-GROUP BY d.name, d.recovery_model_desc
-ORDER BY d.name;
+BEGIN TRY
+    SELECT
+        d.name                                        AS database_name,
+        d.recovery_model_desc,
+        MAX(CASE WHEN bs.type = 'D' THEN bs.backup_finish_date END) AS last_full,
+        MAX(CASE WHEN bs.type = 'I' THEN bs.backup_finish_date END) AS last_differential,
+        MAX(CASE WHEN bs.type = 'L' THEN bs.backup_finish_date END) AS last_log,
+        DATEDIFF(hour,
+                 ISNULL(MAX(CASE WHEN bs.type = 'D' THEN bs.backup_finish_date END),
+                        '1900-01-01'),
+                 SYSUTCDATETIME())                    AS hours_since_full
+    FROM sys.databases d
+    LEFT JOIN msdb.dbo.backupset bs
+          ON bs.database_name = d.name
+    WHERE d.database_id > 4
+    GROUP BY d.name, d.recovery_model_desc
+    ORDER BY d.name;
+END TRY
+BEGIN CATCH
+    PRINT '[note] last-backup-per-database lookup failed (msdb may be absent): '
+          + ERROR_MESSAGE();
+END CATCH;
 
 -- ---------------------------------------------------------------------------
--- Log-shipping status (if configured)
+-- Log-shipping status (if configured). BEGIN/END keeps the IF block
+-- explicit so a future second statement is not silently taken out of
+-- the conditional.
 -- ---------------------------------------------------------------------------
 IF OBJECT_ID('msdb.dbo.log_shipping_monitor_primary') IS NOT NULL
+BEGIN
     SELECT * FROM msdb.dbo.log_shipping_monitor_primary;
+END;
 IF OBJECT_ID('msdb.dbo.log_shipping_monitor_secondary') IS NOT NULL
+BEGIN
     SELECT * FROM msdb.dbo.log_shipping_monitor_secondary;
+END;

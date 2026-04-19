@@ -10,6 +10,7 @@
 -- =============================================================================
 
 SET NOCOUNT ON;
+SET TRANSACTION ISOLATION LEVEL READ UNCOMMITTED;  -- read-only audit; avoid taking shared locks on hot objects
 
 -- ---------------------------------------------------------------------------
 -- Server Audits defined on the instance
@@ -111,14 +112,24 @@ GROUP BY xs.name, xs.create_time
 ORDER BY session_name;
 
 -- ---------------------------------------------------------------------------
--- SQL Server error log (last 24h, error-level entries only)
+-- SQL Server error log (last 24h, error-level entries only).
+-- NOTE: the 7th parameter (sortOrder 'DESC') requires SQL Server
+-- 2017 CU10+ or 2019+. On older builds we fall back to the 6-parameter
+-- form via a second TRY. xp_readerrorlog is sysadmin-only in every
+-- release and is not available on Azure SQL Database.
 -- ---------------------------------------------------------------------------
 BEGIN TRY
     EXEC xp_readerrorlog 0, 1, NULL, NULL,
                          NULL, NULL, 'DESC';
 END TRY
 BEGIN CATCH
-    PRINT '[note] xp_readerrorlog requires sysadmin: ' + ERROR_MESSAGE();
+    BEGIN TRY
+        EXEC xp_readerrorlog 0, 1, NULL, NULL, NULL, NULL;
+    END TRY
+    BEGIN CATCH
+        PRINT '[note] xp_readerrorlog unavailable or not permitted: '
+              + ERROR_MESSAGE();
+    END CATCH;
 END CATCH;
 
 -- ---------------------------------------------------------------------------

@@ -9,10 +9,14 @@
 --   * Does not evaluate whether columns are encrypted / masked / hashed.
 --   * Expect false positives (e.g. "password_hint") and false negatives
 --     (sensitive data in opaque columns like "data","payload", JSON).
+--   * sys.columns.encryption_type / column_encryption_key_id exist from
+--     SQL Server 2016 (when Always Encrypted is configured). Older
+--     builds (<=2014) would error on those references.
 -- Read-only.
 -- =============================================================================
 
 SET NOCOUNT ON;
+SET TRANSACTION ISOLATION LEVEL READ UNCOMMITTED;  -- read-only audit; avoid taking shared locks on hot objects
 
 -- ---------------------------------------------------------------------------
 -- Columns whose name suggests PII / sensitive data

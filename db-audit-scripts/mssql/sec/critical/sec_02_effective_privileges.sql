@@ -10,6 +10,7 @@
 -- =============================================================================
 
 SET NOCOUNT ON;
+SET TRANSACTION ISOLATION LEVEL READ UNCOMMITTED;  -- read-only audit; avoid taking shared locks on hot objects
 
 -- ---------------------------------------------------------------------------
 -- Server-level permissions (explicit grants at the instance level)
@@ -115,7 +116,13 @@ ORDER BY schema_name, object_name, column_name;
 
 -- ---------------------------------------------------------------------------
 -- Effective permissions per login user on every user table
--- (expensive but authoritative — respects role expansion)
+-- (expensive but authoritative — respects role expansion).
+--
+-- PERFORMANCE NOTE: this evaluates HAS_PERMS_BY_NAME for every (user x
+-- table) pair. On databases with 1000+ tables and many principals it
+-- can run for minutes. The call returns permissions for the CURRENT
+-- connection by default; to audit a specific login wrap the query in
+-- EXECUTE AS LOGIN = 'target'; ... REVERT;.
 -- ---------------------------------------------------------------------------
 DECLARE @tables TABLE (object_id INT, schema_name SYSNAME, object_name SYSNAME);
 INSERT INTO @tables

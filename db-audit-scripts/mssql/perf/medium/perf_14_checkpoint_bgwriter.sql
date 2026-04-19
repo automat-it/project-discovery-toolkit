@@ -9,7 +9,12 @@
 -- Read-only.
 -- =============================================================================
 
+-- Portability: this script reads sys.master_files, which is NOT
+-- supported on Azure SQL Database (single DB). It works on SQL
+-- Server 2019+ on-prem, SQL Managed Instance, and Azure SQL DB
+-- Hyperscale. Skip this script on Azure SQL DB.
 SET NOCOUNT ON;
+SET TRANSACTION ISOLATION LEVEL READ UNCOMMITTED;  -- read-only audit; avoid taking shared locks on hot objects
 
 -- ---------------------------------------------------------------------------
 -- Checkpoint / lazy writer counters

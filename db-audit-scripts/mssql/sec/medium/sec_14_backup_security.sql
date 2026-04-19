@@ -11,6 +11,7 @@
 -- =============================================================================
 
 SET NOCOUNT ON;
+SET TRANSACTION ISOLATION LEVEL READ UNCOMMITTED;  -- read-only audit; avoid taking shared locks on hot objects
 
 -- ---------------------------------------------------------------------------
 -- Logins with backup permission (db_backupoperator in each database,
@@ -38,61 +39,81 @@ JOIN sys.database_principals m ON m.principal_id = drm.member_principal_id
 WHERE r.name IN ('db_backupoperator','db_owner')
 ORDER BY r.name, m.name;
 
+-- NOTE: every backup query below reads msdb.dbo.backupset /
+-- backupmediafamily. msdb is NOT present on Azure SQL Database, so
+-- each block is wrapped in TRY/CATCH — the audit keeps going there
+-- with a [note] line.
+
 -- ---------------------------------------------------------------------------
 -- Last backup per database + encryption status
 -- ---------------------------------------------------------------------------
-SELECT
-    d.name                                            AS database_name,
-    d.recovery_model_desc,
-    MAX(CASE WHEN bs.type = 'D' THEN bs.backup_finish_date END) AS last_full,
-    MAX(CASE WHEN bs.type = 'I' THEN bs.backup_finish_date END) AS last_diff,
-    MAX(CASE WHEN bs.type = 'L' THEN bs.backup_finish_date END) AS last_log,
-    DATEDIFF(hour,
-             ISNULL(MAX(CASE WHEN bs.type = 'D' THEN bs.backup_finish_date END),
-                    '1900-01-01'),
-             SYSUTCDATETIME())                        AS hours_since_full,
-    MAX(CASE WHEN bs.type = 'D' THEN bs.encryptor_type END) AS last_full_encryptor_type
-FROM sys.databases d
-LEFT JOIN msdb.dbo.backupset bs
-      ON bs.database_name = d.name
-WHERE d.database_id > 4
-GROUP BY d.name, d.recovery_model_desc
-ORDER BY d.name;
+BEGIN TRY
+    SELECT
+        d.name                                        AS database_name,
+        d.recovery_model_desc,
+        MAX(CASE WHEN bs.type = 'D' THEN bs.backup_finish_date END) AS last_full,
+        MAX(CASE WHEN bs.type = 'I' THEN bs.backup_finish_date END) AS last_diff,
+        MAX(CASE WHEN bs.type = 'L' THEN bs.backup_finish_date END) AS last_log,
+        DATEDIFF(hour,
+                 ISNULL(MAX(CASE WHEN bs.type = 'D' THEN bs.backup_finish_date END),
+                        '1900-01-01'),
+                 SYSUTCDATETIME())                    AS hours_since_full,
+        MAX(CASE WHEN bs.type = 'D' THEN bs.encryptor_type END) AS last_full_encryptor_type
+    FROM sys.databases d
+    LEFT JOIN msdb.dbo.backupset bs
+          ON bs.database_name = d.name
+    WHERE d.database_id > 4
+    GROUP BY d.name, d.recovery_model_desc
+    ORDER BY d.name;
+END TRY
+BEGIN CATCH
+    PRINT '[note] last-backup-per-database query failed: ' + ERROR_MESSAGE();
+END CATCH;
 
 -- ---------------------------------------------------------------------------
 -- Unencrypted backup sets (compliance review)
 -- ---------------------------------------------------------------------------
-SELECT TOP 100
-    bs.database_name,
-    bs.type                                           AS backup_type,
-    bs.backup_finish_date,
-    bs.encryptor_type,
-    bs.encryptor_thumbprint,
-    bs.key_algorithm,
-    bs.is_password_protected,
-    bmf.physical_device_name
-FROM msdb.dbo.backupset bs
-JOIN msdb.dbo.backupmediafamily bmf ON bmf.media_set_id = bs.media_set_id
-WHERE bs.encryptor_type IS NULL
-ORDER BY bs.backup_finish_date DESC;
+BEGIN TRY
+    SELECT TOP 100
+        bs.database_name,
+        bs.type                                       AS backup_type,
+        bs.backup_finish_date,
+        bs.encryptor_type,
+        bs.encryptor_thumbprint,
+        bs.key_algorithm,
+        bs.is_password_protected,
+        bmf.physical_device_name
+    FROM msdb.dbo.backupset bs
+    JOIN msdb.dbo.backupmediafamily bmf ON bmf.media_set_id = bs.media_set_id
+    WHERE bs.encryptor_type IS NULL
+    ORDER BY bs.backup_finish_date DESC;
+END TRY
+BEGIN CATCH
+    PRINT '[note] unencrypted-backup-sets query failed: ' + ERROR_MESSAGE();
+END CATCH;
 
 -- ---------------------------------------------------------------------------
 -- Recent backup history (last 30 days)
 -- ---------------------------------------------------------------------------
-SELECT TOP 100
-    bs.database_name,
-    bs.type                                           AS backup_type,
-    bs.backup_start_date,
-    bs.backup_finish_date,
-    DATEDIFF(second, bs.backup_start_date, bs.backup_finish_date) AS duration_sec,
-    CAST(bs.backup_size / 1024.0 / 1024 AS DECIMAL(18,2)) AS backup_size_mb,
-    CAST(bs.compressed_backup_size / 1024.0 / 1024 AS DECIMAL(18,2)) AS compressed_mb,
-    bs.user_name                                      AS backed_up_by,
-    bmf.physical_device_name
-FROM msdb.dbo.backupset bs
-JOIN msdb.dbo.backupmediafamily bmf ON bmf.media_set_id = bs.media_set_id
-WHERE bs.backup_finish_date >= DATEADD(day, -30, SYSUTCDATETIME())
-ORDER BY bs.backup_finish_date DESC;
+BEGIN TRY
+    SELECT TOP 100
+        bs.database_name,
+        bs.type                                       AS backup_type,
+        bs.backup_start_date,
+        bs.backup_finish_date,
+        DATEDIFF(second, bs.backup_start_date, bs.backup_finish_date) AS duration_sec,
+        CAST(bs.backup_size / 1024.0 / 1024 AS DECIMAL(18,2)) AS backup_size_mb,
+        CAST(bs.compressed_backup_size / 1024.0 / 1024 AS DECIMAL(18,2)) AS compressed_mb,
+        bs.user_name                                  AS backed_up_by,
+        bmf.physical_device_name
+    FROM msdb.dbo.backupset bs
+    JOIN msdb.dbo.backupmediafamily bmf ON bmf.media_set_id = bs.media_set_id
+    WHERE bs.backup_finish_date >= DATEADD(day, -30, SYSUTCDATETIME())
+    ORDER BY bs.backup_finish_date DESC;
+END TRY
+BEGIN CATCH
+    PRINT '[note] recent-backup-history query failed: ' + ERROR_MESSAGE();
+END CATCH;
 
 -- ---------------------------------------------------------------------------
 -- Currently running backup / restore operations
@@ -115,35 +136,47 @@ WHERE r.command LIKE 'BACKUP%' OR r.command LIKE 'RESTORE%';
 -- ---------------------------------------------------------------------------
 -- Agent jobs that mention BACKUP (scheduled backup automation)
 -- ---------------------------------------------------------------------------
-SELECT
-    j.name                                            AS job_name,
-    j.enabled,
-    js.name                                           AS schedule_name,
-    SUSER_SNAME(j.owner_sid)                          AS owner,
-    j.date_created,
-    j.date_modified
-FROM msdb.dbo.sysjobs j
-LEFT JOIN msdb.dbo.sysjobschedules jss ON jss.job_id = j.job_id
-LEFT JOIN msdb.dbo.sysschedules js      ON js.schedule_id = jss.schedule_id
-WHERE j.enabled = 1
-  AND EXISTS (
-      SELECT 1 FROM msdb.dbo.sysjobsteps s
-       WHERE s.job_id = j.job_id
-         AND (s.command LIKE '%BACKUP%DATABASE%' OR s.command LIKE '%BACKUP%LOG%')
-  )
-ORDER BY j.name;
+BEGIN TRY
+    SELECT
+        j.name                                        AS job_name,
+        j.enabled,
+        js.name                                       AS schedule_name,
+        SUSER_SNAME(j.owner_sid)                      AS owner,
+        j.date_created,
+        j.date_modified
+    FROM msdb.dbo.sysjobs j
+    LEFT JOIN msdb.dbo.sysjobschedules jss ON jss.job_id = j.job_id
+    LEFT JOIN msdb.dbo.sysschedules js      ON js.schedule_id = jss.schedule_id
+    WHERE j.enabled = 1
+      AND EXISTS (
+          SELECT 1 FROM msdb.dbo.sysjobsteps s
+           WHERE s.job_id = j.job_id
+             AND (s.command LIKE '%BACKUP%DATABASE%' OR s.command LIKE '%BACKUP%LOG%')
+      )
+    ORDER BY j.name;
+END TRY
+BEGIN CATCH
+    PRINT '[note] backup-job inventory failed (msdb may be absent): '
+          + ERROR_MESSAGE();
+END CATCH;
 
 -- ---------------------------------------------------------------------------
 -- Summary
 -- ---------------------------------------------------------------------------
-SELECT
-    (SELECT COUNT(*) FROM msdb.dbo.backupset
-      WHERE backup_finish_date >= DATEADD(day, -7, SYSUTCDATETIME())) AS backups_last_7d,
-    (SELECT COUNT(*) FROM msdb.dbo.backupset
-      WHERE backup_finish_date >= DATEADD(day, -7, SYSUTCDATETIME())
-        AND encryptor_type IS NULL)                                    AS unencrypted_last_7d,
-    (SELECT COUNT(*) FROM sys.databases d
-      WHERE d.database_id > 4
-        AND NOT EXISTS (SELECT 1 FROM msdb.dbo.backupset bs
-                         WHERE bs.database_name = d.name
-                           AND bs.type = 'D')) AS databases_never_backed_up;
+BEGIN TRY
+    SELECT
+        (SELECT COUNT(*) FROM msdb.dbo.backupset
+          WHERE backup_finish_date >= DATEADD(day, -7, SYSUTCDATETIME())) AS backups_last_7d,
+        (SELECT COUNT(*) FROM msdb.dbo.backupset
+          WHERE backup_finish_date >= DATEADD(day, -7, SYSUTCDATETIME())
+            AND encryptor_type IS NULL)                                   AS unencrypted_last_7d,
+        (SELECT COUNT(*) FROM sys.databases d
+          WHERE d.database_id > 4
+            AND NOT EXISTS (SELECT 1 FROM msdb.dbo.backupset bs
+                             WHERE bs.database_name = d.name
+                               AND bs.type = 'D'))                         AS databases_never_backed_up;
+END TRY
+BEGIN CATCH
+    PRINT '[note] backup summary failed (msdb may be absent): '
+          + ERROR_MESSAGE();
+END CATCH;

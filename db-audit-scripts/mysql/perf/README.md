@@ -223,6 +223,22 @@ size distribution for skew detection, partition-count assessment
 (8 192 hard limit awareness), missing `MAXVALUE` / `DEFAULT` catch-all
 detection for `RANGE` / `LIST`, hottest-by-`UPDATE_TIME` partitions.
 
+### `perf_23_plan_regression.sql`
+
+High `max_over_avg` digest detection from
+`events_statements_summary_by_digest`, index-less digest inventory
+(`SUM_NO_INDEX_USED` / `SUM_NO_GOOD_INDEX_USED`), per-digest error /
+warning rates, optimizer_switch / optimizer_trace configuration
+surfaces for plan-shift debugging.
+
+### `perf_24_ha_cluster_health.sql`
+
+Semi-sync status (`Rpl_semi_sync_*`), Group Replication member
+inventory and per-member stats (prepared-statement guarded), flow-
+control config, InnoDB Cluster metadata-schema presence, long-running
+`INNODB_TRX`. Complements `perf_22_replication_deepdive` with cluster-
+posture signals.
+
 ### `perf_22_replication_deepdive.sql`
 
 `@@server_id`, binlog / GTID config, per-channel connection state

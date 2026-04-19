@@ -164,6 +164,36 @@ threads, blocked-process threshold), session-to-workload-group
 mapping, long-running user requests (>60s) with current statement,
 Query Store wait-category summary when Query Store is enabled.
 
+### `perf_23_plan_regression.sql`
+
+Query Store state + config, queries with > 1 plan in Query Store
+(regression candidates), latest-vs-fastest plan comparison with
+2× threshold regression flagging, forced-plan inventory with
+force-failure counts, sys.dm_exec_query_stats fallback for plan-
+cache max/min variance when Query Store is off, parameter-
+sensitivity signals (many plans for the same query_hash).
+
+### `perf_24_ha_cluster_health.sql`
+
+WSFC node inventory, AG-level settings (automated backup preference,
+failure condition level, required synchronised secondaries, cluster
+type), per-replica availability / failover / seeding mode, quorum-
+readiness — synchronised secondaries counted against
+`required_synchronized_secondaries_to_commit` with a
+FAILOVER-DEGRADED flag, AG listener IPs (multi-subnet), HADR
+endpoint inventory, long-running transactions pinning log
+truncation.
+
+### `perf_25_tempdb_contention.sql`
+
+tempdb file layout, CPU-count vs data-file count assessment against
+Microsoft guidance (1:1 up to 8 cores, then groups of 4), per-file
+free space + user/internal/version-store breakdown via
+`dm_db_file_space_usage`, active PFS / GAM / SGAM page latch waits
+(resource_description parsed to 2:*:1 / 2:*:2 / 2:*:3), cumulative
+`PAGELATCH*` wait stats, top sessions by tempdb allocation,
+version-store growth per database.
+
 ### `perf_22_replication_deepdive.sql`
 
 Always On availability groups + replica state (availability mode /

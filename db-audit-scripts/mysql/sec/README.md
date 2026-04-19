@@ -209,6 +209,14 @@ the current column set (`name, ret, dl, type`); the `Aggregate`
 column was removed in MySQL 8.0 and its meaning is now encoded in
 the `type` enum. Replication subscriptions.
 
+### `sec_23_data_retention_audit.sql`
+
+Top tables by size with `CREATE_TIME` / `UPDATE_TIME`, large
+non-partitioned tables (> 1 GB) flagged as retention candidates,
+time-like column inventory for retention-key discovery, scheduled
+`EVENTS` sampling (retention is often implemented here), event-
+scheduler global state, per-schema size roll-up.
+
 ### `sec_19_schema_change_history.sql`
 
 Audit-plugin presence (MySQL Enterprise Audit / MariaDB Audit);

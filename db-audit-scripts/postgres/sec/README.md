@@ -171,6 +171,14 @@ strings and user mapping options are **masked by default** — pass
 `-v unmask_secrets=true` to `psql` to see unmasked values when
 authorized.
 
+### `sec_23_data_retention_audit.sql`
+
+Top 100 tables by total size with insert/update/delete counters, large
+append-only tables (zero deletes, > 1 GB) flagged as retention
+candidates, time-like column inventory for retention-key discovery,
+presence of `pg_partman` / `timescaledb` / `pg_cron` / `pgagent`
+extensions as retention-mechanism signals.
+
 ### `sec_19_schema_change_history.sql`
 
 DDL / schema-change trail inventory: pgaudit / pgmemento presence,

@@ -199,6 +199,16 @@ printed), server-level credentials, Agent proxies, Service Broker
 services / queues / contracts / message types / routes, external data
 sources and tables (PolyBase), replication publications.
 
+### `sec_23_data_retention_audit.sql`
+
+Top 100 tables by reserved pages, large non-partitioned tables
+(> 1 GB) flagged as retention candidates, time-like column
+inventory, SQL Agent jobs whose steps contain `DELETE` /
+`TRUNCATE` / `purge` / `retention` keywords (TRY/CATCH-wrapped
+against Azure SQL DB where msdb is absent), temporal tables +
+`HISTORY_RETENTION_PERIOD` state (temporal tables with NULL
+retention keep history forever).
+
 ### `sec_19_schema_change_history.sql`
 
 Server- and database-scoped DDL triggers; Server Audit configuration

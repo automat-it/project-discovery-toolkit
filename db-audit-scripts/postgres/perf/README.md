@@ -159,6 +159,15 @@ autovacuum workers in flight, progress from every `pg_stat_progress_*`
 view (vacuum, analyze, cluster, create_index, basebackup, copy),
 and prepared transactions.
 
+### `perf_24_ha_cluster_health.sql`
+
+Cluster-level HA posture: node role (primary/standby), synchronous
+replication quorum state (sync vs async replica counts against
+`synchronous_standby_names`), WAL archiver health from
+`pg_stat_archiver` with staleness / failure assessment, backup-sender
+activity, orchestrator residue (Patroni / repmgr schema presence),
+long-running transactions / prepared transactions that pin WAL.
+
 ### `perf_22_replication_deepdive.sql`
 
 Primary-side per-standby lag (send / flush / replay bytes + intervals),
@@ -167,6 +176,17 @@ replication-slot WAL retention with assessment buckets, standby-side
 worker apply lag, per-database replay conflicts.
 
 ## Medium priority additional
+
+### `perf_23_plan_regression.sql`
+
+High-variance statement detection via `pg_stat_statements` —
+coefficient-of-variation (stddev/mean) and max/min execution-time
+ratio are the two signals PostgreSQL exposes without explicit plan
+history. Per-session prepared-statement plan-cache state
+(`generic_plans` vs `custom_plans`), per-database cache-hit ratio,
+`auto_explain` configuration so operators know whether plans are
+being logged. Script is guarded to run on clusters without
+`pg_stat_statements` installed.
 
 ### `perf_21_partition_health.sql`
 

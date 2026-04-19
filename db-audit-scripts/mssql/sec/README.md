@@ -128,6 +128,17 @@ Service Broker queue activation procedures, linked servers with
 `xp_cmdshell / sp_OACreate / xp_regread / OPENROWSET` usage,
 server-level credentials.
 
+### `sec_20_failed_login_patterns.sql`
+
+`AuditLevel` registry probe via `xp_instance_regread` (wrapped in
+TRY/CATCH); Server Audit / audit-specification coverage for
+FAILED_LOGIN / LOGIN_CHANGE groups; ERRORLOG scrape via
+`xp_readerrorlog` with ordered fallback for older builds;
+aggregation of failed-login rows by extracted login / client IP /
+reason; `LOGINPROPERTY`-based lockout, bad-password-count,
+expiration state per SQL login; currently connected sessions grouped
+by client IP.
+
 ## Medium priority
 
 ### `sec_11_role_inheritance_chains.sql`
@@ -169,6 +180,16 @@ Linked servers, linked logins (`remote_password` always masked — never
 printed), server-level credentials, Agent proxies, Service Broker
 services / queues / contracts / message types / routes, external data
 sources and tables (PolyBase), replication publications.
+
+### `sec_19_schema_change_history.sql`
+
+Server- and database-scoped DDL triggers; Server Audit configuration
+capturing `SCHEMA_OBJECT_CHANGE_GROUP` / `DATABASE_OBJECT_CHANGE_GROUP`
+/ `%LOGIN%` / `%PRINCIPAL%` actions; default-trace DDL events read via
+`sys.fn_trace_gettable` (wrapped in TRY/CATCH); recently created /
+altered objects by `modify_date`; recently created logins and database
+principals; Extended Event sessions capturing
+`object_altered / _created / _deleted`.
 
 ## Low priority
 

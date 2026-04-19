@@ -146,6 +146,15 @@ top tables by rows / size, connection limit vs usage, **identity-column
 headroom** (TINYINT / SMALLINT / INT / BIGINT percent consumed),
 sequence-object consumption, filegroup layout per database.
 
+### `perf_19_storage_topology.sql`
+
+Instance-wide `sys.master_files` inventory, current-database file
+layout with filegroup placement, per-filegroup size roll-up, per-table
+filegroup placement, per-file I/O latency from
+`sys.dm_io_virtual_file_stats`, tempdb file layout, drive-letter roll-
+up. All `sys.master_files` blocks are wrapped in TRY/CATCH so the
+script degrades cleanly on Azure SQL Database.
+
 ## Low priority
 
 ### `perf_16_plan_instability.sql`

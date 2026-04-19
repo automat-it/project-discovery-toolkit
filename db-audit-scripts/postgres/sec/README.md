@@ -107,6 +107,14 @@ procedural languages (plperlu, plpythonu, pltclu, c — `internal` is
 tracked separately as informational), event triggers, foreign data
 wrappers and user mappings — privilege escalation paths.
 
+### `sec_20_failed_login_patterns.sql`
+
+Authentication-logging configuration, `pg_hba` auth methods, per-role
+login limits, connected-client clustering by IP, and any
+auth-tracking extensions (credcheck, passwordcheck). PostgreSQL does
+not surface failed logins via SQL; the script reports what *is*
+visible and calls out the gap if `log_connections` is off.
+
 ## Medium priority
 
 ### `sec_11_role_inheritance_chains.sql`
@@ -146,6 +154,14 @@ dblink, logical replication subscriptions and publications. Connection
 strings and user mapping options are **masked by default** — pass
 `-v unmask_secrets=true` to `psql` to see unmasked values when
 authorized.
+
+### `sec_19_schema_change_history.sql`
+
+DDL / schema-change trail inventory: pgaudit / pgmemento presence,
+`log_statement` setting, event triggers, recently modified objects
+via `pg_stat_all_tables`, and the 50 most recently-allocated OIDs as
+a fallback "newest objects" signal. Flags whether any persistent DDL
+audit trail exists on the server.
 
 ## Low priority
 

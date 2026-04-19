@@ -143,6 +143,13 @@ and WAL stats — forced checkpoints cause latency spikes.
 Cluster-wide storage, per-database size, transaction ID consumption,
 tablespace usage, sequence headroom — for capacity planning.
 
+### `perf_19_storage_topology.sql`
+
+Tablespace inventory with on-disk location, data/WAL/log directories,
+objects placed off the default tablespace, per-schema size roll-up,
+replication-slot WAL retention, per-database temp-file spill.
+Essential for DR planning and I/O balancing.
+
 ## Low priority
 
 ### `perf_16_plan_instability.sql`

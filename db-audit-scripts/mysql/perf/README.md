@@ -198,6 +198,13 @@ Per-schema data and index sizes; tablespace usage from
 type (TINYINT, SMALLINT, INT, BIGINT) — MySQL's equivalent of PostgreSQL
 sequence headroom. No XID wraparound concept in MySQL.
 
+### `perf_19_storage_topology.sql`
+
+`datadir` / `tmpdir` / InnoDB directory variables, InnoDB tablespace
+inventory (`INNODB_TABLESPACES` + `INNODB_DATAFILES` file paths), per-
+database and top-30 largest-table size, non-InnoDB tables that need
+different backup handling, buffer-pool-to-data-footprint ratio.
+
 ## Low priority
 
 ### `perf_16_plan_instability.sql`

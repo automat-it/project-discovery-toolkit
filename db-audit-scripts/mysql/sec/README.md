@@ -134,6 +134,18 @@ server definitions from `mysql.servers`. Routines executable by
 wildcard-host grantees are read from `mysql.procs_priv` (replacing
 the removed `ROUTINE_PRIVILEGES` view).
 
+### `sec_20_failed_login_patterns.sql`
+
+Connection-control plugin presence and variables; accounts tracked by
+`CONNECTION_CONTROL_FAILED_LOGIN_ATTEMPTS` (probed with a prepared
+statement so the script does not error when the plugin is not
+installed); access-denied aggregates from
+`events_errors_summary_by_account_by_error` /
+`events_errors_summary_by_host_by_error`; `Aborted_connects` /
+`Connection_errors_*` counters; per-host `host_cache` error counts;
+account lock / password-expiry state from `mysql.user`;
+`max_connect_errors` / `max_user_connections` thresholds.
+
 ## Medium priority
 
 ### `sec_11_role_inheritance_chains.sql`
@@ -178,6 +190,15 @@ users from `mysql.servers.Username`. UDFs from `mysql.func` using
 the current column set (`name, ret, dl, type`); the `Aggregate`
 column was removed in MySQL 8.0 and its meaning is now encoded in
 the `type` enum. Replication subscriptions.
+
+### `sec_19_schema_change_history.sql`
+
+Audit-plugin presence (MySQL Enterprise Audit / MariaDB Audit);
+binlog / general-log / slow-log configuration as coarse DDL-trail
+surrogates; recently created / altered tables, routines, triggers
+from `information_schema`; DDL statements still visible in
+`performance_schema.events_statements_history_long`; summary
+assessment of whether any persistent DDL trail exists.
 
 ## Low priority
 

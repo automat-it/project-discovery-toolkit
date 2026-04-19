@@ -159,6 +159,23 @@ autovacuum workers in flight, progress from every `pg_stat_progress_*`
 view (vacuum, analyze, cluster, create_index, basebackup, copy),
 and prepared transactions.
 
+### `perf_22_replication_deepdive.sql`
+
+Primary-side per-standby lag (send / flush / replay bytes + intervals),
+replication-slot WAL retention with assessment buckets, standby-side
+`pg_stat_wal_receiver` + replay-clock lag, logical subscriptions and
+worker apply lag, per-database replay conflicts.
+
+## Medium priority additional
+
+### `perf_21_partition_health.sql`
+
+Declarative partition parents + strategy + partition key, child-
+partition bounds / size / row estimate, missing `DEFAULT` partition
+detection for list/range parents, partition-count assessment
+buckets (>1000 children is a planner hazard), stale-stats child
+scan, legacy inheritance-based parents.
+
 ## Low priority
 
 ### `perf_16_plan_instability.sql`

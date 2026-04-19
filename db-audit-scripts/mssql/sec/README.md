@@ -139,6 +139,24 @@ reason; `LOGINPROPERTY`-based lockout, bad-password-count,
 expiration state per SQL login; currently connected sessions grouped
 by client IP.
 
+### `sec_21_patch_and_cve_level.sql`
+
+`SERVERPROPERTY` (ProductVersion / Level / Build / UpdateLevel /
+UpdateReference), edition + engine edition, `@@VERSION` banner,
+branch EOL matrix for SQL 2012 → SQL 2022, `sys.dm_os_host_info`,
+`sys.dm_server_services` (Azure-guarded) with `last_startup_time` —
+long uptime is a signal of skipped Cumulative Updates (CU installs
+require service restart).
+
+### `sec_22_cert_and_key_expiry.sql`
+
+`sys.certificates` in the current DB and in `master` (wrapped in
+TRY/CATCH), days-until-expiry bucket per certificate, TDE encryption
+state per database via `sys.dm_database_encryption_keys`, Always
+Encrypted CMK / CEK inventory, TLS endpoint certs, SQL-login
+expiration state via `LOGINPROPERTY(DaysUntilExpiration / IsExpired /
+IsMustChange / IsLocked / HistoryLength / PasswordLastSetTime)`.
+
 ## Medium priority
 
 ### `sec_11_role_inheritance_chains.sql`

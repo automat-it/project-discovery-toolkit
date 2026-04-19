@@ -215,6 +215,22 @@ MAX_USER_CONNECTIONS); timeouts; current activity snapshot by
 `PROCESSLIST.STATE`; statements running >60s; in-flight progress
 from `events_stages_current`.
 
+### `perf_21_partition_health.sql`
+
+Partitioned-table inventory grouped per table (`PARTITION_METHOD`,
+`SUBPARTITION_METHOD`, expressions, total size), per-partition row /
+size distribution for skew detection, partition-count assessment
+(8 192 hard limit awareness), missing `MAXVALUE` / `DEFAULT` catch-all
+detection for `RANGE` / `LIST`, hottest-by-`UPDATE_TIME` partitions.
+
+### `perf_22_replication_deepdive.sql`
+
+`@@server_id`, binlog / GTID config, per-channel connection state
+(`replication_connection_configuration` + `_status`), applier
+coordinator and per-worker apply lag computed as
+`original_commit_timestamp` → `end_apply_timestamp`, GTID executed /
+purged, Group Replication members (prepared-statement guarded).
+
 ## Low priority
 
 ### `perf_16_plan_instability.sql`

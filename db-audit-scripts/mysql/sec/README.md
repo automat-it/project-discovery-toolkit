@@ -146,6 +146,24 @@ installed); access-denied aggregates from
 account lock / password-expiry state from `mysql.user`;
 `max_connect_errors` / `max_user_connections` thresholds.
 
+### `sec_21_patch_and_cve_level.sql`
+
+`VERSION()`, compile arch / OS / edition, branch EOL matrix for MySQL
+(8.4 LTS / 8.0 / 5.7 / 5.6) and MariaDB (11.4 / 10.11 / 10.6 / 10.5 /
+10.4) as of Nov 2024, active plugin inventory with versions, components
+registered via the 8.0 `mysql.component` table (prepared-statement
+guarded for 5.7), SSL library version in use.
+
+### `sec_22_cert_and_key_expiry.sql`
+
+Server-side TLS variables (`ssl_cert`, `ssl_key`, `tls_version`,
+`require_secure_transport`, FIPS mode), active server cert validity
+window from `performance_schema.global_status` (`Ssl_server_not_before`
+/ `Ssl_server_not_after`) with `STR_TO_DATE` parsing and days-until-
+expiry bucketing, per-account `password_lifetime` + `password_expired`
+state with policy-computed expiry date, currently-connected SSL vs
+plaintext session ratio, keyring / encryption plugin inventory.
+
 ## Medium priority
 
 ### `sec_11_role_inheritance_chains.sql`

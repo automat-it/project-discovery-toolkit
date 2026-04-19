@@ -164,6 +164,28 @@ threads, blocked-process threshold), session-to-workload-group
 mapping, long-running user requests (>60s) with current statement,
 Query Store wait-category summary when Query Store is enabled.
 
+### `perf_22_replication_deepdive.sql`
+
+Always On availability groups + replica state (availability mode /
+failover mode / sync health / connected state), per-database replica
+sync state with `log_send_queue` / `redo_queue` sizes and rates (and
+a computed "seconds behind" estimate), AG listener configuration,
+legacy database mirroring, log-shipping monitor (primary + secondary,
+minutes-since-last-restore), `sp_replcounters` for transactional
+replication. Every DMV wrapped in TRY/CATCH so HA-off instances do
+not abort the script.
+
+## Medium priority additional
+
+### `perf_21_partition_health.sql`
+
+`sys.partition_functions` + `sys.partition_schemes`, per-partition
+row counts / size in MB / filegroup placement, `sys.partition_range_
+values` boundary schedule, partition-skew detection (`max_rows` vs
+average ratio), sliding-window right-edge empty-partition check —
+a partition containing rows at the highest partition number blocks
+SWITCH-based retention.
+
 ## Low priority
 
 ### `perf_16_plan_instability.sql`

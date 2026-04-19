@@ -115,6 +115,22 @@ auth-tracking extensions (credcheck, passwordcheck). PostgreSQL does
 not surface failed logins via SQL; the script reports what *is*
 visible and calls out the gap if `log_connections` is off.
 
+### `sec_21_patch_and_cve_level.sql`
+
+Server version, major-branch EOL matrix (10 → 17 + upcoming),
+installed extensions compared against `pg_available_extensions` for
+outdated-version detection, procedural languages. Cross-reference
+the banner with the PostgreSQL Security Information page.
+
+### `sec_22_cert_and_key_expiry.sql`
+
+Per-role `rolvaliduntil` with days-until-expiry bucketing (`EXPIRED`
+/ 30d / 90d / ok), TLS session inventory via `pg_stat_ssl`, TLS
+protocol / cipher distribution, foreign-server `srvoptions`
+containing `ssl*` / `cert*` / `key*`. TLS file expiry (`ssl_cert_file`)
+is not visible via SQL — operator_action calls for `openssl x509
+-enddate`.
+
 ## Medium priority
 
 ### `sec_11_role_inheritance_chains.sql`

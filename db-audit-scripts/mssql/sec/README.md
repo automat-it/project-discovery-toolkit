@@ -30,6 +30,34 @@ reports/mssql_sec_YYYYMMDD_HHMMSS/
   low_sec_18_audit_gaps.log
 ```
 
+## Multi-database runner (`run_all_databases.sh`)
+
+On an instance with many user databases, `run_all_databases.sh`
+enumerates every ONLINE user database (`database_id > 4`, excluding
+`distribution` and AG secondaries that disallow reads) and invokes
+`run_audit.sh` once per database plus one server-level pass against
+`master`. Each run lands in its own sub-folder of a shared timestamped
+root so reports stay separated but grouped.
+
+```bash
+SQLCMDPASSWORD=secret ./run_all_databases.sh -U auditor -S db.internal,1433
+
+# narrow the list:
+./run_all_databases.sh -U auditor -i 'prod_%'          # include LIKE
+./run_all_databases.sh -U auditor -x 'tempdb|staging'  # exclude ERE
+```
+
+Output layout:
+
+```
+reports/mssql_sec_all_YYYYMMDD_HHMMSS/
+  _summary.txt                          # OK/FAIL per database
+  _server/mssql_sec_YYYYMMDD_HHMMSS/    # server-level roles / logins / audits
+  app_production/mssql_sec_.../         # per-database pass
+  app_staging/mssql_sec_.../
+  ...
+```
+
 ## Read-only guarantee
 
 All scripts in this set are **read-only**: only `SELECT`, read-only

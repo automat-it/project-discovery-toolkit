@@ -3,6 +3,34 @@
 Read-only diagnostic queries for MySQL security analysis.
 Each script is independent and can be run standalone with `mysql < script.sql`.
 
+## Batch runner (`run_audit.sh`)
+
+`run_audit.sh` executes every script in this folder in priority order
+(`critical` → `high` → `medium` → `low`) and writes one log file per
+script into a timestamped report folder.
+
+```bash
+# password comes from MYSQL_PWD (preferred over -p, stays out of `ps`)
+MYSQL_PWD=secret ./run_audit.sh -u auditor -h db.internal -P 3306 -d mysql
+```
+
+Flags: `-u USER` (required) `-h HOST` `-P PORT` `-d DATABASE`
+`-o OUT_ROOT` (default `./reports`). Failure is detected by the mysql
+client's exit code plus a post-run grep for `^ERROR NNNN` in the log —
+`--abort-source-on-error` is not uniformly supported across mysql
+client builds, so the grep is the portable backstop.
+
+Output layout:
+
+```
+reports/mysql_sec_YYYYMMDD_HHMMSS/
+  _summary.txt                          # OK/FAIL per script + totals
+  critical_sec_01_users_and_roles_inventory.log
+  critical_sec_02_effective_privileges.log
+  ...
+  low_sec_18_audit_gaps.log
+```
+
 ## Read-only guarantee
 
 All scripts in this set are **read-only**: only `SELECT` and `SHOW`

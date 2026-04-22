@@ -4,6 +4,32 @@ Read-only diagnostic queries for Microsoft SQL Server security
 analysis. Each script is independent and can be run standalone with
 `sqlcmd -i <script>.sql`.
 
+## Batch runner (`run_audit.sh`)
+
+`run_audit.sh` executes every script in this folder in priority order
+(`critical` → `high` → `medium` → `low`) and writes one log file per
+script into a timestamped report folder.
+
+```bash
+# password comes from SQLCMDPASSWORD (preferred over -P, stays out of `ps`)
+SQLCMDPASSWORD=secret ./run_audit.sh -U auditor -S db.internal,1433 -d master
+```
+
+Flags: `-U USER` (required) `-S SERVER` (accepts `host` or `host,port`)
+`-d DATABASE` `-o OUT_ROOT` (default `./reports`). Failure detection
+uses `sqlcmd -b`, which exits non-zero on any message at severity ≥ 11.
+
+Output layout:
+
+```
+reports/mssql_sec_YYYYMMDD_HHMMSS/
+  _summary.txt                          # OK/FAIL per script + totals
+  critical_sec_01_users_and_roles_inventory.log
+  critical_sec_02_effective_privileges.log
+  ...
+  low_sec_18_audit_gaps.log
+```
+
 ## Read-only guarantee
 
 All scripts in this set are **read-only**: only `SELECT`, read-only

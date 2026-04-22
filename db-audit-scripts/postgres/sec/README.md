@@ -3,6 +3,32 @@
 Read-only diagnostic queries for PostgreSQL security analysis.
 Each script is independent and can be run standalone with `psql -f`.
 
+## Batch runner (`run_audit.sh`)
+
+`run_audit.sh` executes every script in this folder in priority order
+(`critical` → `high` → `medium` → `low`) and writes one log file per
+script into a timestamped report folder.
+
+```bash
+# password comes from the PGPASSWORD env var (kept out of `ps`)
+PGPASSWORD=secret ./run_audit.sh -h db.internal -P 5432 -U auditor -d prod
+```
+
+Flags: `-h HOST` `-P PORT` `-U USER` `-d DATABASE` `-o OUT_ROOT`
+(default `./reports`). Failure detection uses `psql -v ON_ERROR_STOP=1`,
+so any script that errors mid-run is marked FAIL in the summary.
+
+Output layout:
+
+```
+reports/postgres_sec_YYYYMMDD_HHMMSS/
+  _summary.txt                          # OK/FAIL per script + totals
+  critical_sec_01_users_and_roles_inventory.log
+  critical_sec_02_effective_privileges.log
+  ...
+  low_sec_18_audit_gaps.log
+```
+
 ## Read-only guarantee
 
 All scripts in this set are **read-only**: only `SELECT` and `SHOW`

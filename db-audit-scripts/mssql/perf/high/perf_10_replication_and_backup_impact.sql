@@ -54,15 +54,18 @@ LEFT JOIN sys.availability_replicas ar ON ar.replica_id = drs.replica_id
 ORDER BY DB_NAME(drs.database_id);
 
 -- ---------------------------------------------------------------------------
--- CDC state per database
+-- CDC state per database. `is_change_feed_enabled` only exists on newer
+-- SQL Server 2022 CU builds and some Azure SQL SKUs; reference it via
+-- dynamic SQL so older engines (incl. Azure SQL Edge) still run the block.
 -- ---------------------------------------------------------------------------
-SELECT
-    name                                              AS database_name,
-    is_cdc_enabled,
-    is_change_feed_enabled
-FROM sys.databases
-WHERE database_id > 4
-ORDER BY name;
+DECLARE @cdc_sql nvarchar(max) =
+    N'SELECT name AS database_name, is_cdc_enabled' +
+    CASE WHEN COL_LENGTH('sys.databases','is_change_feed_enabled') IS NOT NULL
+         THEN N', is_change_feed_enabled'
+         ELSE N', CAST(NULL AS bit) AS is_change_feed_enabled'
+    END +
+    N' FROM sys.databases WHERE database_id > 4 ORDER BY name;';
+EXEC sp_executesql @cdc_sql;
 
 -- CDC capture / cleanup jobs (if exposed at instance level). msdb is not
 -- present on Azure SQL Database — guard so the rest of the script runs.

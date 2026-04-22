@@ -121,7 +121,7 @@ SELECT
     WHEN r.base_type IN ('numeric','decimal') AND (i.numeric_precision IS NULL OR i.numeric_precision = 0) THEN 'RISK'
     WHEN r.base_type IN ('numeric','decimal') AND i.numeric_precision >= 39 THEN 'RISK'
     WHEN r.base_type IN (
-      'money','interval','xml','json','jsonb','hstore','tsvector','tsquery',
+      'money','interval','xml','json','jsonb','tsvector','tsquery',
       'point','line','lseg','box','path','polygon','circle',
       'int4range','int8range','numrange','tsrange','tstzrange','daterange'
     ) THEN 'REVIEW'
@@ -131,10 +131,10 @@ SELECT
     WHEN r.base_type IN (
       'int2','int4','int8','smallint','integer','bigint',
       'float4','float8','real','double precision',
+      'numeric','decimal',
       'bool','boolean',
       'date',
       'time','timetz','time without time zone','time with time zone',
-      'timestamp','timestamptz','timestamp without time zone','timestamp with time zone',
       'text','varchar','bpchar','char','character','character varying',
       'bytea','uuid','cidr','inet','macaddr','bit','varbit'
     ) THEN 'OK'
@@ -148,6 +148,10 @@ SELECT
     WHEN r.base_type IN ('numeric','decimal') AND i.numeric_precision >= 39 THEN 'Numeric precision >=39'
     WHEN r.base_type IN ('json','jsonb','xml') THEN 'LOB-like behavior'
     WHEN r.base_type = 'interval' THEN 'Interval mapped to string'
+    WHEN r.base_type = 'money' THEN 'Money type (locale-sensitive)'
+    WHEN r.base_type IN ('tsvector','tsquery') THEN 'Full-text search type'
+    WHEN r.base_type IN ('point','line','lseg','box','path','polygon','circle') THEN 'Geometric type'
+    WHEN r.base_type IN ('int4range','int8range','numrange','tsrange','tstzrange','daterange') THEN 'Range type'
     WHEN r.is_array THEN 'Array type'
     WHEN r.is_composite THEN 'Composite type'
     WHEN r.is_range THEN 'Range type'
@@ -213,7 +217,6 @@ ORDER BY CASE status WHEN 'RISK' THEN 1 WHEN 'UNKNOWN' THEN 2 WHEN 'REVIEW' THEN
 \pset format aligned
 \pset border 1
 
-\echo COPY 22
 \echo
 \echo =====================================================================
 \echo Report generation complete!

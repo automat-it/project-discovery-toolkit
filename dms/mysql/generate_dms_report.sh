@@ -127,7 +127,7 @@ report AS (
     cb.collation_name,
     CASE
       WHEN COALESCE(pt.has_pk, 0) = 0 THEN 'RISK'
-      WHEN cb.extra LIKE '%GENERATED%' THEN 'RISK'
+      WHEN cb.extra LIKE '%VIRTUAL GENERATED%' OR cb.extra LIKE '%STORED GENERATED%' THEN 'RISK'
       WHEN cb.data_type IN ('geometry','point','linestring','polygon','multipoint','multilinestring','multipolygon','geometrycollection') THEN 'REVIEW'
       WHEN cb.data_type = 'json' THEN 'REVIEW'
       WHEN cb.data_type IN ('enum','set') THEN 'REVIEW'
@@ -137,6 +137,7 @@ report AS (
       WHEN cb.data_type IN (
         'tinyint','smallint','mediumint','int','integer','bigint',
         'float','double','real','bit','boolean','bool',
+        'decimal','numeric',
         'date','datetime','timestamp','time','year',
         'char','varchar','binary','varbinary'
       ) THEN 'OK'
@@ -144,7 +145,7 @@ report AS (
     END AS status,
     CASE
       WHEN COALESCE(pt.has_pk, 0) = 0 THEN 'Table without primary key'
-      WHEN cb.extra LIKE '%GENERATED%' THEN 'Generated column'
+      WHEN cb.extra LIKE '%VIRTUAL GENERATED%' OR cb.extra LIKE '%STORED GENERATED%' THEN 'Generated column'
       WHEN cb.data_type IN ('geometry','point','linestring','polygon','multipoint','multilinestring','multipolygon','geometrycollection') THEN 'Spatial type'
       WHEN cb.data_type = 'json' THEN 'JSON type'
       WHEN cb.data_type IN ('enum','set') THEN 'ENUM/SET type'

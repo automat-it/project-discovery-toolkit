@@ -76,6 +76,50 @@ Specific elevated requirements:
 Run priorities top-to-bottom — `critical` first gives roughly 80% of the
 insight needed to identify performance problems.
 
+## Aurora / RDS PostgreSQL caveats
+
+The scripts run on Amazon Aurora PostgreSQL and RDS for PostgreSQL
+clusters, with the following expectations:
+
+* **Run against the writer endpoint.** `pg_stat_bgwriter`, write-related
+  IO counters, and log-flush stats are meaningful only on the primary.
+  Reader endpoints accept the connection but surface a subset of
+  metrics.
+* **No blocked server-side APIs are used.** The scripts do not call
+  `pg_read_file`, `pg_ls_dir`, `pg_ls_waldir`, `pg_ls_logdir`,
+  `pg_ls_tmpdir`, `pg_read_server_files`, `pg_rotate_logfile`,
+  `pg_reload_conf`, `pg_switch_wal`, or `ALTER SYSTEM` — all of which
+  are blocked or restricted on Aurora/RDS. Nothing hits the Aurora
+  blocklist.
+* **Replication views return empty on Aurora.** Aurora replicates at
+  the storage layer, not via WAL-shipping or replication slots.
+  `pg_replication_slots`, `pg_stat_wal_receiver`, and often
+  `pg_stat_replication` exist but are empty. The scripts affected
+  (`perf_10`, `perf_22`, `perf_24`) do not error — they simply return
+  zero rows. For real reader-lag data use CloudWatch
+  (`AuroraReplicaLag`, `AuroraReplicaLagMaximum`,
+  `AuroraReplicaLagMinimum`).
+* **`pg_stat_statements` must be enabled in the audited database.**
+  Default Aurora parameter groups already load the library via
+  `shared_preload_libraries`; you still need to run, once per database:
+  `CREATE EXTENSION IF NOT EXISTS pg_stat_statements;`. Without it,
+  `perf_01`, `perf_04`, `perf_13`, `perf_16`, `perf_23` raise `relation
+  "pg_stat_statements" does not exist`.
+* **Recommended parameter-group tweaks** (take effect after reboot on
+  cluster parameter group):
+  * `track_io_timing = on` — required for read/write timing columns in
+    `pg_stat_statements` and `pg_statio_*`.
+  * `track_activities = on` and `track_counts = on` (defaults; verify).
+* **Recommended auditor role:**
+  ```sql
+  CREATE ROLE auditor LOGIN PASSWORD '…';
+  GRANT pg_monitor, pg_read_all_stats, pg_read_all_settings TO auditor;
+  GRANT rds_superuser TO auditor;  -- optional; unlocks pg_authid / pg_hba_file_rules
+  ```
+  Without `rds_superuser`, privileged-catalog blocks are guarded via
+  `has_table_privilege(...)` and degrade to a "Skipped: … not readable
+  by <current_user>" row rather than an error.
+
 ## Critical priority
 
 ### `perf_01_top_sql.sql`

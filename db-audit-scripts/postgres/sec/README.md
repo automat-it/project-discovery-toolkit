@@ -65,6 +65,33 @@ Specific elevated requirements:
 Run priorities top-to-bottom — `critical` first covers the highest-risk
 access and compromise paths.
 
+## Aurora / RDS PostgreSQL caveats
+
+The scripts run on Amazon Aurora PostgreSQL and RDS for PostgreSQL
+clusters. Security-script specifics:
+
+* **`rds_superuser` unlocks everything.** Every access to
+  `pg_authid`, `pg_hba_file_rules`, and `pg_ident_file_mappings` is
+  wrapped in `has_table_privilege(...)`. Without `rds_superuser`
+  (or a managed role granting equivalent privileges) these blocks
+  emit a `Skipped: … not readable by <current_user>` row and the
+  script continues. Scripts affected: `sec_01`, `sec_03`, `sec_05`,
+  `sec_07`, `sec_08`, `sec_12`, `sec_17`, `sec_20`.
+* **No blocked server-side APIs.** No `pg_read_file` / `pg_ls_*` /
+  `pg_read_server_files` / `ALTER SYSTEM` anywhere — nothing hits
+  the Aurora blocklist.
+* **`pg_stat_statements` must be enabled in the audited database.**
+  `sec_20_failed_login_patterns.sql` references it. Run once per
+  database: `CREATE EXTENSION IF NOT EXISTS pg_stat_statements;`.
+* **Run against the writer endpoint.** A few DMVs (e.g.
+  `pg_stat_database` counters) are authoritative only on the primary.
+* **Recommended auditor role:**
+  ```sql
+  CREATE ROLE auditor LOGIN PASSWORD '…';
+  GRANT pg_monitor, pg_read_all_stats, pg_read_all_settings TO auditor;
+  GRANT rds_superuser TO auditor;  -- for full sec_* coverage
+  ```
+
 ## Critical priority
 
 ### `sec_01_users_and_roles_inventory.sql`

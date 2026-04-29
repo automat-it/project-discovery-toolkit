@@ -30,6 +30,33 @@ reports/mssql_perf_YYYYMMDD_HHMMSS/
   low_perf_18_forecast_inputs.log
 ```
 
+## PowerShell runner (`run_audit.ps1` / `run_all_databases.ps1`)
+
+Native Windows alternative to the bash runners. Requires PowerShell 5.1+
+and `sqlcmd` (`winget install Microsoft.go-sqlcmd`).
+
+```powershell
+# Windows Authentication (domain environment — no password needed)
+.\run_audit.ps1 -Server "sql01.corp.local"
+
+# SQL Server Authentication — password from env (stays out of shell history)
+$env:SQLCMDPASSWORD = "s3cr3t"
+.\run_audit.ps1 -Server "sql01.corp.local,1433" -User auditor -Database master
+
+# Multi-database: all user DBs, Windows Auth
+.\run_all_databases.ps1 -Server "sql01.corp.local"
+
+# Multi-database: SQL auth, filter by name
+$env:SQLCMDPASSWORD = "s3cr3t"
+.\run_all_databases.ps1 -Server "sql01,1433" -User auditor `
+    -IncludeLike "prod_%" -ExcludeRegex "staging|archive"
+```
+
+If PowerShell execution policy blocks the script:
+```powershell
+powershell -ExecutionPolicy Bypass -File .\run_audit.ps1 -Server sql01
+```
+
 ## Multi-database runner (`run_all_databases.sh`)
 
 On an instance with many user databases, `run_all_databases.sh`

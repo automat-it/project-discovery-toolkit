@@ -30,31 +30,51 @@ reports/mssql_perf_YYYYMMDD_HHMMSS/
   low_perf_18_forecast_inputs.log
 ```
 
-## PowerShell runner (`run_audit.ps1` / `run_all_databases.ps1`)
+## PowerShell runners (Windows)
 
-Native Windows alternative to the bash runners. Requires PowerShell 5.1+
-and `sqlcmd` (`winget install Microsoft.go-sqlcmd`).
+Both PowerShell scripts live in the **`mssql\` root folder** (one level above
+this `perf\` folder). They resolve all paths relative to their own location —
+no dependency on the caller's working directory.
 
+```
+db-audit-scripts\mssql\
+  run_audit.ps1           ← single database, -Category perf|sec|both
+  run_all_databases.ps1   ← enumerate all user DBs automatically
+  perf\                   ← SQL scripts (this folder)
+  sec\                    ← SQL scripts
+```
+
+Install sqlcmd first (one-time):
 ```powershell
-# Windows Authentication (domain environment — no password needed)
-.\run_audit.ps1 -Server "sql01.corp.local"
+winget install Microsoft.go-sqlcmd
+```
 
-# SQL Server Authentication — password from env (stays out of shell history)
+**Single database — perf only:**
+```powershell
+cd db-audit-scripts\mssql
+
+# Windows Authentication (domain — no password needed)
+.\run_audit.ps1 -Server "STG-SQL-N1" -Category perf
+
+# SQL Server Authentication — password via env (stays out of shell history)
 $env:SQLCMDPASSWORD = "s3cr3t"
-.\run_audit.ps1 -Server "sql01.corp.local,1433" -User auditor -Database master
+.\run_audit.ps1 -Server "STG-SQL-N1,1433" -User auditor -Database master -Category perf
+```
 
-# Multi-database: all user DBs, Windows Auth
-.\run_all_databases.ps1 -Server "sql01.corp.local"
+**All databases — perf only:**
+```powershell
+cd db-audit-scripts\mssql
 
-# Multi-database: SQL auth, filter by name
-$env:SQLCMDPASSWORD = "s3cr3t"
-.\run_all_databases.ps1 -Server "sql01,1433" -User auditor `
+.\run_all_databases.ps1 -Server "STG-SQL-N1" -Category perf
+
+# Filter databases
+.\run_all_databases.ps1 -Server "STG-SQL-N1" -Category perf `
     -IncludeLike "prod_%" -ExcludeRegex "staging|archive"
 ```
 
-If PowerShell execution policy blocks the script:
+If execution policy blocks the script:
 ```powershell
-powershell -ExecutionPolicy Bypass -File .\run_audit.ps1 -Server sql01
+powershell -ExecutionPolicy Bypass -File .\run_audit.ps1 -Server "STG-SQL-N1" -Category perf
 ```
 
 ## Multi-database runner (`run_all_databases.sh`)

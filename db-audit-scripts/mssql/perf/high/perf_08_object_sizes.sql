@@ -92,10 +92,13 @@ SELECT
     o.name                                            AS table_name,
     CAST(SUM(CASE WHEN ps.index_id IN (0,1) THEN ps.reserved_page_count ELSE 0 END) * 8.0 / 1024 AS DECIMAL(18,2)) AS data_mb,
     CAST(SUM(CASE WHEN ps.index_id >  1 THEN ps.reserved_page_count ELSE 0 END) * 8.0 / 1024 AS DECIMAL(18,2)) AS indexes_mb,
+    -- DECIMAL(18,2) -- index size can be many multiples of data size on
+    -- tables with lots of covering / wide non-clustered indexes, so the
+    -- ratio routinely exceeds 999.99 and overflows DECIMAL(5,2).
     CAST(SUM(CASE WHEN ps.index_id >  1 THEN ps.reserved_page_count ELSE 0 END)
          * 1.0
          / NULLIF(SUM(CASE WHEN ps.index_id IN (0,1) THEN ps.reserved_page_count ELSE 0 END), 0)
-         AS DECIMAL(5,2))                             AS index_to_data_ratio
+         AS DECIMAL(18,2))                             AS index_to_data_ratio
 FROM sys.dm_db_partition_stats ps
 JOIN sys.objects o ON o.object_id = ps.object_id
 WHERE o.type = 'U'

@@ -52,8 +52,10 @@ SELECT
     ips.forwarded_record_count,
     ips.page_count,
     CAST(ips.page_count * 8.0 / 1024 AS DECIMAL(18,2)) AS size_mb,
+    -- DECIMAL(18,2) -- forwarded_record_count is bounded by record_count
+    -- in theory, but be defensive against stale stats giving >100%.
     CAST(100.0 * ips.forwarded_record_count
-         / NULLIF(ips.record_count, 0) AS DECIMAL(5,2)) AS forwarded_pct,
+         / NULLIF(ips.record_count, 0) AS DECIMAL(18,2)) AS forwarded_pct,
     ips.record_count
 -- object_id / index_id / partition_number must all be NULL together;
 -- if one is NULL so must the others. Filter heaps via ips.index_id = 0
@@ -95,8 +97,12 @@ SELECT TOP 30
     ips.ghost_record_count,
     ips.version_ghost_record_count,
     ips.record_count,
+    -- DECIMAL(18,2) -- ghost_record_count is a separate counter from
+    -- record_count and can exceed it on tables with heavy DELETE activity
+    -- before the ghost cleanup task runs, so the percentage can be >100%
+    -- (DECIMAL(5,2) overflows above 999.99).
     CAST(100.0 * (ips.ghost_record_count + ips.version_ghost_record_count)
-         / NULLIF(ips.record_count, 0) AS DECIMAL(5,2)) AS ghost_pct,
+         / NULLIF(ips.record_count, 0) AS DECIMAL(18,2)) AS ghost_pct,
     ips.page_count
 FROM sys.dm_db_index_physical_stats(DB_ID(), NULL, NULL, NULL, 'DETAILED') ips
 JOIN sys.indexes i ON i.object_id = ips.object_id AND i.index_id = ips.index_id

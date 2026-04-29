@@ -10,15 +10,15 @@
     Output lands in a timestamped sub-folder of OutRoot.
 
     This script must reside in the mssql\ root folder (alongside perf\ and
-    sec\ sub-folders). It resolves all paths relative to its own location —
+    sec\ sub-folders). It resolves all paths relative to its own location --
     no dependency on the caller's working directory or any parent folder.
 
     Authentication
     --------------
-    Windows Authentication (default — recommended for domain environments):
+    Windows Authentication (default -- recommended for domain environments):
         .\run_audit.ps1 -Server "sql-server.internal"
 
-    SQL Server Authentication (password via env — stays out of shell history):
+    SQL Server Authentication (password via env -- stays out of shell history):
         $env:SQLCMDPASSWORD = "s3cr3t"
         .\run_audit.ps1 -Server "sql-server.internal" -User auditor
 
@@ -122,7 +122,7 @@ Write-Host ("=" * 80)
 foreach ($cat in $Categories) {
     $catRoot = Join-Path $MsqlRoot $cat
     if (-not (Test-Path $catRoot)) {
-        Write-Warning "Category folder not found: $catRoot — skipping"
+        Write-Warning "Category folder not found: $catRoot -- skipping"
         continue
     }
 

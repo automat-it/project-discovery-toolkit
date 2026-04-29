@@ -9,7 +9,7 @@
     run_audit.ps1 once per database plus one server-level pass against master.
 
     Both scripts must reside in the mssql\ root folder. All paths are resolved
-    relative to that folder — no dependency on the caller's working directory
+    relative to that folder -- no dependency on the caller's working directory
     or any parent folder.
 
     Output layout
@@ -27,7 +27,7 @@
 
     Authentication
     --------------
-    Windows Authentication (default — recommended for domain environments):
+    Windows Authentication (default -- recommended for domain environments):
         .\run_all_databases.ps1 -Server "sql-server.internal"
 
     SQL Server Authentication (password via env):
@@ -44,11 +44,11 @@
     SQL Server password. Prefer $env:SQLCMDPASSWORD over this parameter.
 
 .PARAMETER IncludeLike
-    T-SQL LIKE pattern — include only matching database names (default: all).
+    T-SQL LIKE pattern -- include only matching database names (default: all).
     Example: 'prod_%'
 
 .PARAMETER ExcludeRegex
-    PowerShell regex — exclude matching database names (applied after IncludeLike).
+    PowerShell regex -- exclude matching database names (applied after IncludeLike).
     Example: 'staging|test'
 
 .PARAMETER Category
@@ -181,7 +181,7 @@ New-Item -ItemType Directory -Path $OutFull -Force | Out-Null
 $dbCount = @($databases).Count
 
 Write-Host ("=" * 80)
-Write-Host "SQL Server audit — multi-database"
+Write-Host "SQL Server audit -- multi-database"
 Write-Host "  server     = $Server"
 Write-Host "  auth       = $authLabel"
 Write-Host "  category   = $Category"
@@ -216,7 +216,7 @@ function Invoke-AuditForDb {
 }
 
 # ---------------------------------------------------------------------------
-# Server-level pass (master — wait stats, AG state, logins, backups)
+# Server-level pass (master -- wait stats, AG state, logins, backups)
 # ---------------------------------------------------------------------------
 Write-Host ""
 Write-Host "[*] server-level pass (db=master)"

@@ -117,17 +117,47 @@ $Rules = @(
 # Helpers
 # ===========================================================================
 
+# Detect file encoding by BOM. PowerShell 5.1's default '> $log' redirection
+# writes UTF-16 LE; older runs of run_audit.ps1 produced such logs. New runs
+# write UTF-8. Read either correctly.
+function Get-LogEncoding {
+    param([string]$LogPath)
+    if (-not (Test-Path $LogPath)) { return [System.Text.Encoding]::UTF8 }
+    $bytes = [System.IO.File]::ReadAllBytes($LogPath) | Select-Object -First 4
+    if ($bytes.Count -ge 2 -and $bytes[0] -eq 0xFF -and $bytes[1] -eq 0xFE) {
+        return [System.Text.Encoding]::Unicode             # UTF-16 LE BOM
+    }
+    if ($bytes.Count -ge 2 -and $bytes[0] -eq 0xFE -and $bytes[1] -eq 0xFF) {
+        return [System.Text.Encoding]::BigEndianUnicode    # UTF-16 BE BOM
+    }
+    if ($bytes.Count -ge 3 -and $bytes[0] -eq 0xEF -and $bytes[1] -eq 0xBB -and $bytes[2] -eq 0xBF) {
+        return [System.Text.Encoding]::UTF8                # UTF-8 BOM
+    }
+    # Heuristic for BOM-less UTF-16 LE: ASCII byte followed by 0x00.
+    if ($bytes.Count -ge 2 -and $bytes[0] -gt 0 -and $bytes[0] -lt 128 -and $bytes[1] -eq 0) {
+        return [System.Text.Encoding]::Unicode
+    }
+    return [System.Text.Encoding]::UTF8
+}
+
+function Read-LogLines {
+    param([string]$LogPath)
+    if (-not (Test-Path $LogPath)) { return @() }
+    $enc = Get-LogEncoding $LogPath
+    return [System.IO.File]::ReadAllLines($LogPath, $enc)
+}
+
+function Read-LogText {
+    param([string]$LogPath)
+    if (-not (Test-Path $LogPath)) { return "" }
+    $enc = Get-LogEncoding $LogPath
+    return [System.IO.File]::ReadAllText($LogPath, $enc)
+}
+
 # Determine if a sqlcmd log contains any data rows beyond headers / notes.
-# A data row is any non-empty line that is NOT:
-#   - a column-header underline (--- ---)
-#   - a "(N rows affected)" line
-#   - a "[note] ..." status line
-#   - an "Msg N, Level..." error line
-#   - a "Changed database context..." info line
 function Test-LogHasDataRows {
     param([string]$LogPath)
-    if (-not (Test-Path $LogPath)) { return $false }
-    $lines = Get-Content $LogPath -ErrorAction SilentlyContinue
+    $lines = Read-LogLines $LogPath
     if (-not $lines) { return $false }
 
     $inData = $false
@@ -139,17 +169,14 @@ function Test-LogHasDataRows {
         if ($line -match '^\[note\]')                       { continue }
         if ($line -match '^Msg\s+\d+,\s*Level')             { continue }
         if ($line -match '^Changed database context')        { continue }
-        # Anything else after a header underline counts as data.
         return $true
     }
     return $false
 }
 
-# Read a sqlcmd log as a single string for regex pattern matching.
 function Get-LogText {
     param([string]$LogPath)
-    if (-not (Test-Path $LogPath)) { return "" }
-    return (Get-Content $LogPath -Raw -ErrorAction SilentlyContinue)
+    return (Read-LogText $LogPath)
 }
 
 # Parse _summary.txt: yields one row per script with its OK/FAIL status.
@@ -157,12 +184,9 @@ function Read-AuditSummary {
     param([string]$SummaryPath)
     if (-not (Test-Path $SummaryPath)) { return @() }
     $entries = @()
-    Get-Content $SummaryPath | ForEach-Object {
-        if ($_ -match '^(OK|FAIL)\s+(\S+)') {
-            $entries += [pscustomobject]@{
-                Status = $matches[1]
-                Path   = $matches[2]
-            }
+    foreach ($line in (Read-LogLines $SummaryPath)) {
+        if ($line -match '^(OK|FAIL)\s+(\S+)') {
+            $entries += [pscustomobject]@{ Status=$matches[1]; Path=$matches[2] }
         }
     }
     return $entries
@@ -179,9 +203,14 @@ function Get-Findings {
             $logBase = ($entry.Path -replace '/', '_') -replace '\.sql$', '.log'
             $logPath = Join-Path $LogDir $logBase
             $errLines = if (Test-Path $logPath) {
-                (Get-Content $logPath -ErrorAction SilentlyContinue |
-                    Where-Object { $_ -match '^Msg\s+\d+|^Sqlcmd:|^\[note\]' } |
-                    Select-Object -First 5) -join "`n"
+                $sz = (Get-Item $logPath).Length
+                if ($sz -eq 0) {
+                    "(empty log -- sqlcmd produced no output, likely killed mid-run)"
+                } else {
+                    (Read-LogLines $logPath |
+                        Where-Object { $_ -match '^Msg\s+\d+|^Sqlcmd:|^\[note\]' } |
+                        Select-Object -First 5) -join "`n"
+                }
             } else { "(no log captured)" }
             $findings += [pscustomobject]@{
                 Severity       = 'Critical'

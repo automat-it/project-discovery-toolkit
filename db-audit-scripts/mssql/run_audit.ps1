@@ -128,14 +128,16 @@ foreach ($cat in $Categories) {
 
     $Out = Join-Path $OutRoot "mssql_${cat}_$ts"
     New-Item -ItemType Directory -Path $Out -Force | Out-Null
+    $summaryPath = Join-Path $Out "_summary.txt"
+    # Truncate / start summary so partial progress is preserved on Ctrl+C
+    Set-Content -Path $summaryPath -Value "" -Encoding UTF8
 
     Write-Host ""
     Write-Host "--- $cat ---"
     Write-Host "  output = $Out"
 
-    $pass    = 0
-    $fail    = 0
-    $summary = [System.Collections.Generic.List[string]]::new()
+    $pass = 0
+    $fail = 0
 
     foreach ($priority in @("critical","high","medium","low")) {
         $dir = Join-Path $catRoot $priority
@@ -144,30 +146,45 @@ foreach ($cat in $Categories) {
         Get-ChildItem (Join-Path $dir "*.sql") | Sort-Object Name | ForEach-Object {
             $log = Join-Path $Out "${priority}_$($_.BaseName).log"
             # -t 120 : per-query timeout in seconds (kills hung XE / XML shred queries)
+            # Capture sqlcmd output via a pipeline + Out-File -Encoding UTF8 so the
+            # log file is plain UTF-8 (default '> $log' on PS 5.1 produces UTF-16 LE
+            # which downstream Linux/Python tooling cannot parse).
             $sqlArgs = @("-S", $Server) + $authArgs + @("-d", $Database, "-C", "-b", "-t", "120", "-i", $_.FullName)
+            & sqlcmd @sqlArgs *>&1 | Out-File -FilePath $log -Encoding utf8
 
-            & sqlcmd @sqlArgs > $log 2>&1
+            $rc       = $LASTEXITCODE
+            $logSize  = if (Test-Path $log) { (Get-Item $log).Length } else { 0 }
 
-            if ($LASTEXITCODE -eq 0) {
+            # Fail conditions:
+            # 1) sqlcmd exited non-zero (severity >= 11, sqlcmd:error, etc.)
+            # 2) sqlcmd was killed mid-run / produced no output -- treat the empty
+            #    file as FAIL even though exit code can be 0 in some interrupt paths.
+            $isFail = ($rc -ne 0) -or ($logSize -eq 0)
+
+            if ($isFail) {
+                $fail++
+                $reason = if ($rc -ne 0) { "rc=$rc" } else { "empty log (sqlcmd produced no output)" }
+                Write-Host ("[FAIL] {0,-8} {1}  ({2})  -> $log" -f $priority, $_.Name, $reason) -ForegroundColor Red
+                Add-Content -Path $summaryPath -Value "FAIL $priority/$($_.Name)" -Encoding UTF8
+            } else {
                 $pass++
                 Write-Host ("[OK  ] {0,-8} {1}" -f $priority, $_.Name)
-                $summary.Add("OK   $priority/$($_.Name)")
-            } else {
-                $fail++
-                Write-Host ("[FAIL] {0,-8} {1}  -> $log" -f $priority, $_.Name) -ForegroundColor Red
-                $summary.Add("FAIL $priority/$($_.Name)")
+                Add-Content -Path $summaryPath -Value "OK   $priority/$($_.Name)" -Encoding UTF8
             }
         }
     }
 
-    $summary.Add("--------------------------------------------------------------------------------")
-    $summary.Add("Engine:    mssql")
-    $summary.Add("Category:  $cat")
-    $summary.Add("Timestamp: $ts")
-    $summary.Add("Target:    $authLabel @ $Server / $Database")
-    $summary.Add("Pass:      $pass")
-    $summary.Add("Fail:      $fail")
-    $summary | Set-Content (Join-Path $Out "_summary.txt") -Encoding UTF8
+    # Final tally appended to the summary file (incrementally written above).
+    $tail = @(
+        "--------------------------------------------------------------------------------",
+        "Engine:    mssql",
+        "Category:  $cat",
+        "Timestamp: $ts",
+        "Target:    $authLabel @ $Server / $Database",
+        "Pass:      $pass",
+        "Fail:      $fail"
+    )
+    $tail | Add-Content -Path $summaryPath -Encoding UTF8
 
     Write-Host ("  Pass: $pass  Fail: $fail  Report: $Out")
     $totalPass += $pass

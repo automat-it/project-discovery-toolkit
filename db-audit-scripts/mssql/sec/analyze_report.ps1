@@ -122,10 +122,42 @@ $Rules = @(
 # ===========================================================================
 # Helpers (mirrored from perf analyzer)
 # ===========================================================================
+# Detect file encoding by BOM (handles UTF-16 LE logs from older runs of
+# run_audit.ps1 which used '> $log' redirection). New runs are UTF-8.
+function Get-LogEncoding {
+    param([string]$LogPath)
+    if (-not (Test-Path $LogPath)) { return [System.Text.Encoding]::UTF8 }
+    $bytes = [System.IO.File]::ReadAllBytes($LogPath) | Select-Object -First 4
+    if ($bytes.Count -ge 2 -and $bytes[0] -eq 0xFF -and $bytes[1] -eq 0xFE) {
+        return [System.Text.Encoding]::Unicode
+    }
+    if ($bytes.Count -ge 2 -and $bytes[0] -eq 0xFE -and $bytes[1] -eq 0xFF) {
+        return [System.Text.Encoding]::BigEndianUnicode
+    }
+    if ($bytes.Count -ge 3 -and $bytes[0] -eq 0xEF -and $bytes[1] -eq 0xBB -and $bytes[2] -eq 0xBF) {
+        return [System.Text.Encoding]::UTF8
+    }
+    if ($bytes.Count -ge 2 -and $bytes[0] -gt 0 -and $bytes[0] -lt 128 -and $bytes[1] -eq 0) {
+        return [System.Text.Encoding]::Unicode
+    }
+    return [System.Text.Encoding]::UTF8
+}
+
+function Read-LogLines {
+    param([string]$LogPath)
+    if (-not (Test-Path $LogPath)) { return @() }
+    return [System.IO.File]::ReadAllLines($LogPath, (Get-LogEncoding $LogPath))
+}
+
+function Read-LogText {
+    param([string]$LogPath)
+    if (-not (Test-Path $LogPath)) { return "" }
+    return [System.IO.File]::ReadAllText($LogPath, (Get-LogEncoding $LogPath))
+}
+
 function Test-LogHasDataRows {
     param([string]$LogPath)
-    if (-not (Test-Path $LogPath)) { return $false }
-    $lines = Get-Content $LogPath -ErrorAction SilentlyContinue
+    $lines = Read-LogLines $LogPath
     if (-not $lines) { return $false }
     $inData = $false
     foreach ($line in $lines) {
@@ -143,16 +175,15 @@ function Test-LogHasDataRows {
 
 function Get-LogText {
     param([string]$LogPath)
-    if (-not (Test-Path $LogPath)) { return "" }
-    return (Get-Content $LogPath -Raw -ErrorAction SilentlyContinue)
+    return (Read-LogText $LogPath)
 }
 
 function Read-AuditSummary {
     param([string]$SummaryPath)
     if (-not (Test-Path $SummaryPath)) { return @() }
     $entries = @()
-    Get-Content $SummaryPath | ForEach-Object {
-        if ($_ -match '^(OK|FAIL)\s+(\S+)') {
+    foreach ($line in (Read-LogLines $SummaryPath)) {
+        if ($line -match '^(OK|FAIL)\s+(\S+)') {
             $entries += [pscustomobject]@{ Status=$matches[1]; Path=$matches[2] }
         }
     }
@@ -169,9 +200,14 @@ function Get-Findings {
             $logBase = ($entry.Path -replace '/', '_') -replace '\.sql$', '.log'
             $logPath = Join-Path $LogDir $logBase
             $errLines = if (Test-Path $logPath) {
-                (Get-Content $logPath -ErrorAction SilentlyContinue |
-                    Where-Object { $_ -match '^Msg\s+\d+|^Sqlcmd:|^\[note\]' } |
-                    Select-Object -First 5) -join "`n"
+                $sz = (Get-Item $logPath).Length
+                if ($sz -eq 0) {
+                    "(empty log -- sqlcmd produced no output, likely killed mid-run)"
+                } else {
+                    (Read-LogLines $logPath |
+                        Where-Object { $_ -match '^Msg\s+\d+|^Sqlcmd:|^\[note\]' } |
+                        Select-Object -First 5) -join "`n"
+                }
             } else { "(no log captured)" }
             $findings += [pscustomobject]@{
                 Severity='Critical'; Script=$entry.Path

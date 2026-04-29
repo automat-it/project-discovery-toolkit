@@ -87,10 +87,37 @@ ROW_COUNT_RE  = re.compile(r'^\(\s*\d+\s+rows?\s*\)\s*$')
 NOTE_RE       = re.compile(r'^(NOTICE|WARNING|psql:|--|\s*$)')
 
 
-def log_has_data_rows(log_path: Path) -> bool:
+_BOM_UTF16_LE = b'\xff\xfe'
+_BOM_UTF16_BE = b'\xfe\xff'
+_BOM_UTF8     = b'\xef\xbb\xbf'
+
+
+def _detect_encoding(path: Path) -> str:
     try:
-        text = log_path.read_text(encoding='utf-8', errors='replace')
+        with path.open('rb') as f:
+            head = f.read(4)
     except OSError:
+        return 'utf-8'
+    if head[:2] == _BOM_UTF16_LE: return 'utf-16'
+    if head[:2] == _BOM_UTF16_BE: return 'utf-16'
+    if head[:3] == _BOM_UTF8:     return 'utf-8-sig'
+    if len(head) >= 2 and 0 < head[0] < 128 and head[1] == 0:
+        return 'utf-16-le'        # BOM-less UTF-16 LE
+    return 'utf-8'
+
+
+def _read_log(path: Path) -> str:
+    enc = _detect_encoding(path)
+    try:
+        return path.read_text(encoding=enc, errors='replace')
+    except OSError:
+        return ''
+
+
+def log_has_data_rows(log_path: Path) -> bool:
+    """Return True if a psql log has data rows beyond headers / notices."""
+    text = _read_log(log_path)
+    if not text:
         return False
     in_data = False
     for line in text.splitlines():
@@ -109,16 +136,14 @@ def log_has_data_rows(log_path: Path) -> bool:
 
 
 def read_log_text(log_path: Path) -> str:
-    try:
-        return log_path.read_text(encoding='utf-8', errors='replace')
-    except OSError:
-        return ''
+    return _read_log(log_path)
+
 
 
 def read_summary(summary_path: Path):
     if not summary_path.exists():
         return
-    for raw in summary_path.read_text(encoding='utf-8', errors='replace').splitlines():
+    for raw in _read_log(summary_path).splitlines():
         m = re.match(r'^(OK|FAIL)\s+(\S+)', raw)
         if m:
             yield m.group(1), m.group(2)
@@ -133,10 +158,13 @@ def find_findings(log_dir: Path) -> list[dict]:
         log_path = log_dir / log_base
         detail = '(no log captured)'
         if log_path.exists():
-            errs = [l for l in read_log_text(log_path).splitlines()
-                    if re.match(r'(ERROR|FATAL|psql:)', l)][:5]
-            if errs:
-                detail = '\n'.join(errs)
+            if log_path.stat().st_size == 0:
+                detail = '(empty log -- runner produced no output, likely killed mid-run)'
+            else:
+                errs = [l for l in read_log_text(log_path).splitlines()
+                        if re.match(r'(ERROR|FATAL|psql:)', l)][:5]
+                if errs:
+                    detail = '\n'.join(errs)
         findings.append(dict(severity='Critical', script=script,
                              title='Script execution failed', detail=detail,
                              recommendation='Check connection privileges and the script log.'))

@@ -4,104 +4,46 @@ Read-only diagnostic queries for Microsoft SQL Server security
 analysis. Each script is independent and can be run standalone with
 `sqlcmd -i <script>.sql`.
 
-## Batch runner (`run_audit.sh`)
-
-`run_audit.sh` executes every script in this folder in priority order
-(`critical` → `high` → `medium` → `low`) and writes one log file per
-script into a timestamped report folder.
-
-```bash
-# password comes from SQLCMDPASSWORD (preferred over -P, stays out of `ps`)
-SQLCMDPASSWORD=secret ./run_audit.sh -U auditor -S db.internal,1433 -d master
-```
-
-Flags: `-U USER` (required) `-S SERVER` (accepts `host` or `host,port`)
-`-d DATABASE` `-o OUT_ROOT` (default `./reports`). Failure detection
-uses `sqlcmd -b`, which exits non-zero on any message at severity ≥ 11.
-
-Output layout:
-
-```
-reports/mssql_sec_YYYYMMDD_HHMMSS/
-  _summary.txt                          # OK/FAIL per script + totals
-  critical_sec_01_users_and_roles_inventory.log
-  critical_sec_02_effective_privileges.log
-  ...
-  low_sec_18_audit_gaps.log
-```
-
-## PowerShell runners (Windows)
+## Runner scripts
 
 Both PowerShell scripts live in the **`mssql\` root folder** (one level above
-this `sec\` folder). They resolve all paths relative to their own location —
-no dependency on the caller's working directory.
+this `sec\` folder). Run them from there — they resolve paths automatically.
 
-```
-db-audit-scripts\mssql\
-  run_audit.ps1           ← single database, -Category perf|sec|both
-  run_all_databases.ps1   ← enumerate all user DBs automatically
-  perf\                   ← SQL scripts
-  sec\                    ← SQL scripts (this folder)
-```
-
-Install sqlcmd first (one-time):
-```powershell
-winget install Microsoft.go-sqlcmd
-```
-
-**Single database — sec only:**
 ```powershell
 cd db-audit-scripts\mssql
 
-# Windows Authentication (domain — no password needed)
+# Single database — sec only, Windows Authentication
 .\run_audit.ps1 -Server "STG-SQL-N1" -Category sec
+
+# All user databases — sec only
+.\run_all_databases.ps1 -Server "STG-SQL-N1" -Category sec
 
 # SQL Server Authentication — password via env (stays out of shell history)
 $env:SQLCMDPASSWORD = "s3cr3t"
-.\run_audit.ps1 -Server "STG-SQL-N1,1433" -User auditor -Database master -Category sec
-```
-
-**All databases — sec only:**
-```powershell
-cd db-audit-scripts\mssql
-
-.\run_all_databases.ps1 -Server "STG-SQL-N1" -Category sec
+.\run_all_databases.ps1 -Server "STG-SQL-N1,1433" -User auditor -Category sec
 
 # Filter databases
 .\run_all_databases.ps1 -Server "STG-SQL-N1" -Category sec `
     -IncludeLike "prod_%" -ExcludeRegex "staging|archive"
-```
 
-If execution policy blocks the script:
-```powershell
+# If execution policy blocks the script
 powershell -ExecutionPolicy Bypass -File .\run_audit.ps1 -Server "STG-SQL-N1" -Category sec
-```
-
-## Multi-database runner (`run_all_databases.sh`)
-
-On an instance with many user databases, `run_all_databases.sh`
-enumerates every ONLINE user database (`database_id > 4`, excluding
-`distribution` and AG secondaries that disallow reads) and invokes
-`run_audit.sh` once per database plus one server-level pass against
-`master`. Each run lands in its own sub-folder of a shared timestamped
-root so reports stay separated but grouped.
-
-```bash
-SQLCMDPASSWORD=secret ./run_all_databases.sh -U auditor -S db.internal,1433
-
-# narrow the list:
-./run_all_databases.sh -U auditor -i 'prod_%'          # include LIKE
-./run_all_databases.sh -U auditor -x 'tempdb|staging'  # exclude ERE
 ```
 
 Output layout:
 
 ```
-reports/mssql_sec_all_YYYYMMDD_HHMMSS/
-  _summary.txt                          # OK/FAIL per database
-  _server/mssql_sec_YYYYMMDD_HHMMSS/    # server-level roles / logins / audits
-  app_production/mssql_sec_.../         # per-database pass
-  app_staging/mssql_sec_.../
+reports\mssql_sec_YYYYMMDD_HHMMSS\           ← run_audit.ps1 -Category sec
+  _summary.txt
+  critical_sec_01_users_and_roles_inventory.log
+  critical_sec_02_effective_privileges.log
+  ...
+  low_sec_18_audit_gaps.log
+
+reports\mssql_audit_all_YYYYMMDD_HHMMSS\     ← run_all_databases.ps1
+  _summary.txt
+  _server\mssql_sec_YYYYMMDD_HHMMSS\
+  <DatabaseName>\mssql_sec_YYYYMMDD_HHMMSS\
   ...
 ```
 

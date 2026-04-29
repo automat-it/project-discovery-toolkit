@@ -31,70 +31,64 @@ Run in this order for the most efficient audit:
 
 ## Runner scripts
 
-All runner scripts live in **this folder** (`mssql\`). They discover
-the `perf\` and `sec\` sub-folders automatically — no configuration needed.
+Both PowerShell runner scripts live in **this folder** (`mssql\`) and
+discover `perf\` and `sec\` sub-folders automatically — no configuration
+needed, no dependency on parent directories.
 
 ```
 mssql\
-  run_audit.ps1           ← Windows (PowerShell) — single database
-  run_all_databases.ps1   ← Windows (PowerShell) — all user databases
-  perf\run_audit.sh       ← Linux / macOS (bash)  — single database, perf
-  sec\run_audit.sh        ← Linux / macOS (bash)  — single database, sec
-  perf\run_all_databases.sh  ← Linux / macOS — all user databases, perf
-  sec\run_all_databases.sh   ← Linux / macOS — all user databases, sec
+  run_audit.ps1           ← single database, -Category perf|sec|both
+  run_all_databases.ps1   ← all user databases, -Category perf|sec|both
+  perf\                   ← SQL scripts (critical / high / medium / low)
+  sec\                    ← SQL scripts (critical / high / medium / low)
 ```
 
-### Windows (PowerShell 5.1+)
+### Prerequisites (one-time)
 
-Install sqlcmd once:
 ```powershell
 winget install Microsoft.go-sqlcmd
 ```
 
+### Usage
+
 ```powershell
 cd db-audit-scripts\mssql
 
-# Both perf + sec, all user databases, Windows Authentication
+# All user databases, perf + sec, Windows Authentication
 .\run_all_databases.ps1 -Server "STG-SQL-N1"
 
-# Perf only, single database, Windows Authentication
+# All user databases, perf only
+.\run_all_databases.ps1 -Server "STG-SQL-N1" -Category perf
+
+# Single database
 .\run_audit.ps1 -Server "STG-SQL-N1" -Database "Moodle" -Category perf
 
 # SQL Server Authentication — password via env (stays out of shell history)
 $env:SQLCMDPASSWORD = "s3cr3t"
-.\run_all_databases.ps1 -Server "STG-SQL-N1,1433" -User auditor -Category sec
+.\run_all_databases.ps1 -Server "STG-SQL-N1,1433" -User auditor
 
-# Filter databases by name
+# Filter databases
 .\run_all_databases.ps1 -Server "STG-SQL-N1" -IncludeLike "prod_%" -ExcludeRegex "staging"
 
 # If execution policy blocks the script
 powershell -ExecutionPolicy Bypass -File .\run_audit.ps1 -Server "STG-SQL-N1"
 ```
 
-### Linux / macOS (bash)
-
-```bash
-# Perf — all user databases
-SQLCMDPASSWORD=secret ./perf/run_all_databases.sh -U auditor -S db.internal,1433
-
-# Sec — single database
-SQLCMDPASSWORD=secret ./sec/run_audit.sh -U auditor -S db.internal -d mydb
-```
-
-### Output layout (both runners)
+### Output layout
 
 ```
-reports\mssql_audit_all_YYYYMMDD_HHMMSS\   ← PowerShell multi-DB
-  _summary.txt
-  _server\mssql_perf_...\
-  _server\mssql_sec_...\
-  <DatabaseName>\mssql_perf_...\
-  <DatabaseName>\mssql_sec_...\
-
-reports/mssql_perf_YYYYMMDD_HHMMSS/        ← bash single-category
-  _summary.txt
-  critical_perf_01_top_sql.log
-  ...
+reports\
+  mssql_audit_all_YYYYMMDD_HHMMSS\     ← run_all_databases.ps1
+    _summary.txt
+    _server\mssql_perf_YYYYMMDD_HHMMSS\
+    _server\mssql_sec_YYYYMMDD_HHMMSS\
+    <DatabaseName>\mssql_perf_YYYYMMDD_HHMMSS\
+    <DatabaseName>\mssql_sec_YYYYMMDD_HHMMSS\
+    ...
+  mssql_perf_YYYYMMDD_HHMMSS\          ← run_audit.ps1 -Category perf
+    _summary.txt
+    critical_perf_01_top_sql.log
+    ...
 ```
 
 Script behaviour notes:

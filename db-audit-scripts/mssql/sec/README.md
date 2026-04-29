@@ -13,21 +13,21 @@ this `sec\` folder). Run them from there — they resolve paths automatically.
 cd db-audit-scripts\mssql
 
 # Single database — sec only, Windows Authentication
-.\run_audit.ps1 -Server "STG-SQL-N1" -Category sec
+.\run_audit.ps1 -Server "sql-server.internal" -Category sec
 
 # All user databases — sec only
-.\run_all_databases.ps1 -Server "STG-SQL-N1" -Category sec
+.\run_all_databases.ps1 -Server "sql-server.internal" -Category sec
 
 # SQL Server Authentication — password via env (stays out of shell history)
 $env:SQLCMDPASSWORD = "s3cr3t"
-.\run_all_databases.ps1 -Server "STG-SQL-N1,1433" -User auditor -Category sec
+.\run_all_databases.ps1 -Server "sql-server.internal,1433" -User auditor -Category sec
 
 # Filter databases
-.\run_all_databases.ps1 -Server "STG-SQL-N1" -Category sec `
+.\run_all_databases.ps1 -Server "sql-server.internal" -Category sec `
     -IncludeLike "prod_%" -ExcludeRegex "staging|archive"
 
 # If execution policy blocks the script
-powershell -ExecutionPolicy Bypass -File .\run_audit.ps1 -Server "STG-SQL-N1" -Category sec
+powershell -ExecutionPolicy Bypass -File .\run_audit.ps1 -Server "sql-server.internal" -Category sec
 ```
 
 Output layout:

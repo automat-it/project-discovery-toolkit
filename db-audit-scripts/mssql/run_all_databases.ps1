@@ -28,11 +28,11 @@
     Authentication
     --------------
     Windows Authentication (default — recommended for domain environments):
-        .\run_all_databases.ps1 -Server "STG-SQL-N1"
+        .\run_all_databases.ps1 -Server "sql-server.internal"
 
     SQL Server Authentication (password via env):
         $env:SQLCMDPASSWORD = "s3cr3t"
-        .\run_all_databases.ps1 -Server "STG-SQL-N1" -User auditor
+        .\run_all_databases.ps1 -Server "sql-server.internal" -User auditor
 
 .PARAMETER Server
     SQL Server host or host,port  (default: localhost)
@@ -59,20 +59,20 @@
 
 .EXAMPLE
     # All databases, Windows Auth
-    .\run_all_databases.ps1 -Server "STG-SQL-N1"
+    .\run_all_databases.ps1 -Server "sql-server.internal"
 
 .EXAMPLE
     # Perf only, filter by name pattern
-    .\run_all_databases.ps1 -Server "STG-SQL-N1" -Category perf -IncludeLike "prod_%"
+    .\run_all_databases.ps1 -Server "sql-server.internal" -Category perf -IncludeLike "prod_%"
 
 .EXAMPLE
     # SQL Server auth, exclude test databases
     $env:SQLCMDPASSWORD = "s3cr3t"
-    .\run_all_databases.ps1 -Server "STG-SQL-N1,1433" -User auditor -ExcludeRegex "test|staging"
+    .\run_all_databases.ps1 -Server "sql-server.internal,1433" -User auditor -ExcludeRegex "test|staging"
 
 .EXAMPLE
     # If execution policy blocks the script
-    powershell -ExecutionPolicy Bypass -File .\run_all_databases.ps1 -Server "STG-SQL-N1"
+    powershell -ExecutionPolicy Bypass -File .\run_all_databases.ps1 -Server "sql-server.internal"
 #>
 
 [CmdletBinding()]

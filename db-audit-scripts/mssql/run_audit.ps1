@@ -16,11 +16,11 @@
     Authentication
     --------------
     Windows Authentication (default — recommended for domain environments):
-        .\run_audit.ps1 -Server "STG-SQL-N1"
+        .\run_audit.ps1 -Server "sql-server.internal"
 
     SQL Server Authentication (password via env — stays out of shell history):
         $env:SQLCMDPASSWORD = "s3cr3t"
-        .\run_audit.ps1 -Server "STG-SQL-N1" -User auditor
+        .\run_audit.ps1 -Server "sql-server.internal" -User auditor
 
 .PARAMETER Server
     SQL Server host or host,port  (default: localhost)
@@ -42,20 +42,20 @@
 
 .EXAMPLE
     # Windows Auth, both categories, default database (master)
-    .\run_audit.ps1 -Server "STG-SQL-N1"
+    .\run_audit.ps1 -Server "sql-server.internal"
 
 .EXAMPLE
     # Windows Auth, perf only, specific database
-    .\run_audit.ps1 -Server "STG-SQL-N1" -Database "Moodle" -Category perf
+    .\run_audit.ps1 -Server "sql-server.internal" -Database "AppDatabase" -Category perf
 
 .EXAMPLE
     # SQL Server auth, password from env
     $env:SQLCMDPASSWORD = "s3cr3t"
-    .\run_audit.ps1 -Server "STG-SQL-N1,1433" -User auditor -Category sec
+    .\run_audit.ps1 -Server "sql-server.internal,1433" -User auditor -Category sec
 
 .EXAMPLE
     # If execution policy blocks the script
-    powershell -ExecutionPolicy Bypass -File .\run_audit.ps1 -Server "STG-SQL-N1"
+    powershell -ExecutionPolicy Bypass -File .\run_audit.ps1 -Server "sql-server.internal"
 #>
 
 [CmdletBinding()]

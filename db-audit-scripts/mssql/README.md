@@ -55,23 +55,23 @@ winget install Microsoft.go-sqlcmd
 cd db-audit-scripts\mssql
 
 # All user databases, perf + sec, Windows Authentication
-.\run_all_databases.ps1 -Server "STG-SQL-N1"
+.\run_all_databases.ps1 -Server "sql-server.internal"
 
 # All user databases, perf only
-.\run_all_databases.ps1 -Server "STG-SQL-N1" -Category perf
+.\run_all_databases.ps1 -Server "sql-server.internal" -Category perf
 
 # Single database
-.\run_audit.ps1 -Server "STG-SQL-N1" -Database "Moodle" -Category perf
+.\run_audit.ps1 -Server "sql-server.internal" -Database "AppDatabase" -Category perf
 
 # SQL Server Authentication — password via env (stays out of shell history)
 $env:SQLCMDPASSWORD = "s3cr3t"
-.\run_all_databases.ps1 -Server "STG-SQL-N1,1433" -User auditor
+.\run_all_databases.ps1 -Server "sql-server.internal,1433" -User auditor
 
 # Filter databases
-.\run_all_databases.ps1 -Server "STG-SQL-N1" -IncludeLike "prod_%" -ExcludeRegex "staging"
+.\run_all_databases.ps1 -Server "sql-server.internal" -IncludeLike "prod_%" -ExcludeRegex "staging"
 
 # If execution policy blocks the script
-powershell -ExecutionPolicy Bypass -File .\run_audit.ps1 -Server "STG-SQL-N1"
+powershell -ExecutionPolicy Bypass -File .\run_audit.ps1 -Server "sql-server.internal"
 ```
 
 ### Output layout

@@ -13,21 +13,21 @@ this `perf\` folder). Run them from there — they resolve paths automatically.
 cd db-audit-scripts\mssql
 
 # Single database — perf only, Windows Authentication
-.\run_audit.ps1 -Server "STG-SQL-N1" -Category perf
+.\run_audit.ps1 -Server "sql-server.internal" -Category perf
 
 # All user databases — perf only
-.\run_all_databases.ps1 -Server "STG-SQL-N1" -Category perf
+.\run_all_databases.ps1 -Server "sql-server.internal" -Category perf
 
 # SQL Server Authentication — password via env (stays out of shell history)
 $env:SQLCMDPASSWORD = "s3cr3t"
-.\run_all_databases.ps1 -Server "STG-SQL-N1,1433" -User auditor -Category perf
+.\run_all_databases.ps1 -Server "sql-server.internal,1433" -User auditor -Category perf
 
 # Filter databases
-.\run_all_databases.ps1 -Server "STG-SQL-N1" -Category perf `
+.\run_all_databases.ps1 -Server "sql-server.internal" -Category perf `
     -IncludeLike "prod_%" -ExcludeRegex "staging|archive"
 
 # If execution policy blocks the script
-powershell -ExecutionPolicy Bypass -File .\run_audit.ps1 -Server "STG-SQL-N1" -Category perf
+powershell -ExecutionPolicy Bypass -File .\run_audit.ps1 -Server "sql-server.internal" -Category perf
 ```
 
 Output layout:

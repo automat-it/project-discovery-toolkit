@@ -143,7 +143,8 @@ foreach ($cat in $Categories) {
 
         Get-ChildItem (Join-Path $dir "*.sql") | Sort-Object Name | ForEach-Object {
             $log = Join-Path $Out "${priority}_$($_.BaseName).log"
-            $sqlArgs = @("-S", $Server) + $authArgs + @("-d", $Database, "-C", "-b", "-i", $_.FullName)
+            # -t 120 : per-query timeout in seconds (kills hung XE / XML shred queries)
+            $sqlArgs = @("-S", $Server) + $authArgs + @("-d", $Database, "-C", "-b", "-t", "120", "-i", $_.FullName)
 
             & sqlcmd @sqlArgs > $log 2>&1
 

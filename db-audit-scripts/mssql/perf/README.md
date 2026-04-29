@@ -30,6 +30,25 @@ $env:SQLCMDPASSWORD = "s3cr3t"
 powershell -ExecutionPolicy Bypass -File .\run_audit.ps1 -Server "sql-server.internal" -Category perf
 ```
 
+## Report analyzer (`analyze_report.ps1`)
+
+After a run completes, parse the report folder into a customer-friendly
+HTML summary that highlights potential issues across all databases:
+
+```powershell
+# Multi-database report
+.\analyze_report.ps1 -ReportDir "C:\reports\mssql_audit_all_20260429_230243" `
+                     -ServerName "sql-server.internal"
+
+# Single-database report
+.\analyze_report.ps1 -ReportDir "C:\reports\mssql_perf_20260430_010000"
+```
+
+The analyzer writes `perf_analysis.html` into the report folder. The HTML
+contains an executive-summary table (counts of Critical / Warning / Info
+findings per database) plus a section per database with the matched
+findings, severity, and remediation hints.
+
 Output layout:
 
 ```

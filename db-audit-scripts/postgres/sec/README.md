@@ -29,6 +29,26 @@ reports/postgres_sec_YYYYMMDD_HHMMSS/
   low_sec_18_audit_gaps.log
 ```
 
+## Report analyzer (`analyze_report.py`)
+
+After a run completes, parse the report folder into a customer-friendly
+HTML summary highlighting potential issues across all databases:
+
+```bash
+# Single-database run output (the folder run_audit.sh wrote into)
+./analyze_report.py reports/postgres_sec_YYYYMMDD_HHMMSS
+
+# Multi-database run (parent folder containing per-DB sub-folders)
+./analyze_report.py /path/to/parent_report_dir --server prod-postgres-01
+```
+
+The analyzer writes `sec_analysis.html` into the report folder. The HTML
+contains an executive-summary table (counts of Critical / Warning / Info
+findings per database) plus a section per database with the matched
+findings, severity, and remediation hints. Standard library only --
+no Python packages to install.
+
+
 ## Read-only guarantee
 
 All scripts in this set are **read-only**: only `SELECT` and `SHOW`

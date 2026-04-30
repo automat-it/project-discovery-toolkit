@@ -112,12 +112,17 @@ WHERE name IN ('xp_cmdshell',
 -- Service Broker: queue activation procedures (run under privileged
 -- context when queue messages arrive)
 -- ---------------------------------------------------------------------------
+-- sys.service_queues.activation_procedure is the qualified procedure
+-- name as NVARCHAR(776) (e.g. '[dbo].[ProcName]'), NOT an object_id.
+-- Resolve it via OBJECT_ID() before passing to OBJECT_SCHEMA_NAME /
+-- OBJECT_NAME -- otherwise SQL Server tries to implicit-cast the
+-- bracketed name to INT and raises Msg 245.
 SELECT
     q.name                                            AS queue_name,
     q.is_activation_enabled,
-    q.activation_procedure                            AS activation_procedure_id,
-    OBJECT_SCHEMA_NAME(q.activation_procedure)        AS proc_schema,
-    OBJECT_NAME(q.activation_procedure)               AS proc_name,
+    q.activation_procedure                            AS activation_procedure,
+    OBJECT_SCHEMA_NAME(OBJECT_ID(q.activation_procedure)) AS proc_schema,
+    OBJECT_NAME(OBJECT_ID(q.activation_procedure))        AS proc_name,
     q.max_readers,
     q.execute_as_principal_id,
     USER_NAME(q.execute_as_principal_id)              AS execute_as,

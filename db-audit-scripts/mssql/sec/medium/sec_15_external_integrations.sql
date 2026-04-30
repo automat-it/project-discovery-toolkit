@@ -85,13 +85,16 @@ END CATCH;
 -- ---------------------------------------------------------------------------
 -- Service Broker — services, queues, contracts, message types
 -- ---------------------------------------------------------------------------
+-- sys.service_queues.activation_procedure is the qualified procedure
+-- name as NVARCHAR(776), not an object_id -- resolve via OBJECT_ID()
+-- before OBJECT_SCHEMA_NAME / OBJECT_NAME (else Msg 245 implicit cast).
 SELECT
     s.name                                            AS service_name,
     q.name                                            AS queue_name,
     q.is_activation_enabled,
-    q.activation_procedure                            AS activation_procedure_id,
-    OBJECT_SCHEMA_NAME(q.activation_procedure)        AS activation_schema,
-    OBJECT_NAME(q.activation_procedure)               AS activation_proc,
+    q.activation_procedure                            AS activation_procedure,
+    OBJECT_SCHEMA_NAME(OBJECT_ID(q.activation_procedure)) AS activation_schema,
+    OBJECT_NAME(OBJECT_ID(q.activation_procedure))        AS activation_proc,
     q.is_receive_enabled,
     q.max_readers
 -- NOTE: sys.services / sys.service_contracts / sys.service_message_types /

@@ -10,6 +10,10 @@
 
 SET NOCOUNT ON;
 SET TRANSACTION ISOLATION LEVEL READ UNCOMMITTED;  -- read-only audit; avoid taking shared locks on hot objects
+-- FOR XML PATH + .value() in the connected-IPs query below requires
+-- QUOTED_IDENTIFIER ON. sqlcmd defaults to OFF (unlike SSMS), which
+-- raises Msg 1934 on the SELECT. Set it explicitly here.
+SET QUOTED_IDENTIFIER ON;
 
 -- ---------------------------------------------------------------------------
 -- Endpoints (TCP listeners, dedicated admin, service broker, etc.)

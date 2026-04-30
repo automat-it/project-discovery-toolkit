@@ -70,6 +70,25 @@ $env:SQLCMDPASSWORD = "s3cr3t"
 # Filter databases
 .\run_all_databases.ps1 -Server "sql-server.internal" -IncludeLike "prod_%" -ExcludeRegex "staging"
 
+# Explicit list of databases (when names share no common LIKE pattern,
+# e.g. retrying only the databases that failed in a previous run).
+# run_audit.ps1 is invoked once per name; -OutRoot puts every run into
+# its own per-database sub-folder so the analyzer can render them as
+# separate sections of one report.
+$databases = @(
+    "DatabaseA"
+    "DatabaseB"
+    "DatabaseC"
+)
+foreach ($db in $databases) {
+    Write-Host "===== $db ====="
+    .\run_audit.ps1 -Server "sql-server.internal" -Database $db -OutRoot ".\reports_subset\$db"
+}
+
+# Single combined HTML report covering every database under reports_subset\
+.\perf\analyze_report.ps1 -ReportDir ".\reports_subset" -ServerName "sql-server.internal"
+.\sec\analyze_report.ps1  -ReportDir ".\reports_subset" -ServerName "sql-server.internal"
+
 # If execution policy blocks the script
 powershell -ExecutionPolicy Bypass -File .\run_audit.ps1 -Server "sql-server.internal"
 ```

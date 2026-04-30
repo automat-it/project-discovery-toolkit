@@ -154,20 +154,47 @@ foreach ($cat in $Categories) {
             # log file is plain UTF-8 (default '> $log' on PS 5.1 produces UTF-16 LE
             # which downstream Linux/Python tooling cannot parse).
             $sqlArgs = @("-S", $Server) + $authArgs + @("-d", $Database, "-C", "-I", "-b", "-t", "120", "-i", $_.FullName)
-            & sqlcmd @sqlArgs *>&1 | Out-File -FilePath $log -Encoding utf8
 
-            $rc       = $LASTEXITCODE
-            $logSize  = if (Test-Path $log) { (Get-Item $log).Length } else { 0 }
+            # Resilient invocation: locally relax ErrorActionPreference so a
+            # native sqlcmd-side error (e.g. "Internal error at
+            # ReadAndHandleColumnData", ODBC stream glitches on huge XML /
+            # NVARCHAR(MAX) rows) does NOT abort the whole multi-database
+            # audit. The error message goes to the per-script log; the
+            # script is recorded as FAIL and the runner moves on.
+            $rc            = -1
+            $caughtMessage = $null
+            $prevPref      = $ErrorActionPreference
+            $ErrorActionPreference = 'Continue'
+            try {
+                & sqlcmd @sqlArgs *>&1 | Out-File -FilePath $log -Encoding utf8
+                $rc = $LASTEXITCODE
+            }
+            catch {
+                $caughtMessage = $_.Exception.Message
+                "[runner] sqlcmd raised: $caughtMessage" |
+                    Out-File -FilePath $log -Encoding utf8 -Append
+                $rc = if ($LASTEXITCODE) { $LASTEXITCODE } else { 1 }
+            }
+            finally {
+                $ErrorActionPreference = $prevPref
+            }
+
+            $logSize = if (Test-Path $log) { (Get-Item $log).Length } else { 0 }
 
             # Fail conditions:
             # 1) sqlcmd exited non-zero (severity >= 11, sqlcmd:error, etc.)
-            # 2) sqlcmd was killed mid-run / produced no output -- treat the empty
-            #    file as FAIL even though exit code can be 0 in some interrupt paths.
-            $isFail = ($rc -ne 0) -or ($logSize -eq 0)
+            # 2) sqlcmd was killed mid-run / produced no output -- treat the
+            #    empty file as FAIL even though exit code can be 0 in some
+            #    interrupt paths.
+            # 3) PowerShell caught a NativeCommandError mid-stream (catch above).
+            $isFail = ($rc -ne 0) -or ($logSize -eq 0) -or ($null -ne $caughtMessage)
 
             if ($isFail) {
                 $fail++
-                $reason = if ($rc -ne 0) { "rc=$rc" } else { "empty log (sqlcmd produced no output)" }
+                $reason =
+                    if     ($caughtMessage)  { "native error: $caughtMessage" }
+                    elseif ($rc -ne 0)       { "rc=$rc" }
+                    else                     { "empty log (sqlcmd produced no output)" }
                 Write-Host ("[FAIL] {0,-8} {1}  ({2})  -> $log" -f $priority, $_.Name, $reason) -ForegroundColor Red
                 Add-Content -Path $summaryPath -Value "FAIL $priority/$($_.Name)" -Encoding UTF8
             } else {

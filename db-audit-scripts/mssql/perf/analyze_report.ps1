@@ -287,13 +287,23 @@ function Get-Findings {
 
 # Discover the report layout. Returns array of "context" objects:
 #   @{ Name=<DB or _server>; LogDir=<path containing *.log + _summary.txt> }
+#
+# Two layouts to handle:
+#   1. multi-DB run (run_all_databases.ps1):
+#        <Root>/<DBName>/mssql_perf_<ts>/{_summary.txt, *.log}
+#        <Root>/_server/mssql_perf_<ts>/...
+#        <Root>/_summary.txt           <-- top-level roll-up: 'OK <db>' / 'FAIL <db>'
+#
+#   2. single-DB run (run_audit.ps1):
+#        <Root>/{_summary.txt, *.log}  <-- _summary.txt lists scripts: 'OK <prio>/<file>.sql'
+#
+# Try multi-DB first (presence of mssql_perf_* sub-folders is the
+# unambiguous signal). Fall back to single-run only when no sub-folders
+# match. The previous implementation looked at <Root>/_summary.txt first,
+# which mis-classified the multi-DB roll-up file as a single-run summary
+# and then tried to read database directories as log files.
 function Get-ReportContexts {
     param([string]$Root)
-
-    # Single-DB mode: $Root itself contains *.log and _summary.txt
-    if (Test-Path (Join-Path $Root "_summary.txt")) {
-        return ,@([pscustomobject]@{ Name = "(single run)"; LogDir = $Root })
-    }
 
     # Multi-DB mode: $Root has sub-folders, each with a mssql_perf_* sub-folder
     $contexts = @()
@@ -305,7 +315,14 @@ function Get-ReportContexts {
                 $contexts += [pscustomobject]@{ Name = $dbName; LogDir = $_.FullName }
             }
     }
-    return ,$contexts
+    if (@($contexts).Count -gt 0) { return ,$contexts }
+
+    # Fall back: single-DB run -- $Root itself contains *.log + _summary.txt
+    if (Test-Path (Join-Path $Root "_summary.txt")) {
+        return ,@([pscustomobject]@{ Name = "(single run)"; LogDir = $Root })
+    }
+
+    return ,@()
 }
 
 # ===========================================================================

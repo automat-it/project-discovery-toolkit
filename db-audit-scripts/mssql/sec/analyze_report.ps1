@@ -271,11 +271,14 @@ function Get-Findings {
     return ,$findings
 }
 
+# Try multi-DB first. The multi-DB run_all wrapper writes a top-level
+# _summary.txt with database names (not script paths); the previous
+# "_summary.txt at root => single-run" heuristic mis-classified that
+# file and tried to ReadAllLines on database directories.
 function Get-ReportContexts {
     param([string]$Root)
-    if (Test-Path (Join-Path $Root "_summary.txt")) {
-        return ,@([pscustomobject]@{ Name = "(single run)"; LogDir = $Root })
-    }
+
+    # Multi-DB: $Root contains <DBName>/mssql_sec_<ts>/ sub-folders.
     $contexts = @()
     Get-ChildItem $Root -Directory | Sort-Object Name | ForEach-Object {
         $dbName = $_.Name
@@ -285,7 +288,14 @@ function Get-ReportContexts {
                 $contexts += [pscustomobject]@{ Name = $dbName; LogDir = $_.FullName }
             }
     }
-    return ,$contexts
+    if (@($contexts).Count -gt 0) { return ,$contexts }
+
+    # Fall back: single-DB run -- $Root itself is the log dir.
+    if (Test-Path (Join-Path $Root "_summary.txt")) {
+        return ,@([pscustomobject]@{ Name = "(single run)"; LogDir = $Root })
+    }
+
+    return ,@()
 }
 
 # ===========================================================================

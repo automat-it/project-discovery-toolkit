@@ -44,7 +44,12 @@ param(
     [string]$OutFile    = ""
 )
 
-Set-StrictMode -Version Latest
+# Strict mode intentionally NOT enabled. Pipelines like
+# Where-Object {...} | Measure-Object can produce $null on empty input,
+# and PowerShell auto-promotes scalars to arrays differently in strict
+# vs non-strict mode -- accessing .Count / .Length on those objects
+# trips strict mode and aborts the analyzer before any output is
+# produced. Strict mode is not worth its cost for a one-shot reporter.
 $ErrorActionPreference = "Stop"
 
 if (-not (Test-Path $ReportDir)) {

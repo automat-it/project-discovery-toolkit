@@ -124,19 +124,28 @@ GROUP BY xs.name, xs.create_time
 ORDER BY session_name;
 
 -- ---------------------------------------------------------------------------
--- SQL Server error log (last 24h, error-level entries only).
--- NOTE: the 7th parameter (sortOrder 'DESC') requires SQL Server
--- 2017 CU10+ or 2019+. On older builds we fall back to the 6-parameter
--- form via a second TRY. xp_readerrorlog is sysadmin-only in every
--- release and is not available on Azure SQL Database.
+-- SQL Server error log (last 30 days, error-level entries only).
+-- xp_readerrorlog parameters:
+--   1: log file number (0 = current)
+--   2: log type (1 = SQL Server, 2 = SQL Agent)
+--   3: search string 1 (NULL = no filter)
+--   4: search string 2
+--   5: start datetime  -- bound to "now minus 30 days" so we never read
+--                         multi-GB historical data on long-uptime instances
+--   6: end datetime
+--   7: sort order ('DESC') -- requires SQL Server 2017 CU10+ or 2019+;
+--                            on older builds we fall back to the 6-arg form.
+-- xp_readerrorlog is sysadmin-only in every release and is not available
+-- on Azure SQL Database.
 -- ---------------------------------------------------------------------------
+DECLARE @errlog_since DATETIME = DATEADD(day, -30, SYSUTCDATETIME());
 BEGIN TRY
     EXEC xp_readerrorlog 0, 1, NULL, NULL,
-                         NULL, NULL, 'DESC';
+                         @errlog_since, NULL, 'DESC';
 END TRY
 BEGIN CATCH
     BEGIN TRY
-        EXEC xp_readerrorlog 0, 1, NULL, NULL, NULL, NULL;
+        EXEC xp_readerrorlog 0, 1, NULL, NULL, @errlog_since, NULL;
     END TRY
     BEGIN CATCH
         PRINT '[note] xp_readerrorlog unavailable or not permitted: '

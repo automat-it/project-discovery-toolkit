@@ -44,12 +44,13 @@ param(
     [string]$OutFile    = ""
 )
 
-# Strict mode intentionally NOT enabled. Pipelines like
-# Where-Object {...} | Measure-Object can produce $null on empty input,
-# and PowerShell auto-promotes scalars to arrays differently in strict
-# vs non-strict mode -- accessing .Count / .Length on those objects
-# trips strict mode and aborts the analyzer before any output is
-# produced. Strict mode is not worth its cost for a one-shot reporter.
+# Explicitly disable strict mode. Some hosts (PowerShell ISE, custom
+# profiles, calling scripts) leave strict mode enabled in the session
+# scope; under strict mode pipelines that emit $null or scalar values
+# trip "The property 'Length' cannot be found on this object" and abort
+# the analyzer before any output is produced. Set-StrictMode -Off
+# overrides any inherited setting for the duration of this script.
+Set-StrictMode -Off
 $ErrorActionPreference = "Stop"
 
 if (-not (Test-Path $ReportDir)) {
@@ -261,8 +262,10 @@ function Get-Findings {
                     if ($text -and ($text -match $rule.Pattern)) {
                         $hit = $true
                         # extract a small snippet of the match for context
-                        $snippet = $matches[0]
-                        if ($snippet.Length -gt 200) { $snippet = $snippet.Substring(0,200) + '...' }
+                        $snippet = [string]$matches[0]
+                        if ($snippet -and $snippet.Length -gt 200) {
+                            $snippet = $snippet.Substring(0,200) + '...'
+                        }
                         $detail = "Match: " + $snippet
                     }
                 }
@@ -310,7 +313,7 @@ function Get-ReportContexts {
 # ===========================================================================
 function Convert-FindingsToHtml {
     param([array]$Findings)
-    if (-not $Findings -or $Findings.Count -eq 0) {
+    if (-not $Findings -or @($Findings).Count -eq 0) {
         return '<p class="ok">No problems detected by the rule set.</p>'
     }
     $html = "<table class='findings'><thead><tr><th>Severity</th><th>Script</th><th>Finding</th><th>Recommendation</th></tr></thead><tbody>"
@@ -337,7 +340,7 @@ Add-Type -AssemblyName System.Web
 # Main
 # ===========================================================================
 $contexts = Get-ReportContexts $ReportDir
-if (-not $contexts -or $contexts.Count -eq 0) {
+if (-not $contexts -or @($contexts).Count -eq 0) {
     Write-Error "No report sub-folders found in $ReportDir. Expected mssql_perf_* sub-folders."
     exit 3
 }
@@ -347,11 +350,11 @@ $report = @()
 foreach ($ctx in $contexts) {
     $findings = Get-Findings $ctx.LogDir
     $summary  = Read-AuditSummary (Join-Path $ctx.LogDir "_summary.txt")
-    $passed   = ($summary | Where-Object { $_.Status -eq 'OK'   }).Count
-    $failed   = ($summary | Where-Object { $_.Status -eq 'FAIL' }).Count
-    $crit     = ($findings | Where-Object { $_.Severity -eq 'Critical' }).Count
-    $warn     = ($findings | Where-Object { $_.Severity -eq 'Warning'  }).Count
-    $info     = ($findings | Where-Object { $_.Severity -eq 'Info'     }).Count
+    $passed   = @($summary | Where-Object { $_.Status -eq 'OK' }).Count
+    $failed   = @($summary | Where-Object { $_.Status -eq 'FAIL' }).Count
+    $crit     = @($findings | Where-Object { $_.Severity -eq 'Critical' }).Count
+    $warn     = @($findings | Where-Object { $_.Severity -eq 'Warning' }).Count
+    $info     = @($findings | Where-Object { $_.Severity -eq 'Info' }).Count
 
     $report += [pscustomobject]@{
         Name=$ctx.Name; LogDir=$ctx.LogDir; Findings=$findings
@@ -439,7 +442,7 @@ $html += "<td class='num'>$(($report | Measure-Object -Property Info -Sum).Sum)<
 $html += "</tbody></table></div>"
 
 # Table of contents (only useful for multi-DB reports)
-if ($report.Count -gt 1) {
+if (@($report).Count -gt 1) {
     $html += "<div class='toc'><h2 style='margin-top:0;border:none;'>Sections</h2><ul>"
     foreach ($r in $report) {
         $anchor = ($r.Name -replace '[^A-Za-z0-9]', '_')
@@ -468,7 +471,7 @@ $utf8Bom = New-Object System.Text.UTF8Encoding $true
 Write-Host ""
 Write-Host "================================================================================"
 Write-Host "Performance audit analysis complete."
-Write-Host "  Databases analyzed : $($report.Count)"
+Write-Host "  Databases analyzed : $(@($report).Count)"
 Write-Host "  Critical findings  : $totalCrit"
 Write-Host "  Warnings           : $totalWarn"
 Write-Host "  Failed scripts     : $totalFail"

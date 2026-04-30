@@ -146,10 +146,14 @@ foreach ($cat in $Categories) {
         Get-ChildItem (Join-Path $dir "*.sql") | Sort-Object Name | ForEach-Object {
             $log = Join-Path $Out "${priority}_$($_.BaseName).log"
             # -t 120 : per-query timeout in seconds (kills hung XE / XML shred queries)
+            # -I     : SET QUOTED_IDENTIFIER ON at the connection level. Required
+            #          for XML data type methods (FOR XML PATH, .value(), .nodes())
+            #          which check QI at compile time. SET QUOTED_IDENTIFIER ON
+            #          inside the script is too late once the batch is compiled.
             # Capture sqlcmd output via a pipeline + Out-File -Encoding UTF8 so the
             # log file is plain UTF-8 (default '> $log' on PS 5.1 produces UTF-16 LE
             # which downstream Linux/Python tooling cannot parse).
-            $sqlArgs = @("-S", $Server) + $authArgs + @("-d", $Database, "-C", "-b", "-t", "120", "-i", $_.FullName)
+            $sqlArgs = @("-S", $Server) + $authArgs + @("-d", $Database, "-C", "-I", "-b", "-t", "120", "-i", $_.FullName)
             & sqlcmd @sqlArgs *>&1 | Out-File -FilePath $log -Encoding utf8
 
             $rc       = $LASTEXITCODE

@@ -122,22 +122,32 @@ $Rules = @(
 # ===========================================================================
 # Helpers (mirrored from perf analyzer)
 # ===========================================================================
-# Detect file encoding by BOM (handles UTF-16 LE logs from older runs of
-# run_audit.ps1 which used '> $log' redirection). New runs are UTF-8.
+# Detect file encoding by BOM. Read via FileStream so empty / 1-byte files
+# return $read=0 and the function falls through to UTF-8. The earlier
+# pipeline + Select-Object form returned $null on empty files and tripped
+# Set-StrictMode "property Length not found".
 function Get-LogEncoding {
     param([string]$LogPath)
     if (-not (Test-Path $LogPath)) { return [System.Text.Encoding]::UTF8 }
-    $bytes = [System.IO.File]::ReadAllBytes($LogPath) | Select-Object -First 4
-    if ($bytes.Count -ge 2 -and $bytes[0] -eq 0xFF -and $bytes[1] -eq 0xFE) {
-        return [System.Text.Encoding]::Unicode
-    }
-    if ($bytes.Count -ge 2 -and $bytes[0] -eq 0xFE -and $bytes[1] -eq 0xFF) {
-        return [System.Text.Encoding]::BigEndianUnicode
-    }
-    if ($bytes.Count -ge 3 -and $bytes[0] -eq 0xEF -and $bytes[1] -eq 0xBB -and $bytes[2] -eq 0xBF) {
+    $head = New-Object byte[] 4
+    $read = 0
+    try {
+        $stream = [System.IO.File]::OpenRead($LogPath)
+        try   { $read = $stream.Read($head, 0, 4) }
+        finally { $stream.Dispose() }
+    } catch {
         return [System.Text.Encoding]::UTF8
     }
-    if ($bytes.Count -ge 2 -and $bytes[0] -gt 0 -and $bytes[0] -lt 128 -and $bytes[1] -eq 0) {
+    if ($read -ge 2 -and $head[0] -eq 0xFF -and $head[1] -eq 0xFE) {
+        return [System.Text.Encoding]::Unicode
+    }
+    if ($read -ge 2 -and $head[0] -eq 0xFE -and $head[1] -eq 0xFF) {
+        return [System.Text.Encoding]::BigEndianUnicode
+    }
+    if ($read -ge 3 -and $head[0] -eq 0xEF -and $head[1] -eq 0xBB -and $head[2] -eq 0xBF) {
+        return [System.Text.Encoding]::UTF8
+    }
+    if ($read -ge 2 -and $head[0] -gt 0 -and $head[0] -lt 128 -and $head[1] -eq 0) {
         return [System.Text.Encoding]::Unicode
     }
     return [System.Text.Encoding]::UTF8

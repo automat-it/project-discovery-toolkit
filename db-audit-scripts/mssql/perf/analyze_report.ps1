@@ -120,21 +120,34 @@ $Rules = @(
 # Detect file encoding by BOM. PowerShell 5.1's default '> $log' redirection
 # writes UTF-16 LE; older runs of run_audit.ps1 produced such logs. New runs
 # write UTF-8. Read either correctly.
+#
+# Read the BOM via FileStream so empty files return $read=0 and the function
+# falls through to UTF-8. Earlier implementation used pipeline + Select-Object
+# which yields $null / scalar byte on empty / 1-byte files and tripped
+# Set-StrictMode "property Length not found".
 function Get-LogEncoding {
     param([string]$LogPath)
     if (-not (Test-Path $LogPath)) { return [System.Text.Encoding]::UTF8 }
-    $bytes = [System.IO.File]::ReadAllBytes($LogPath) | Select-Object -First 4
-    if ($bytes.Count -ge 2 -and $bytes[0] -eq 0xFF -and $bytes[1] -eq 0xFE) {
+    $head = New-Object byte[] 4
+    $read = 0
+    try {
+        $stream = [System.IO.File]::OpenRead($LogPath)
+        try   { $read = $stream.Read($head, 0, 4) }
+        finally { $stream.Dispose() }
+    } catch {
+        return [System.Text.Encoding]::UTF8
+    }
+    if ($read -ge 2 -and $head[0] -eq 0xFF -and $head[1] -eq 0xFE) {
         return [System.Text.Encoding]::Unicode             # UTF-16 LE BOM
     }
-    if ($bytes.Count -ge 2 -and $bytes[0] -eq 0xFE -and $bytes[1] -eq 0xFF) {
+    if ($read -ge 2 -and $head[0] -eq 0xFE -and $head[1] -eq 0xFF) {
         return [System.Text.Encoding]::BigEndianUnicode    # UTF-16 BE BOM
     }
-    if ($bytes.Count -ge 3 -and $bytes[0] -eq 0xEF -and $bytes[1] -eq 0xBB -and $bytes[2] -eq 0xBF) {
+    if ($read -ge 3 -and $head[0] -eq 0xEF -and $head[1] -eq 0xBB -and $head[2] -eq 0xBF) {
         return [System.Text.Encoding]::UTF8                # UTF-8 BOM
     }
     # Heuristic for BOM-less UTF-16 LE: ASCII byte followed by 0x00.
-    if ($bytes.Count -ge 2 -and $bytes[0] -gt 0 -and $bytes[0] -lt 128 -and $bytes[1] -eq 0) {
+    if ($read -ge 2 -and $head[0] -gt 0 -and $head[0] -lt 128 -and $head[1] -eq 0) {
         return [System.Text.Encoding]::Unicode
     }
     return [System.Text.Encoding]::UTF8

@@ -67,10 +67,23 @@ ORDER BY s.login_time;
 -- ---------------------------------------------------------------------------
 -- Distinct client IPs currently connected
 -- ---------------------------------------------------------------------------
+-- STRING_AGG ... WITHIN GROUP requires database compatibility level 130+
+-- (SQL Server 2017+). On databases left at older compat levels (still
+-- common after upgrades) the parser raises 'Incorrect syntax near (' on
+-- the WITHIN GROUP clause. Use the FOR XML PATH idiom which works on
+-- every supported version regardless of compat level.
 SELECT
     c.client_net_address                              AS client_ip,
     COUNT(*)                                          AS sessions,
-    STRING_AGG(CAST(s.login_name AS NVARCHAR(256)), ', ') WITHIN GROUP (ORDER BY s.login_name) AS logins_used
+    STUFF((SELECT N', ' + CAST(s2.login_name AS NVARCHAR(256))
+             FROM sys.dm_exec_sessions s2
+             JOIN sys.dm_exec_connections c2
+                  ON c2.session_id = s2.session_id
+            WHERE c2.client_net_address = c.client_net_address
+              AND s2.is_user_process = 1
+            ORDER BY s2.login_name
+            FOR XML PATH(''), TYPE).value('.', 'NVARCHAR(MAX)'),
+          1, 2, '')                                   AS logins_used
 FROM sys.dm_exec_connections c
 JOIN sys.dm_exec_sessions s ON s.session_id = c.session_id
 WHERE s.is_user_process = 1

@@ -150,11 +150,14 @@ ORDER BY dp.name, t.schema_name, t.object_name;
 -- ---------------------------------------------------------------------------
 -- Grants made WITH GRANT OPTION (privilege-propagation surface)
 -- ---------------------------------------------------------------------------
+-- COLLATE DATABASE_DEFAULT on every sysname column so the UNION ALL works
+-- when the server collation differs from the database collation (common
+-- on databases created with a non-default collation, e.g. Hebrew_CI_AS).
 SELECT
-    'SERVER'                                          AS scope,
-    gp.name                                           AS grantee,
-    p.permission_name,
-    p.state_desc
+    CAST('SERVER' AS NVARCHAR(128))    COLLATE DATABASE_DEFAULT AS scope,
+    CAST(gp.name AS NVARCHAR(128))     COLLATE DATABASE_DEFAULT AS grantee,
+    CAST(p.permission_name AS NVARCHAR(128)) COLLATE DATABASE_DEFAULT AS permission_name,
+    CAST(p.state_desc AS NVARCHAR(60)) COLLATE DATABASE_DEFAULT AS state_desc
 FROM sys.server_permissions p
 JOIN sys.server_principals gp ON gp.principal_id = p.grantee_principal_id
 WHERE p.state_desc = 'GRANT_WITH_GRANT_OPTION'
@@ -162,10 +165,10 @@ WHERE p.state_desc = 'GRANT_WITH_GRANT_OPTION'
 UNION ALL
 
 SELECT
-    DB_NAME()                                         AS scope,
-    gp.name                                           AS grantee,
-    p.permission_name,
-    p.state_desc
+    CAST(DB_NAME() AS NVARCHAR(128))   COLLATE DATABASE_DEFAULT AS scope,
+    CAST(gp.name AS NVARCHAR(128))     COLLATE DATABASE_DEFAULT AS grantee,
+    CAST(p.permission_name AS NVARCHAR(128)) COLLATE DATABASE_DEFAULT AS permission_name,
+    CAST(p.state_desc AS NVARCHAR(60)) COLLATE DATABASE_DEFAULT AS state_desc
 FROM sys.database_permissions p
 JOIN sys.database_principals gp ON gp.principal_id = p.grantee_principal_id
 WHERE p.state_desc = 'GRANT_WITH_GRANT_OPTION';

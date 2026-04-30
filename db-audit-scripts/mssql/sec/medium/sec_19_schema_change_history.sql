@@ -17,19 +17,22 @@ SET TRANSACTION ISOLATION LEVEL READ UNCOMMITTED;
 -- ---------------------------------------------------------------------------
 -- Server- and database-scoped DDL triggers
 -- ---------------------------------------------------------------------------
+-- COLLATE DATABASE_DEFAULT on every string column so the UNION ALL works
+-- when the server collation differs from the database collation (common
+-- on databases created with a non-default collation, e.g. Hebrew_CI_AS).
 SELECT
-    'server' AS scope,
-    name     AS trigger_name,
-    type_desc,
+    CAST('server' AS NVARCHAR(20)) COLLATE DATABASE_DEFAULT AS scope,
+    CAST(name      AS NVARCHAR(128)) COLLATE DATABASE_DEFAULT AS trigger_name,
+    CAST(type_desc AS NVARCHAR(60))  COLLATE DATABASE_DEFAULT AS type_desc,
     is_disabled,
     create_date,
     modify_date
 FROM sys.server_triggers
 UNION ALL
 SELECT
-    'database' AS scope,
-    name       AS trigger_name,
-    type_desc,
+    CAST('database' AS NVARCHAR(20)) COLLATE DATABASE_DEFAULT AS scope,
+    CAST(name       AS NVARCHAR(128)) COLLATE DATABASE_DEFAULT AS trigger_name,
+    CAST(type_desc  AS NVARCHAR(60))  COLLATE DATABASE_DEFAULT AS type_desc,
     is_disabled,
     create_date,
     modify_date
@@ -128,16 +131,22 @@ ORDER BY o.modify_date DESC;
 -- ---------------------------------------------------------------------------
 -- Recently created logins / users (DDL on principals)
 -- ---------------------------------------------------------------------------
+-- COLLATE DATABASE_DEFAULT on the sysname columns so the UNION ALL is
+-- collation-safe across server vs database collation differences.
 SELECT
-    'server_principal' AS scope,
-    name, type_desc, create_date, modify_date, is_disabled
+    CAST('server_principal' AS NVARCHAR(20)) COLLATE DATABASE_DEFAULT AS scope,
+    CAST(name      AS NVARCHAR(128)) COLLATE DATABASE_DEFAULT AS name,
+    CAST(type_desc AS NVARCHAR(60))  COLLATE DATABASE_DEFAULT AS type_desc,
+    create_date, modify_date, is_disabled
 FROM sys.server_principals
 WHERE create_date > DATEADD(day, -90, SYSUTCDATETIME())
    OR modify_date > DATEADD(day, -90, SYSUTCDATETIME())
 UNION ALL
 SELECT
-    'database_principal' AS scope,
-    name, type_desc, create_date, modify_date, CAST(NULL AS BIT)
+    CAST('database_principal' AS NVARCHAR(20)) COLLATE DATABASE_DEFAULT AS scope,
+    CAST(name      AS NVARCHAR(128)) COLLATE DATABASE_DEFAULT AS name,
+    CAST(type_desc AS NVARCHAR(60))  COLLATE DATABASE_DEFAULT AS type_desc,
+    create_date, modify_date, CAST(NULL AS BIT)
 FROM sys.database_principals
 WHERE create_date > DATEADD(day, -90, SYSUTCDATETIME())
    OR modify_date > DATEADD(day, -90, SYSUTCDATETIME())

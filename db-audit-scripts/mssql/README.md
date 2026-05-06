@@ -169,20 +169,36 @@ cd db-audit-scripts\mssql
 
 ### PDF rendering pipeline
 
-The analyzer tries the following in order, picking the first that
-works (PDF is produced even when Edge is not installed):
+Pick the renderer with `-Renderer Auto|Chromium|WeasyPrint` (default `Auto`).
 
-1. **Microsoft Edge headless** (`msedge.exe --headless --print-to-pdf`)
+**Auto** (default) — tries WeasyPrint first when available, falls back to
+the Chromium chain. WeasyPrint produces the best result for the title
+page and the per-page background images because it has full CSS Paged
+Media support; Chromium works without any setup and renders the report
+acceptably on every modern Windows host.
+
+**WeasyPrint** — Python + `pip install weasyprint`. macOS additionally
+needs `brew install pango gobject-introspection`. Use this when the PDF
+must be print-ready (the cover and content backgrounds render exactly).
+
+**Chromium** — falls through:
+1. Microsoft Edge headless (`msedge.exe --headless --print-to-pdf`)
    -- preinstalled on every modern Windows.
-2. **Google Chrome / Chromium / Brave** headless -- if any is found in
-   `Program Files` / `Program Files (x86)` / `LocalAppData`.
-3. **wkhtmltopdf** -- in `PATH` or default install folder.
-4. **Microsoft Word COM** -- ships with Office; opens the HTML and saves
-   as PDF via `SaveAs2 wdFormatPDF=17`.
-5. **HTML only** -- if none of the above is found, the analyzer keeps
-   the HTML next to where the PDF would have been and prints a warning.
+2. Google Chrome / Chromium / Brave headless (Program Files, x86, LocalAppData)
+3. `wkhtmltopdf` in PATH or default install folder
+4. Microsoft Word COM (`SaveAs2 wdFormatPDF=17`) -- ships with Office
+5. HTML only -- if none of the above is available
 
-The chosen method is logged: `PDF: rendered via msedge.exe`.
+The chosen method is logged on stdout (`PDF: rendered via msedge.exe`,
+`PDF: rendered via WeasyPrint`, etc.).
+
+### Brand assets
+
+`mssql/assets/ait_bg_cover.png` is used as the cover-page background;
+`mssql/assets/ait_bg_page.png` is the watermark on every content page.
+The analyzer copies both files next to the HTML before rendering so
+relative `url('ait_bg_*.png')` references in CSS resolve. Replace these
+files in place to rebrand without editing PowerShell.
 
 ### Layout grouping
 

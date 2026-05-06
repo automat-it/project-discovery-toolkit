@@ -49,6 +49,8 @@ param(
     [string]$Customer   = "",
     [string]$Brand      = "Automat-it",
     [string]$OutFile    = "",
+    [ValidateSet('Auto','Chromium','WeasyPrint')]
+    [string]$Renderer   = 'Auto',
     [switch]$NoPdf,
     [switch]$KeepHtml
 )
@@ -702,6 +704,57 @@ function Convert-HtmlToPdf {
     return $false
 }
 
+function Convert-HtmlToPdf-WeasyPrint {
+    param([string]$Html, [string]$Pdf)
+    $py = $null
+    foreach ($candidate in 'python','python3','py') {
+        $cmd = Get-Command $candidate -ErrorAction SilentlyContinue
+        if ($cmd) { $py = $cmd; break }
+    }
+    if (-not $py) {
+        Write-Warning "WeasyPrint requested but Python is not on PATH."
+        return $false
+    }
+    # Probe for the weasyprint module so we fail fast with a useful message
+    & $py.Path -c "import weasyprint" 2>$null
+    if ($LASTEXITCODE -ne 0) {
+        Write-Warning "WeasyPrint is not installed (pip install weasyprint). On macOS also: brew install pango gobject-introspection."
+        return $false
+    }
+    $script = @"
+import sys
+from weasyprint import HTML
+HTML(filename=r'$Html').write_pdf(r'$Pdf')
+"@
+    $tmp = [System.IO.Path]::GetTempFileName() + '.py'
+    Set-Content -Path $tmp -Value $script -Encoding UTF8
+    $prevEAP = $ErrorActionPreference
+    $ErrorActionPreference = 'Continue'
+    try { & $py.Path $tmp 2>&1 | Out-Null } catch {} finally {
+        $ErrorActionPreference = $prevEAP
+        Remove-Item $tmp -ErrorAction SilentlyContinue
+    }
+    if (Test-Path $Pdf) { Write-Host "PDF: rendered via WeasyPrint"; return $true }
+    return $false
+}
+
+# Top-level dispatcher honouring -Renderer.
+function Convert-Report {
+    param([string]$Html, [string]$Pdf, [string]$Mode)
+    if ($Mode -eq 'WeasyPrint')              { return (Convert-HtmlToPdf-WeasyPrint -Html $Html -Pdf $Pdf) }
+    if ($Mode -eq 'Chromium' -or $Mode -eq 'Auto') {
+        if ($Mode -eq 'Auto') {
+            # Auto: prefer WeasyPrint if available (best CSS Paged Media
+            # support, especially for @page background-image and
+            # named-page selectors), fall back to Chromium chain.
+            if (Convert-HtmlToPdf-WeasyPrint -Html $Html -Pdf $Pdf) { return $true }
+        }
+        return (Convert-HtmlToPdf -Html $Html -Pdf $Pdf)
+    }
+    return $false
+}
+
+
 # ===========================================================================
 # Main
 # ===========================================================================
@@ -809,39 +862,28 @@ $domainCounts = $domainCounts | Sort-Object Value -Descending
 $now = Get-Date -Format 'yyyy-MM-dd HH:mm:ss'
 $css = @'
 <style>
-@page{size:A4;margin:18mm 14mm}
-body{font-family:Segoe UI,Arial,sans-serif;margin:0;padding:0;color:#222;background:#fff;font-size:10.5pt;line-height:1.45}
-h1{font-size:24pt;margin:0 0 8px}
-h2{font-size:16pt;margin:24px 0 10px;border-bottom:2px solid #6FA827;padding-bottom:4px}
-h3{font-size:12.5pt;margin:14px 0 6px;color:#3a6b14}
+@page{size:A4;margin:18mm 14mm;background-image:url('ait_bg_page.png');background-size:100% 100%;background-repeat:no-repeat;@bottom-center{content:counter(page) ' / ' counter(pages);font-size:8pt;color:#777}}
+@page coverpage{margin:0;background-image:url('ait_bg_cover.png');background-size:100% 100%;background-repeat:no-repeat;@bottom-center{content:none}@bottom-left{content:none}@bottom-right{content:none}}
+body{font-family:Segoe UI,Arial,sans-serif;margin:0;padding:0;color:#222;background:transparent;font-size:10.5pt;line-height:1.45}
+h1{font-size:22pt;margin:0 0 8px}
+h2{font-size:15pt;margin:24px 0 10px;color:#1F497D;padding-bottom:4px;border-bottom:2px solid #6FA827}
+h3{font-size:12.5pt;margin:14px 0 6px;color:#1F497D}
 h4{font-size:11pt;margin:10px 0 4px;color:#444}
-/* Title page */
-.cover{position:relative;height:calc(297mm - 36mm);page-break-after:always;break-after:page;color:#111;background:#fff;overflow:hidden}
-.cover-band{position:absolute;top:0;left:-14mm;right:-14mm;height:48%;overflow:hidden}
-.cover-band svg{width:100%;height:100%;display:block}
-.cover-logo{position:absolute;top:18mm;left:6mm;display:flex;align-items:center;gap:10px;z-index:3;color:#101010}
-.cover-logo .mark{width:34px;height:34px;border:3px solid #101010;border-radius:50%;position:relative;background:#9ACA3C}
-.cover-logo .mark::after{content:'';position:absolute;left:50%;top:50%;width:8px;height:8px;background:#101010;border-radius:50%;transform:translate(-50%,-50%)}
-.cover-logo .name{font-size:22pt;font-weight:800;letter-spacing:0.2px}
-.cover-title{position:absolute;left:0;right:0;top:55%;text-align:center;padding:0 16mm;transform:translateY(-30%)}
-.cover-title h1{font-size:32pt;font-weight:800;color:#111;margin:0 0 12px;border:none}
-.cover-title .sub{font-size:13pt;color:#444;margin:0 0 6px}
-.cover-title .meta{font-size:11pt;color:#555;margin:0 0 22px}
-.cover-title .date{font-size:11pt;color:#666;margin-top:24px}
-.cover-partner{position:absolute;bottom:14mm;left:6mm;width:32mm}
-.cover-partner svg{width:100%;height:auto;display:block}
-/* Watermark on every page (position:fixed renders on every printed page in chromium) */
-.watermark{position:fixed;top:-6mm;right:-12mm;width:90mm;opacity:0.10;z-index:-1;pointer-events:none}
-.watermark svg{width:100%;height:auto;display:block}
-.cover .watermark{display:none}  /* hide watermark on cover -- band is enough */
-section{padding:24px 28px;page-break-inside:avoid}
+/* Cover page: PNG provides green band, logo, AWS Partner badge.
+   We overlay the title text in the white area below the band. */
+.cover{page:coverpage;page-break-after:always;break-after:page;padding-top:55%;text-align:center;color:#000;height:100vh}
+.cover h1{font-size:26pt;font-weight:800;color:#000;margin:0 0 10px}
+.cover .sub{font-size:13pt;color:#333;margin:0 0 4px;font-weight:500}
+.cover .meta{font-size:11pt;color:#444;margin:0 0 6px}
+.cover .date{font-size:11pt;color:#666;margin-top:8px}
+section{padding:20px 24px;page-break-inside:avoid;background:transparent}
 section.firstaftercov{page-break-before:always}
-table{border-collapse:collapse;width:100%;font-size:9.7pt;background:white}
+table{border-collapse:collapse;width:100%;font-size:9.5pt;background:rgba(255,255,255,0.92)}
 th,td{padding:6px 8px;border-bottom:1px solid #e0e0e0;text-align:left;vertical-align:top}
-th{background:#eef5e3;font-weight:600}
-.exec{display:flex;gap:24px;flex-wrap:wrap;margin-bottom:18px}
-.kpi{flex:1;min-width:140px;background:#f5faec;border:1px solid #d6e6b9;border-radius:6px;padding:12px 14px}
-.kpi .num{font-size:22pt;font-weight:700;color:#3a6b14}
+th{background:#eef5e3;font-weight:600;color:#1F497D}
+.exec{display:flex;gap:18px;flex-wrap:wrap;margin-bottom:18px}
+.kpi{flex:1;min-width:140px;background:rgba(255,255,255,0.92);border:1px solid #d6e6b9;border-radius:6px;padding:12px 14px}
+.kpi .num{font-size:22pt;font-weight:700;color:#1F497D}
 .kpi .num.crit{color:#c0392b}
 .kpi .num.warn{color:#e67e22}
 .kpi .num.fail{color:#c0392b}
@@ -856,20 +898,19 @@ tr.sev-info    >td:first-child{border-left:4px solid #2980b9}
 .codeblk{background:#1e1e1e;color:#d4d4d4;font-family:Consolas,monospace;padding:10px 14px;border-radius:4px;font-size:9pt;white-space:pre-wrap;page-break-inside:avoid}
 .compl{font-size:8.5pt;color:#666}
 .kbd{font-family:Consolas,monospace;background:#f0f0f0;padding:1px 5px;border-radius:3px;font-size:0.88em}
-.fp{display:grid;grid-template-columns:max-content 1fr;gap:4px 14px;font-size:10pt}
+.fp{display:grid;grid-template-columns:max-content 1fr;gap:4px 14px;font-size:10pt;background:rgba(255,255,255,0.92);padding:14px 18px;border-radius:6px}
 .fp dt{font-weight:600;color:#444}
-.roadmap-phase{border-left:4px solid #6FA827;padding:8px 14px;margin:10px 0;background:#f5faec}
+.roadmap-phase{border-left:4px solid #6FA827;padding:8px 14px;margin:10px 0;background:rgba(255,255,255,0.92);border-radius:4px}
 .roadmap-phase h3{margin-top:0}
 .roadmap-phase ul{margin:6px 0 0 18px;padding:0}
-.glossary{font-size:9.5pt}
-.glossary dt{font-weight:600;margin-top:8px;color:#3a6b14}
+.glossary{font-size:9.5pt;background:rgba(255,255,255,0.92);padding:14px 18px;border-radius:6px}
+.glossary dt{font-weight:600;margin-top:8px;color:#1F497D}
 .glossary dd{margin:0 0 4px 16px}
 .appendix{font-size:9.5pt}
 .tag{display:inline-block;background:#eef5e3;color:#3a6b14;border-radius:10px;padding:1px 8px;font-size:8.5pt;margin-right:4px}
 .alert{background:#fdecea;border-left:4px solid #c0392b;padding:10px 14px;margin:8px 0;border-radius:4px}
 .note {background:#fff8e1;border-left:4px solid #e67e22;padding:10px 14px;margin:8px 0;border-radius:4px}
 .ok   {color:#27ae60;font-weight:600;font-style:italic}
-@page{@bottom-center{content:counter(page) ' / ' counter(pages)}}
 section.severity{page-break-before:always}
 </style>
 '@
@@ -879,38 +920,7 @@ $donut = New-SvgDonut -Critical $totalCrit -Warning $totalWarn -Info $totalInfo
 $domainBarSvg = New-SvgBar -Items $domainCounts
 
 $cover = @"
-<section class="cover"><div class="cover-band"><svg viewBox='0 0 1600 480' preserveAspectRatio='xMidYMid slice' xmlns='http://www.w3.org/2000/svg'>
-  <rect width='1600' height='480' fill='#9ACA3C'/>
-  <g fill='none' stroke='#ffffff' stroke-width='2' opacity='0.7'>
-    <path d='M -100,260 C 200,140 500,380 800,260 S 1300,140 1700,260'/>
-    <path d='M -100,290 C 200,170 500,410 800,290 S 1300,170 1700,290'/>
-    <path d='M -100,320 C 200,200 500,440 800,320 S 1300,200 1700,320'/>
-    <path d='M -100,350 C 200,230 500,470 800,350 S 1300,230 1700,350'/>
-    <path d='M -100,380 C 200,260 500,500 800,380 S 1300,260 1700,380'/>
-    <path d='M -100,410 C 200,290 500,530 800,410 S 1300,290 1700,410'/>
-  </g>
-  <path d='M -50,440 L 380,180 L 760,440 L 1140,180 L 1520,440 L 1700,320' fill='none' stroke='#101010' stroke-width='6'/>
-  <g fill='none' stroke='#7DB52E' stroke-width='1.2' opacity='0.55'>
-    <line x1='-40' y1='480' x2='600' y2='0'/>
-    <line x1='-20' y1='480' x2='620' y2='0'/>
-    <line x1='0'   y1='480' x2='640' y2='0'/>
-    <line x1='20'  y1='480' x2='660' y2='0'/>
-    <line x1='40'  y1='480' x2='680' y2='0'/>
-  </g>
-</svg></div><div class="cover-logo"><span class="mark"></span><span class="name">$(Esc $Brand)</span></div><div class="cover-title">
-<h1>SQL Server Security Audit Report</h1>
-<div class="sub">$(if ($Customer) { Esc $Customer } else { '' })</div>
-<div class="meta"><strong>Server:</strong> $(if ($ServerName) { Esc $ServerName } else { '(unspecified)' }) &nbsp;&middot;&nbsp; <strong>$dbCount</strong> databases analyzed</div>
-<div class="date">$now</div>
-</div><div class="cover-partner"><svg viewBox='0 0 220 240' xmlns='http://www.w3.org/2000/svg'>
-  <polygon points='25,30 195,30 195,180 110,225 25,180' fill='white' stroke='#bdbdbd' stroke-width='1.5'/>
-  <text x='110' y='85' text-anchor='middle' font-family='Segoe UI,Arial,sans-serif' font-size='30' font-weight='700' fill='#232F3E'>aws</text>
-  <path d='M 86,93 q 24,12 48,0' fill='none' stroke='#FF9900' stroke-width='3' stroke-linecap='round'/>
-  <line x1='40' y1='120' x2='180' y2='120' stroke='#dddddd' stroke-width='1'/>
-  <text x='110' y='148' text-anchor='middle' font-family='Segoe UI,Arial,sans-serif' font-size='15' font-weight='700' fill='#232F3E'>PARTNER</text>
-  <text x='110' y='171' text-anchor='middle' font-family='Segoe UI,Arial,sans-serif' font-size='10' fill='#666'>DevOps Services</text>
-  <text x='110' y='185' text-anchor='middle' font-family='Segoe UI,Arial,sans-serif' font-size='10' fill='#666'>Competency</text>
-</svg></div></section>
+<section class="cover"><h1>SQL Server Security Audit Report</h1><div class="sub">$(if ($Customer) { Esc $Customer } else { '' })</div><div class="meta"><strong>Server:</strong> $(if ($ServerName) { Esc $ServerName } else { '(unspecified)' }) &nbsp;&middot;&nbsp; <strong>$dbCount</strong> databases analyzed</div><div class="date">$now</div></section>
 "@
 
 $fpHtml = ''
@@ -1125,15 +1135,6 @@ $html = @"
 <title>SQL Server Security Audit Report</title>
 $css
 </head><body>
-<div class="watermark"><svg viewBox='0 0 600 360' xmlns='http://www.w3.org/2000/svg'>
-  <g fill='none' stroke='#9ACA3C' stroke-width='1.5'>
-    <path d='M -20,140 C 100,60 250,200 400,140 S 650,60 750,140'/>
-    <path d='M -20,170 C 100,90 250,230 400,170 S 650,90 750,170'/>
-    <path d='M -20,200 C 100,120 250,260 400,200 S 650,120 750,200'/>
-    <path d='M -20,230 C 100,150 250,290 400,230 S 650,150 750,230'/>
-  </g>
-  <path d='M 0,260 L 150,120 L 300,260 L 450,120 L 600,260' fill='none' stroke='#101010' stroke-width='3'/>
-</svg></div>
 $cover
 $fpHtml
 $execHtml
@@ -1148,12 +1149,22 @@ $glossary
 </body></html>
 "@
 
+# Copy brand assets (PNG backgrounds for cover + content pages) next to
+# the HTML so CSS @page background-image references resolve.
+$scriptDir = Split-Path -Parent $MyInvocation.MyCommand.Path
+$assetsDir = Join-Path (Split-Path -Parent $scriptDir) 'assets'
+$htmlDir   = Split-Path -Parent $HtmlPath
+foreach ($asset in 'ait_bg_cover.png','ait_bg_page.png') {
+    $src = Join-Path $assetsDir $asset
+    $dst = Join-Path $htmlDir   $asset
+    if (Test-Path $src) { Copy-Item -LiteralPath $src -Destination $dst -Force }
+}
 [System.IO.File]::WriteAllText($HtmlPath, $html, (New-Object System.Text.UTF8Encoding $true))
 
 $pdfMade = $false; $pdfPath = $null
 if (-not $NoPdf) {
     $pdfPath = if ($OutFile -like '*.pdf') { $OutFile } else { [System.IO.Path]::ChangeExtension($OutFile, 'pdf') }
-    $pdfMade = Convert-HtmlToPdf -Html $HtmlPath -Pdf $pdfPath
+    $pdfMade = Convert-Report -Html $HtmlPath -Pdf $pdfPath -Mode $Renderer
     if ($pdfMade -and -not $KeepHtml -and ($HtmlPath -ne $OutFile)) { Remove-Item $HtmlPath -ErrorAction SilentlyContinue }
 }
 

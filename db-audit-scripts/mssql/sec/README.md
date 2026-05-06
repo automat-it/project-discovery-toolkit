@@ -63,8 +63,19 @@ Generates a **consultant-grade PDF** report (HTML intermediate) with:
 .\analyze_report.ps1 -ReportDir "..." -Brand "Your Company"
 ```
 
-PDF is rendered via **Microsoft Edge headless** (ships with every modern
-Windows install). If Edge is not found, the analyzer falls back to HTML.
+### PDF rendering pipeline
+
+PDF is produced even when Microsoft Edge is not installed. The analyzer
+tries the following methods in order:
+
+1. Microsoft Edge headless (`msedge.exe --headless --print-to-pdf`)
+2. Google Chrome / Chromium / Brave headless (Program Files, x86, LocalAppData)
+3. `wkhtmltopdf` in PATH or `Program Files\wkhtmltopdf\bin\`
+4. Microsoft Word COM (`SaveAs2 wdFormatPDF=17`) -- ships with Office
+5. HTML only -- if none of the above is available
+
+The method that succeeded is logged on stdout
+(`PDF: rendered via msedge.exe`).
 
 Output layout:
 

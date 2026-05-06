@@ -744,7 +744,7 @@ h1{font-size:24pt;margin:0 0 8px}
 h2{font-size:16pt;margin:24px 0 10px;border-bottom:2px solid #2a6db0;padding-bottom:4px}
 h3{font-size:12.5pt;margin:14px 0 6px;color:#2a6db0}
 h4{font-size:11pt;margin:10px 0 4px;color:#444}
-.cover{page-break-after:always;padding:40px;background:linear-gradient(135deg,#2a6db0 0%,#1f5a98 100%);color:white;min-height:240mm}
+.cover{page-break-after:always;box-sizing:border-box;padding:40px;background:linear-gradient(135deg,#2a6db0 0%,#1f5a98 100%);color:white;min-height:230mm;break-after:page;overflow:hidden}
 .cover h1{font-size:30pt}
 .cover .meta{margin-top:20px;font-size:11pt}
 .cover .meta div{margin:4px 0}

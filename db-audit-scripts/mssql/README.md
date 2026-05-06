@@ -85,7 +85,7 @@ foreach ($db in $databases) {
     .\run_audit.ps1 -Server "sql-server.internal" -Database $db -OutRoot ".\reports_subset\$db"
 }
 
-# Single combined HTML report covering every database under reports_subset\
+# Single combined PDF report covering every database under reports_subset\
 .\perf\analyze_report.ps1 -ReportDir ".\reports_subset" -ServerName "sql-server.internal"
 .\sec\analyze_report.ps1  -ReportDir ".\reports_subset" -ServerName "sql-server.internal"
 
@@ -109,6 +109,88 @@ reports\
     critical_perf_01_top_sql.log
     ...
 ```
+
+## Report analyzer (`perf/analyze_report.ps1`, `sec/analyze_report.ps1`)
+
+After a run completes, the analyzer turns the raw log folder into a
+**consultant-grade PDF deliverable**. Two analyzers — one per audit
+category. Each produces a single multi-page report covering every
+database in the run:
+
+* **Cover page** — server name, customer name, severity donut chart, generation date
+* **Environment fingerprint** — edition / version / CPU / RAM / uptime
+  / collation / AG-state (perf), or auth mode / sysadmin count / audit
+  status (sec)
+* **Executive summary** — KPI cards + findings-by-domain bar chart
+* **Server-wide findings** — instance-level issues, deduplicated (one
+  row per finding, not 123 copies)
+* **Database fleet rollup** — per-DB findings as "X of N databases
+  affected" with the top-affected database list
+* **Backup freshness alert** (perf) — databases with last full backup
+  older than 72 hours
+* **Top-N inventories** (sec) — privileged accounts, weak-password
+  logins, PII columns extracted directly from `sec_03` / `sec_05` /
+  `sec_09` log content
+* **Compliance mapping** — CIS Microsoft SQL Server Benchmark, GDPR
+  Art.32, SOC2 Trust Services Criteria; sec also adds HIPAA Security
+  Rule and PCI DSS v4
+* **Phased remediation roadmap** — Phase 1 (Week 1-2, Critical),
+  Phase 2 (Week 3-6, Warning), Phase 3 (Week 7-12, Info / hardening)
+* **T-SQL remediation snippets** — executable templates per finding
+  type, with placeholders explicitly marked
+* **Per-database appendix** — the full per-DB finding list for
+  reference
+* **Glossary appendix** — wait types, DMV terms, encryption
+  primitives for non-DBA readers
+* **Branded watermark** — configurable via `-Brand` (default
+  `Automat-it`)
+
+```powershell
+cd db-audit-scripts\mssql
+
+# Default: produce perf_analysis.pdf and sec_analysis.pdf in the report folder
+.\perf\analyze_report.ps1 -ReportDir "C:\reports\mssql_audit_all_YYYYMMDD_HHMMSS" `
+                          -ServerName "sql-server.internal" -Customer "ACME Corp"
+.\sec\analyze_report.ps1  -ReportDir "C:\reports\mssql_audit_all_YYYYMMDD_HHMMSS" `
+                          -ServerName "sql-server.internal" -Customer "ACME Corp"
+
+# Skip PDF -- write HTML only (lighter, opens in any browser)
+.\perf\analyze_report.ps1 -ReportDir "..." -NoPdf
+
+# Keep both PDF and the intermediate HTML
+.\perf\analyze_report.ps1 -ReportDir "..." -KeepHtml
+
+# Custom branding text in footer
+.\perf\analyze_report.ps1 -ReportDir "..." -Brand "Your Company"
+
+# Custom output path
+.\perf\analyze_report.ps1 -ReportDir "..." -OutFile "C:\reports\client_perf.pdf"
+```
+
+### PDF rendering pipeline
+
+The analyzer tries the following in order, picking the first that
+works (PDF is produced even when Edge is not installed):
+
+1. **Microsoft Edge headless** (`msedge.exe --headless --print-to-pdf`)
+   -- preinstalled on every modern Windows.
+2. **Google Chrome / Chromium / Brave** headless -- if any is found in
+   `Program Files` / `Program Files (x86)` / `LocalAppData`.
+3. **wkhtmltopdf** -- in `PATH` or default install folder.
+4. **Microsoft Word COM** -- ships with Office; opens the HTML and saves
+   as PDF via `SaveAs2 wdFormatPDF=17`.
+5. **HTML only** -- if none of the above is found, the analyzer keeps
+   the HTML next to where the PDF would have been and prints a warning.
+
+The chosen method is logged: `PDF: rendered via msedge.exe`.
+
+### Layout grouping
+
+Within each report the findings are grouped **by database** (one
+section per DB), with the executive summary and rollup tables giving
+the cross-fleet view. Severity is colour-coded (Critical = red,
+Warning = orange, Info = blue) consistently across cover, charts, and
+tables.
 
 Script behaviour notes:
 

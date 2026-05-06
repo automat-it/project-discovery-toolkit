@@ -49,8 +49,6 @@ param(
     [string]$Customer   = "",
     [string]$Brand      = "Automat-it",
     [string]$OutFile    = "",
-    [ValidateSet('Auto','Chromium','WeasyPrint')]
-    [string]$Renderer   = 'Auto',
     [switch]$NoPdf,
     [switch]$KeepHtml
 )
@@ -704,55 +702,6 @@ function Convert-HtmlToPdf {
     return $false
 }
 
-function Convert-HtmlToPdf-WeasyPrint {
-    param([string]$Html, [string]$Pdf)
-    $py = $null
-    foreach ($candidate in 'python','python3','py') {
-        $cmd = Get-Command $candidate -ErrorAction SilentlyContinue
-        if ($cmd) { $py = $cmd; break }
-    }
-    if (-not $py) {
-        Write-Warning "WeasyPrint requested but Python is not on PATH."
-        return $false
-    }
-    # Probe for the weasyprint module so we fail fast with a useful message
-    & $py.Path -c "import weasyprint" 2>$null
-    if ($LASTEXITCODE -ne 0) {
-        Write-Warning "WeasyPrint is not installed (pip install weasyprint). On macOS also: brew install pango gobject-introspection."
-        return $false
-    }
-    $script = @"
-import sys
-from weasyprint import HTML
-HTML(filename=r'$Html').write_pdf(r'$Pdf')
-"@
-    $tmp = [System.IO.Path]::GetTempFileName() + '.py'
-    Set-Content -Path $tmp -Value $script -Encoding UTF8
-    $prevEAP = $ErrorActionPreference
-    $ErrorActionPreference = 'Continue'
-    try { & $py.Path $tmp 2>&1 | Out-Null } catch {} finally {
-        $ErrorActionPreference = $prevEAP
-        Remove-Item $tmp -ErrorAction SilentlyContinue
-    }
-    if (Test-Path $Pdf) { Write-Host "PDF: rendered via WeasyPrint"; return $true }
-    return $false
-}
-
-# Top-level dispatcher honouring -Renderer.
-function Convert-Report {
-    param([string]$Html, [string]$Pdf, [string]$Mode)
-    if ($Mode -eq 'WeasyPrint')              { return (Convert-HtmlToPdf-WeasyPrint -Html $Html -Pdf $Pdf) }
-    if ($Mode -eq 'Chromium' -or $Mode -eq 'Auto') {
-        if ($Mode -eq 'Auto') {
-            # Auto: prefer WeasyPrint if available (best CSS Paged Media
-            # support, especially for @page background-image and
-            # named-page selectors), fall back to Chromium chain.
-            if (Convert-HtmlToPdf-WeasyPrint -Html $Html -Pdf $Pdf) { return $true }
-        }
-        return (Convert-HtmlToPdf -Html $Html -Pdf $Pdf)
-    }
-    return $false
-}
 
 
 # ===========================================================================
@@ -862,20 +811,24 @@ $domainCounts = $domainCounts | Sort-Object Value -Descending
 $now = Get-Date -Format 'yyyy-MM-dd HH:mm:ss'
 $css = @'
 <style>
-@page{size:A4;margin:18mm 14mm;background-image:url('ait_bg_page.png');background-size:100% 100%;background-repeat:no-repeat;@bottom-center{content:counter(page) ' / ' counter(pages);font-size:8pt;color:#777}}
-@page coverpage{margin:0;background-image:url('ait_bg_cover.png');background-size:100% 100%;background-repeat:no-repeat;@bottom-center{content:none}@bottom-left{content:none}@bottom-right{content:none}}
-body{font-family:Segoe UI,Arial,sans-serif;margin:0;padding:0;color:#222;background:transparent;font-size:10.5pt;line-height:1.45}
+@page{size:A4;margin:18mm 14mm;@bottom-center{content:counter(page) ' / ' counter(pages);font-size:8pt;color:#777}}
+body{font-family:Segoe UI,Arial,sans-serif;margin:0;padding:0;color:#222;background:#fff;font-size:10.5pt;line-height:1.45}
 h1{font-size:22pt;margin:0 0 8px}
 h2{font-size:15pt;margin:24px 0 10px;color:#1F497D;padding-bottom:4px;border-bottom:2px solid #6FA827}
 h3{font-size:12.5pt;margin:14px 0 6px;color:#1F497D}
 h4{font-size:11pt;margin:10px 0 4px;color:#444}
-/* Cover page: PNG provides green band, logo, AWS Partner badge.
-   We overlay the title text in the white area below the band. */
-.cover{page:coverpage;page-break-after:always;break-after:page;padding-top:55%;text-align:center;color:#000;height:100vh}
-.cover h1{font-size:26pt;font-weight:800;color:#000;margin:0 0 10px}
+/* The per-page watermark. position:fixed elements paint on every PDF
+   page in Chromium headless. z-index:-1 keeps content above. */
+.page-bg{position:fixed;top:0;left:0;right:0;bottom:0;z-index:-1;background-image:url('ait_bg_page.png');background-size:100% 100%;background-repeat:no-repeat;background-position:center;opacity:0.5}
+/* The cover IS a full-page section with the cover PNG as background.
+   Title text is positioned in the white area below the green band. */
+.cover{position:relative;width:100%;height:calc(297mm - 36mm);page-break-after:always;break-after:page;background-image:url('ait_bg_cover.png');background-size:100% 100%;background-repeat:no-repeat;background-position:center;color:#000;text-align:center}
+.cover-content{position:absolute;left:0;right:0;top:55%;padding:0 16mm}
+.cover h1{font-size:24pt;font-weight:800;color:#000;margin:0 0 10px}
 .cover .sub{font-size:13pt;color:#333;margin:0 0 4px;font-weight:500}
 .cover .meta{font-size:11pt;color:#444;margin:0 0 6px}
 .cover .date{font-size:11pt;color:#666;margin-top:8px}
+.cover ~ section .page-bg{display:block}
 section{padding:20px 24px;page-break-inside:avoid;background:transparent}
 section.firstaftercov{page-break-before:always}
 table{border-collapse:collapse;width:100%;font-size:9.5pt;background:rgba(255,255,255,0.92)}
@@ -920,7 +873,7 @@ $donut = New-SvgDonut -Critical $totalCrit -Warning $totalWarn -Info $totalInfo
 $domainBarSvg = New-SvgBar -Items $domainCounts
 
 $cover = @"
-<section class="cover"><h1>SQL Server Security Audit Report</h1><div class="sub">$(if ($Customer) { Esc $Customer } else { '' })</div><div class="meta"><strong>Server:</strong> $(if ($ServerName) { Esc $ServerName } else { '(unspecified)' }) &nbsp;&middot;&nbsp; <strong>$dbCount</strong> databases analyzed</div><div class="date">$now</div></section>
+<section class="cover"><div class="cover-content"><h1>SQL Server Security Audit Report</h1><div class="sub">$(if ($Customer) { Esc $Customer } else { '' })</div><div class="meta"><strong>Server:</strong> $(if ($ServerName) { Esc $ServerName } else { '(unspecified)' }) &nbsp;&middot;&nbsp; <strong>$dbCount</strong> databases analyzed</div><div class="date">$now</div></div></section>
 "@
 
 $fpHtml = ''
@@ -1135,6 +1088,7 @@ $html = @"
 <title>SQL Server Security Audit Report</title>
 $css
 </head><body>
+<div class="page-bg"></div>
 $cover
 $fpHtml
 $execHtml
@@ -1164,7 +1118,7 @@ foreach ($asset in 'ait_bg_cover.png','ait_bg_page.png') {
 $pdfMade = $false; $pdfPath = $null
 if (-not $NoPdf) {
     $pdfPath = if ($OutFile -like '*.pdf') { $OutFile } else { [System.IO.Path]::ChangeExtension($OutFile, 'pdf') }
-    $pdfMade = Convert-Report -Html $HtmlPath -Pdf $pdfPath -Mode $Renderer
+    $pdfMade = Convert-HtmlToPdf -Html $HtmlPath -Pdf $pdfPath
     if ($pdfMade -and -not $KeepHtml -and ($HtmlPath -ne $OutFile)) { Remove-Item $HtmlPath -ErrorAction SilentlyContinue }
 }
 

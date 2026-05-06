@@ -169,28 +169,20 @@ cd db-audit-scripts\mssql
 
 ### PDF rendering pipeline
 
-Pick the renderer with `-Renderer Auto|Chromium|WeasyPrint` (default `Auto`).
+PDF is produced even when Microsoft Edge is not installed. The analyzer
+tries the following methods in order:
 
-**Auto** (default) — tries WeasyPrint first when available, falls back to
-the Chromium chain. WeasyPrint produces the best result for the title
-page and the per-page background images because it has full CSS Paged
-Media support; Chromium works without any setup and renders the report
-acceptably on every modern Windows host.
-
-**WeasyPrint** — Python + `pip install weasyprint`. macOS additionally
-needs `brew install pango gobject-introspection`. Use this when the PDF
-must be print-ready (the cover and content backgrounds render exactly).
-
-**Chromium** — falls through:
-1. Microsoft Edge headless (`msedge.exe --headless --print-to-pdf`)
+1. **Microsoft Edge headless** (`msedge.exe --headless --print-to-pdf`)
    -- preinstalled on every modern Windows.
-2. Google Chrome / Chromium / Brave headless (Program Files, x86, LocalAppData)
-3. `wkhtmltopdf` in PATH or default install folder
-4. Microsoft Word COM (`SaveAs2 wdFormatPDF=17`) -- ships with Office
-5. HTML only -- if none of the above is available
+2. **Google Chrome / Chromium / Brave** headless -- if any is found in
+   `Program Files` / `Program Files (x86)` / `LocalAppData`.
+3. **wkhtmltopdf** -- in `PATH` or default install folder.
+4. **Microsoft Word COM** -- ships with Office; opens the HTML and saves
+   as PDF via `SaveAs2 wdFormatPDF=17`.
+5. **HTML only** -- if none of the above is found, the analyzer keeps
+   the HTML next to where the PDF would have been and prints a warning.
 
-The chosen method is logged on stdout (`PDF: rendered via msedge.exe`,
-`PDF: rendered via WeasyPrint`, etc.).
+The chosen method is logged: `PDF: rendered via msedge.exe`.
 
 ### Brand assets
 

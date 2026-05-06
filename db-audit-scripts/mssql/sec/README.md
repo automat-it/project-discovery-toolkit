@@ -64,18 +64,17 @@ Generates a **PDF file** report (HTML intermediate) with:
 
 ### PDF rendering pipeline
 
-Pick the renderer with `-Renderer Auto|Chromium|WeasyPrint` (default `Auto`).
+PDF is produced even when Microsoft Edge is not installed. The analyzer
+tries the following methods in order:
 
-* **Auto** -- tries WeasyPrint first when Python + weasyprint is on PATH,
-  falls back to the Chromium chain.
-* **WeasyPrint** -- best rendering for the cover-page background and the
-  per-page watermark. Requires `pip install weasyprint` (macOS also
-  `brew install pango gobject-introspection`).
-* **Chromium** -- Edge -> Chrome / Chromium / Brave -> wkhtmltopdf ->
-  Microsoft Word COM. Edge ships preinstalled on every modern Windows.
+1. Microsoft Edge headless (`msedge.exe --headless --print-to-pdf`)
+2. Google Chrome / Chromium / Brave headless (Program Files, x86, LocalAppData)
+3. `wkhtmltopdf` in PATH or `Program Files\wkhtmltopdf\bin\`
+4. Microsoft Word COM (`SaveAs2 wdFormatPDF=17`) -- ships with Office
+5. HTML only -- if none of the above is available
 
-The method that succeeded is logged on stdout (`PDF: rendered via
-msedge.exe` / `PDF: rendered via WeasyPrint`).
+The method that succeeded is logged on stdout
+(`PDF: rendered via msedge.exe`).
 
 Output layout:
 

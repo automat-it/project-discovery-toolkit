@@ -666,11 +666,17 @@ $serverFindings  = @($aggregated | Where-Object { $_.Scope -eq 'Server' })
 # Per-database findings = those with Scope='Database', counted as N of M
 $dbFindings      = @($aggregated | Where-Object { $_.Scope -eq 'Database' })
 
-$totalCrit = ($report | Measure-Object Critical -Sum).Sum
-$totalWarn = ($report | Measure-Object Warning  -Sum).Sum
-$totalInfo = ($report | Measure-Object Info     -Sum).Sum
-$totalFail = ($report | Measure-Object Failed   -Sum).Sum
-$dbCount   = @($report).Count
+# Foreach-based summation -- sidesteps PS5.1 'Argument types do not match'
+# from Measure-Object on a System.Collections.Generic.List[object] when
+# the rows have heterogeneous calc-dependent properties.
+$totalCrit = 0; $totalWarn = 0; $totalInfo = 0; $totalFail = 0
+foreach ($r in $report) {
+    $totalCrit += [int]$r.Critical
+    $totalWarn += [int]$r.Warning
+    $totalInfo += [int]$r.Info
+    $totalFail += [int]$r.Failed
+}
+$dbCount = $report.Count
 
 # Domain breakdown (perf categories) -- bucket by script prefix
 $domainBuckets = [ordered]@{
@@ -942,7 +948,10 @@ $snipHtml += "</section>"
 
 # Per-database appendix ----------------------------------------------------
 $apxHtml = "<section class='section appendix'><h2>9. Appendix A: Per-Database Findings</h2><p>Full findings per database for reference. Critical = red border, Warning = orange, Info = blue.</p>"
-$report | ForEach-Object { $_ | Add-Member -NotePropertyName _NameRank -NotePropertyValue (& { if ($_.Name -eq '_server') { 0 } else { 1 } }) -Force }
+foreach ($_r in $report) {
+    $rk = if ($_r.Name -eq '_server') { 0 } else { 1 }
+    $_r | Add-Member -NotePropertyName _NameRank -NotePropertyValue $rk -Force
+}
 foreach ($r in ($report | Sort-Object _NameRank, Name)) {
     if (@($r.Findings).Count -eq 0) { continue }
     $apxHtml += "<h3>$(Esc $r.Name) <span class='tag'>$($r.Critical) crit</span><span class='tag'>$($r.Warning) warn</span><span class='tag'>$($r.Info) info</span></h3>"

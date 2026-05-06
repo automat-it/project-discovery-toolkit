@@ -33,21 +33,29 @@ powershell -ExecutionPolicy Bypass -File .\run_audit.ps1 -Server "sql-server.int
 ## Report analyzer (`analyze_report.ps1`)
 
 After a run completes, parse the report folder into a customer-friendly
-HTML summary that highlights potential security issues across all databases:
+**PDF** report (with HTML as the intermediate format). The report is
+organized as one section per severity (**Critical**, **Warning**,
+**Info**) and inside each severity section the findings are grouped
+by database.
 
 ```powershell
-# Multi-database report
+# Multi-database report (default: produces sec_analysis.pdf)
 .\analyze_report.ps1 -ReportDir "C:\reports\mssql_audit_all_20260429_230243" `
                      -ServerName "sql-server.internal"
 
-# Single-database report
-.\analyze_report.ps1 -ReportDir "C:\reports\mssql_sec_20260430_010000"
+# Keep the intermediate HTML file alongside the PDF
+.\analyze_report.ps1 -ReportDir "..." -KeepHtml
+
+# HTML only (skip PDF conversion)
+.\analyze_report.ps1 -ReportDir "..." -NoPdf
+
+# Custom output path
+.\analyze_report.ps1 -ReportDir "..." -OutFile "C:\reports\client_sec.pdf"
 ```
 
-The analyzer writes `sec_analysis.html` into the report folder. The HTML
-contains an executive-summary table (counts of Critical / Warning / Info
-findings per database) plus a section per database with the matched
-findings, severity, and remediation hints.
+PDF is produced by **Microsoft Edge in headless mode** (ships with every
+modern Windows install -- no extra dependencies). If Edge is not found
+the analyzer falls back to writing HTML only and prints a warning.
 
 Output layout:
 

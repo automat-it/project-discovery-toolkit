@@ -73,6 +73,18 @@ function Esc { param($s) [System.Web.HttpUtility]::HtmlEncode([string]$s) }
 
 # Severity ranking helper (avoids Sort-Object calculated-expression issues
 # in PS5.1 when comparing across heterogeneous types).
+# Safe count helper. PS5.1's (_Cnt $genericList) can raise
+# 'Argument types do not match' when the list holds heterogeneous
+# pscustomobjects with Add-Member''d note properties. Count via the
+# native .Count property when present, otherwise iterate.
+function _Cnt {
+    param($x)
+    if ($null -eq $x) { return 0 }
+    try { if ($x.Count -is [int]) { return $x.Count } } catch {}
+    $n = 0; foreach ($i in $x) { $n++ }
+    return $n
+}
+
 function Get-SeverityRank {
     param([string]$Severity)
     if     ($Severity -eq 'Critical') { return 0 }
@@ -219,7 +231,7 @@ function Get-ServerFingerprint {
         $sets = Get-SqlCmdResultSets $log03.FullName
         if ($sets) {
             $smCount = 0
-            foreach ($s in $sets) { $smCount += @($s.Rows).Count }
+            foreach ($s in $sets) { $smCount += (_Cnt $s.Rows) }
             $fp.SysadminMembers = $smCount
         }
     }
@@ -293,7 +305,7 @@ function Get-PiiColumns {
 
 function Test-LogHasDataRows {
     param([string]$LogPath)
-    foreach ($s in (Get-SqlCmdResultSets $LogPath)) { if (@($s.Rows).Count -gt 0) { return $true } }
+    foreach ($s in (Get-SqlCmdResultSets $LogPath)) { if ((_Cnt $s.Rows) -gt 0) { return $true } }
     return $false
 }
 
@@ -548,7 +560,7 @@ function Get-ReportContexts {
                 $contexts += [pscustomobject]@{ Name=$dbName; LogDir=$_.FullName }
             }
     }
-    if (@($contexts).Count -gt 0) { return ,$contexts }
+    if ((_Cnt $contexts) -gt 0) { return ,$contexts }
     if (Test-Path (Join-Path $Root '_summary.txt')) {
         return ,@([pscustomobject]@{ Name='(single run)'; LogDir=$Root })
     }
@@ -595,11 +607,11 @@ function New-SvgDonut {
 }
 function New-SvgBar {
     param([array]$Items, [string]$ColorPositive='#8e44ad')
-    if (-not $Items -or @($Items).Count -eq 0) { return '' }
+    if (-not $Items -or (_Cnt $Items) -eq 0) { return '' }
     $maxN = 1
     foreach ($it in $Items) { if ($it.Value -gt $maxN) { $maxN = $it.Value } }
     $rowH = 22; $padTop = 10; $padLeft = 220; $width = 620
-    $h = $padTop + $rowH * @($Items).Count + 10
+    $h = $padTop + $rowH * (_Cnt $Items) + 10
     $svg = "<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 $width $h' width='$width' height='$h' font-family='Segoe UI,Arial' font-size='12'>"
     $y = $padTop
     foreach ($it in $Items) {
@@ -643,7 +655,19 @@ function Convert-HtmlToPdf {
     $browser = Get-ChromiumBrowser
     if ($browser) {
         Write-Host "PDF:   trying $browser"
-        & $browser --headless --disable-gpu --no-pdf-header-footer --print-to-pdf="$Pdf" $uri 2>$null | Out-Null
+        # Chrome / Edge may print non-fatal stderr (geolocation, GPU init)
+        # which under EAP=Stop is converted to a terminating NativeCommandError.
+        # Run the headless conversion under EAP=Continue + try/catch so the
+        # PDF actually lands on disk before we react to any stderr noise.
+        $prevEAP = $ErrorActionPreference
+        $ErrorActionPreference = 'Continue'
+        try {
+            & $browser --headless --disable-gpu --no-pdf-header-footer --print-to-pdf="$Pdf" $uri *>$null
+        } catch {
+            Write-Verbose "Chromium stderr: $($_.Exception.Message)"
+        } finally {
+            $ErrorActionPreference = $prevEAP
+        }
         if (Test-Path $Pdf) { Write-Host "PDF: rendered via $(Split-Path -Leaf $browser)"; return $true }
     }
 
@@ -654,7 +678,9 @@ function Convert-HtmlToPdf {
     }
     if ($wk) {
         Write-Host "PDF:   trying wkhtmltopdf"
-        & $wk.Path --quiet --enable-local-file-access $abs $Pdf 2>$null | Out-Null
+        $prevEAP = $ErrorActionPreference
+        $ErrorActionPreference = 'Continue'
+        try { & $wk.Path --quiet --enable-local-file-access $abs $Pdf *>$null } catch {} finally { $ErrorActionPreference = $prevEAP }
         if (Test-Path $Pdf) { Write-Host "PDF: rendered via wkhtmltopdf"; return $true }
     }
 
@@ -681,7 +707,7 @@ function Convert-HtmlToPdf {
 # Main
 # ===========================================================================
 $contexts = Get-ReportContexts $ReportDir
-if (@($contexts).Count -eq 0) { Write-Error "No report sub-folders under $ReportDir."; exit 3 }
+if ((_Cnt $contexts) -eq 0) { Write-Error "No report sub-folders under $ReportDir."; exit 3 }
 
 $report = New-Object System.Collections.Generic.List[object]
 foreach ($ctx in $contexts) {
@@ -892,7 +918,7 @@ $domainBarSvg
 "@
 
 $srvFindHtml = "<section class='section'><h2>3. Server-Wide Findings</h2>"
-if (@($serverFindings).Count -eq 0) {
+if ((_Cnt $serverFindings) -eq 0) {
     $srvFindHtml += "<p class='ok'>No server-wide findings detected.</p>"
 } else {
     $srvFindHtml += "<table><thead><tr><th>Severity</th><th>Finding</th><th>CIS</th><th>GDPR</th><th>SOC2</th><th>HIPAA</th><th>PCI</th></tr></thead><tbody>"
@@ -908,7 +934,7 @@ if (@($serverFindings).Count -eq 0) {
 $srvFindHtml += "</section>"
 
 $dbFindHtml = "<section class='section'><h2>4. Database-Level Findings (Fleet Rollup)</h2>"
-if (@($dbFindings).Count -eq 0) {
+if ((_Cnt $dbFindings) -eq 0) {
     $dbFindHtml += "<p class='ok'>No database-level findings detected.</p>"
 } else {
     $dbFindHtml += "<table><thead><tr><th>Severity</th><th>Finding</th><th>Affected</th><th>Top affected DBs</th><th>CIS</th><th>GDPR</th></tr></thead><tbody>"
@@ -931,16 +957,16 @@ $dbFindHtml += "</section>"
 # Top-N data
 $topNHtml = "<section class='section'><h2>5. Top-N Inventories</h2>"
 $topNHtml += "<h3>5.1 Privileged accounts</h3>"
-if (@($sysadmins).Count -eq 0) {
+if ((_Cnt $sysadmins) -eq 0) {
     $topNHtml += "<p class='note'>Privileged-account list could not be extracted.</p>"
 } else {
-    $topNHtml += "<p>Total entries (sysadmin / equivalent): <strong>$(@($sysadmins).Count)</strong>. Sample shown.</p><ul>"
+    $topNHtml += "<p>Total entries (sysadmin / equivalent): <strong>$((_Cnt $sysadmins))</strong>. Sample shown.</p><ul>"
     foreach ($s in ($sysadmins | Select-Object -First 25)) { $topNHtml += "<li><span class='kbd'>$(Esc $s)</span></li>" }
-    if (@($sysadmins).Count -gt 25) { $topNHtml += "<li>... +$([int](@($sysadmins).Count - 25)) more</li>" }
+    if ((_Cnt $sysadmins) -gt 25) { $topNHtml += "<li>... +$([int]((_Cnt $sysadmins) - 25)) more</li>" }
     $topNHtml += "</ul>"
 }
 $topNHtml += "<h3>5.2 Weak / trivial passwords</h3>"
-if (@($weakPwds).Count -eq 0) {
+if ((_Cnt $weakPwds) -eq 0) {
     $topNHtml += "<p class='ok'>No weak-password matches recorded.</p>"
 } else {
     $topNHtml += "<table><thead><tr><th>Login</th><th>Detection rule</th></tr></thead><tbody>"
@@ -950,11 +976,11 @@ if (@($weakPwds).Count -eq 0) {
     $topNHtml += "</tbody></table>"
 }
 $topNHtml += "<h3>5.3 PII / sensitive columns</h3>"
-if (@($piiAll).Count -eq 0) {
+if ((_Cnt $piiAll) -eq 0) {
     $topNHtml += "<p class='ok'>No PII column patterns matched (or sec_09 not run).</p>"
 } else {
     $byDb = $piiAll | Group-Object Database | Sort-Object Count -Descending
-    $topNHtml += "<p>Total matches: <strong>$(@($piiAll).Count)</strong> across <strong>$(@($byDb).Count)</strong> databases.</p>"
+    $topNHtml += "<p>Total matches: <strong>$((_Cnt $piiAll))</strong> across <strong>$((_Cnt $byDb))</strong> databases.</p>"
     $topNHtml += "<table><thead><tr><th>Database</th><th>PII columns</th></tr></thead><tbody>"
     foreach ($g in ($byDb | Select-Object -First 25)) {
         $topNHtml += "<tr><td>$(Esc $g.Name)</td><td><strong>$($g.Count)</strong></td></tr>"
@@ -993,7 +1019,7 @@ foreach ($f in $phase1) {
     $where = if ($f.Scope -eq 'Server') { 'instance-wide' } else { "$cnt of $dbCount databases" }
     $roadHtml += "<li><strong>$(Esc $f.Title)</strong> ($where) -- $(Esc $f.Recommendation)</li>"
 }
-if (@($phase1).Count -eq 0) { $roadHtml += "<li>No critical items.</li>" }
+if ((_Cnt $phase1) -eq 0) { $roadHtml += "<li>No critical items.</li>" }
 $roadHtml += "</ul></div>"
 $roadHtml += "<div class='roadmap-phase' style='border-left-color:#e67e22'><h3>Phase 2 -- Short-term (Week 3-6): Warnings</h3><ul>"
 foreach ($f in $phase2) {
@@ -1001,13 +1027,13 @@ foreach ($f in $phase2) {
     $where = if ($f.Scope -eq 'Server') { 'instance-wide' } else { "$cnt of $dbCount databases" }
     $roadHtml += "<li><strong>$(Esc $f.Title)</strong> ($where) -- $(Esc $f.Recommendation)</li>"
 }
-if (@($phase2).Count -eq 0) { $roadHtml += "<li>No warning items.</li>" }
+if ((_Cnt $phase2) -eq 0) { $roadHtml += "<li>No warning items.</li>" }
 $roadHtml += "</ul></div>"
 $roadHtml += "<div class='roadmap-phase' style='border-left-color:#2980b9'><h3>Phase 3 -- Medium-term (Week 7-12): Info / hardening</h3><ul>"
 foreach ($f in $phase3) {
     $roadHtml += "<li><strong>$(Esc $f.Title)</strong> -- $(Esc $f.Recommendation)</li>"
 }
-if (@($phase3).Count -eq 0) { $roadHtml += "<li>No info items.</li>" }
+if ((_Cnt $phase3) -eq 0) { $roadHtml += "<li>No info items.</li>" }
 $roadHtml += "</ul></div></section>"
 
 # T-SQL snippets
@@ -1029,7 +1055,7 @@ foreach ($_r in $report) {
     $_r | Add-Member -NotePropertyName _NameRank -NotePropertyValue $rk -Force
 }
 foreach ($r in ($report | Sort-Object _NameRank, Name)) {
-    if (@($r.Findings).Count -eq 0) { continue }
+    if ((_Cnt $r.Findings) -eq 0) { continue }
     $apxHtml += "<h3>$(Esc $r.Name) <span class='tag'>$($r.Critical) crit</span><span class='tag'>$($r.Warning) warn</span><span class='tag'>$($r.Info) info</span></h3>"
     $apxHtml += "<table><thead><tr><th>Sev</th><th>Scope</th><th>Script</th><th>Finding</th></tr></thead><tbody>"
     $ranked = @(); foreach ($fx in $r.Findings) { $fx | Add-Member -NotePropertyName _Rank -NotePropertyValue (Get-SeverityRank $fx.Severity) -Force; $ranked += $fx }
@@ -1100,9 +1126,9 @@ Write-Host "  Critical findings    : $totalCrit"
 Write-Host "  Warning findings     : $totalWarn"
 Write-Host "  Info findings        : $totalInfo"
 Write-Host "  Failed scripts       : $totalFail"
-Write-Host "  Server-wide findings : $(@($serverFindings).Count)"
-Write-Host "  Database findings    : $(@($dbFindings).Count)"
-Write-Host "  PII columns recorded : $(@($piiAll).Count)"
+Write-Host "  Server-wide findings : $((_Cnt $serverFindings))"
+Write-Host "  Database findings    : $((_Cnt $dbFindings))"
+Write-Host "  PII columns recorded : $((_Cnt $piiAll))"
 if ($NoPdf)       { Write-Host "  Report (HTML)        : $HtmlPath" }
 elseif ($pdfMade) { Write-Host "  Report (PDF)         : $pdfPath"; if ($KeepHtml) { Write-Host "  Report (HTML)        : $HtmlPath" } }
 else              { Write-Host "  Report (HTML only)   : $HtmlPath  (Edge headless not available)" }

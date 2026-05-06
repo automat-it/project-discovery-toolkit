@@ -76,6 +76,18 @@ function Esc { param($s) [System.Web.HttpUtility]::HtmlEncode([string]$s) }
 
 # Severity ranking helper (avoids Sort-Object calculated-expression issues
 # in PS5.1 when comparing across heterogeneous types).
+# Safe count helper. PS5.1's (_Cnt $genericList) can raise
+# 'Argument types do not match' when the list holds heterogeneous
+# pscustomobjects with Add-Member''d note properties. Count via the
+# native .Count property when present, otherwise iterate.
+function _Cnt {
+    param($x)
+    if ($null -eq $x) { return 0 }
+    try { if ($x.Count -is [int]) { return $x.Count } } catch {}
+    $n = 0; foreach ($i in $x) { $n++ }
+    return $n
+}
+
 function Get-SeverityRank {
     param([string]$Severity)
     if     ($Severity -eq 'Critical') { return 0 }
@@ -265,7 +277,7 @@ function Get-LastBackupAge {
 function Test-LogHasDataRows {
     param([string]$LogPath)
     $sets = Get-SqlCmdResultSets $LogPath
-    foreach ($s in $sets) { if (@($s.Rows).Count -gt 0) { return $true } }
+    foreach ($s in $sets) { if ((_Cnt $s.Rows) -gt 0) { return $true } }
     return $false
 }
 
@@ -476,7 +488,7 @@ function Get-ReportContexts {
                 $contexts += [pscustomobject]@{ Name=$dbName; LogDir=$_.FullName }
             }
     }
-    if (@($contexts).Count -gt 0) { return ,$contexts }
+    if ((_Cnt $contexts) -gt 0) { return ,$contexts }
     if (Test-Path (Join-Path $Root '_summary.txt')) {
         return ,@([pscustomobject]@{ Name='(single run)'; LogDir=$Root })
     }
@@ -525,11 +537,11 @@ function New-SvgDonut {
 
 function New-SvgBar {
     param([array]$Items, [string]$ColorPositive='#2a6db0')
-    if (-not $Items -or @($Items).Count -eq 0) { return '' }
+    if (-not $Items -or (_Cnt $Items) -eq 0) { return '' }
     $maxN = 1
     foreach ($it in $Items) { if ($it.Value -gt $maxN) { $maxN = $it.Value } }
     $rowH = 22; $padTop = 10; $padLeft = 200; $width = 600
-    $h = $padTop + $rowH * @($Items).Count + 10
+    $h = $padTop + $rowH * (_Cnt $Items) + 10
     $svg = "<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 $width $h' width='$width' height='$h' font-family='Segoe UI,Arial' font-size='12'>"
     $y = $padTop
     foreach ($it in $Items) {
@@ -576,7 +588,19 @@ function Convert-HtmlToPdf {
     $browser = Get-ChromiumBrowser
     if ($browser) {
         Write-Host "PDF:   trying $browser"
-        & $browser --headless --disable-gpu --no-pdf-header-footer --print-to-pdf="$Pdf" $uri 2>$null | Out-Null
+        # Chrome / Edge may print non-fatal stderr (geolocation, GPU init)
+        # which under EAP=Stop is converted to a terminating NativeCommandError.
+        # Run the headless conversion under EAP=Continue + try/catch so the
+        # PDF actually lands on disk before we react to any stderr noise.
+        $prevEAP = $ErrorActionPreference
+        $ErrorActionPreference = 'Continue'
+        try {
+            & $browser --headless --disable-gpu --no-pdf-header-footer --print-to-pdf="$Pdf" $uri *>$null
+        } catch {
+            Write-Verbose "Chromium stderr: $($_.Exception.Message)"
+        } finally {
+            $ErrorActionPreference = $prevEAP
+        }
         if (Test-Path $Pdf) { Write-Host "PDF: rendered via $(Split-Path -Leaf $browser)"; return $true }
     }
 
@@ -587,7 +611,9 @@ function Convert-HtmlToPdf {
     }
     if ($wk) {
         Write-Host "PDF:   trying wkhtmltopdf"
-        & $wk.Path --quiet --enable-local-file-access $abs $Pdf 2>$null | Out-Null
+        $prevEAP = $ErrorActionPreference
+        $ErrorActionPreference = 'Continue'
+        try { & $wk.Path --quiet --enable-local-file-access $abs $Pdf *>$null } catch {} finally { $ErrorActionPreference = $prevEAP }
         if (Test-Path $Pdf) { Write-Host "PDF: rendered via wkhtmltopdf"; return $true }
     }
 
@@ -614,7 +640,7 @@ function Convert-HtmlToPdf {
 # Main flow
 # ===========================================================================
 $contexts = Get-ReportContexts $ReportDir
-if (@($contexts).Count -eq 0) {
+if ((_Cnt $contexts) -eq 0) {
     Write-Error "No report sub-folders found under $ReportDir."
     exit 3
 }
@@ -832,7 +858,7 @@ $domainBarSvg
 
 # Server-wide findings -----------------------------------------------------
 $srvFindHtml = "<section class='section'><h2>3. Server-Wide Findings</h2>"
-if (@($serverFindings).Count -eq 0) {
+if ((_Cnt $serverFindings) -eq 0) {
     $srvFindHtml += "<p class='ok'>No server-wide findings detected.</p>"
 } else {
     $srvFindHtml += "<p>Issues at the SQL Server instance level. These apply across every database on this instance.</p>"
@@ -851,7 +877,7 @@ $srvFindHtml += "</section>"
 
 # Database fleet rollup ----------------------------------------------------
 $dbFindHtml = "<section class='section'><h2>4. Database Fleet Findings</h2>"
-if (@($dbFindings).Count -eq 0) {
+if ((_Cnt $dbFindings) -eq 0) {
     $dbFindHtml += "<p class='ok'>No database-level findings detected.</p>"
 } else {
     $dbFindHtml += "<p>Issues that surfaced inside one or more user databases. Each finding is listed once with the count of affected databases.</p>"
@@ -882,9 +908,9 @@ foreach ($r in $report) {
         $oldBackups += [pscustomobject]@{ Name=$r.Name; Hours=$age }
     }
 }
-if (@($oldBackups).Count -gt 0) {
+if ((_Cnt $oldBackups) -gt 0) {
     $oldBackups = $oldBackups | Sort-Object Hours -Descending
-    $backupHtml = "<section class='section'><h2>5. Backup Freshness Alert</h2><div class='alert'>$(@($oldBackups).Count) database(s) have a last full backup older than 72 hours.</div>"
+    $backupHtml = "<section class='section'><h2>5. Backup Freshness Alert</h2><div class='alert'>$((_Cnt $oldBackups)) database(s) have a last full backup older than 72 hours.</div>"
     $backupHtml += "<table><thead><tr><th>Database</th><th>Hours since last full backup</th><th>Days</th></tr></thead><tbody>"
     foreach ($b in ($oldBackups | Select-Object -First 25)) {
         $backupHtml += "<tr><td>$(Esc $b.Name)</td><td><strong>$($b.Hours)</strong></td><td>$([math]::Round($b.Hours/24.0,1))</td></tr>"
@@ -917,7 +943,7 @@ foreach ($f in $phase1) {
     $where = if ($f.Scope -eq 'Server') { 'instance-wide' } else { "$cnt of $dbCount databases" }
     $roadHtml += "<li><strong>$(Esc $f.Title)</strong> ($where) -- $(Esc $f.Recommendation)</li>"
 }
-if (@($phase1).Count -eq 0) { $roadHtml += "<li>No critical items.</li>" }
+if ((_Cnt $phase1) -eq 0) { $roadHtml += "<li>No critical items.</li>" }
 $roadHtml += "</ul></div>"
 $roadHtml += "<div class='roadmap-phase' style='border-left-color:#e67e22'><h3>Phase 2 -- Short-term (Week 3-6): Warnings</h3><ul>"
 foreach ($f in $phase2) {
@@ -925,13 +951,13 @@ foreach ($f in $phase2) {
     $where = if ($f.Scope -eq 'Server') { 'instance-wide' } else { "$cnt of $dbCount databases" }
     $roadHtml += "<li><strong>$(Esc $f.Title)</strong> ($where) -- $(Esc $f.Recommendation)</li>"
 }
-if (@($phase2).Count -eq 0) { $roadHtml += "<li>No warning items.</li>" }
+if ((_Cnt $phase2) -eq 0) { $roadHtml += "<li>No warning items.</li>" }
 $roadHtml += "</ul></div>"
 $roadHtml += "<div class='roadmap-phase' style='border-left-color:#2980b9'><h3>Phase 3 -- Medium-term (Week 7-12): Info / hardening</h3><ul>"
 foreach ($f in $phase3) {
     $roadHtml += "<li><strong>$(Esc $f.Title)</strong> -- $(Esc $f.Recommendation)</li>"
 }
-if (@($phase3).Count -eq 0) { $roadHtml += "<li>No info items.</li>" }
+if ((_Cnt $phase3) -eq 0) { $roadHtml += "<li>No info items.</li>" }
 $roadHtml += "</ul></div></section>"
 
 # T-SQL remediation snippets ------------------------------------------------
@@ -953,7 +979,7 @@ foreach ($_r in $report) {
     $_r | Add-Member -NotePropertyName _NameRank -NotePropertyValue $rk -Force
 }
 foreach ($r in ($report | Sort-Object _NameRank, Name)) {
-    if (@($r.Findings).Count -eq 0) { continue }
+    if ((_Cnt $r.Findings) -eq 0) { continue }
     $apxHtml += "<h3>$(Esc $r.Name) <span class='tag'>$($r.Critical) crit</span><span class='tag'>$($r.Warning) warn</span><span class='tag'>$($r.Info) info</span></h3>"
     $apxHtml += "<table><thead><tr><th>Sev</th><th>Scope</th><th>Script</th><th>Finding</th></tr></thead><tbody>"
     $ranked = @(); foreach ($fx in $r.Findings) { $fx | Add-Member -NotePropertyName _Rank -NotePropertyValue (Get-SeverityRank $fx.Severity) -Force; $ranked += $fx }
@@ -1028,8 +1054,8 @@ Write-Host "  Critical findings    : $totalCrit"
 Write-Host "  Warning findings     : $totalWarn"
 Write-Host "  Info findings        : $totalInfo"
 Write-Host "  Failed scripts       : $totalFail"
-Write-Host "  Server-wide findings : $(@($serverFindings).Count)"
-Write-Host "  Database findings    : $(@($dbFindings).Count)"
+Write-Host "  Server-wide findings : $((_Cnt $serverFindings))"
+Write-Host "  Database findings    : $((_Cnt $dbFindings))"
 if ($NoPdf)            { Write-Host "  Report (HTML)        : $HtmlPath" }
 elseif ($pdfMade)      { Write-Host "  Report (PDF)         : $pdfPath"; if ($KeepHtml) { Write-Host "  Report (HTML)        : $HtmlPath" } }
 else                   { Write-Host "  Report (HTML only)   : $HtmlPath  (Edge headless not available)" }

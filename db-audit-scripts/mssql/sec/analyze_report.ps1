@@ -71,6 +71,34 @@ $HtmlPath = if ($OutFile -like '*.html') { $OutFile } else { [System.IO.Path]::C
 
 function Esc { param($s) [System.Web.HttpUtility]::HtmlEncode([string]$s) }
 
+# Severity ranking helper (avoids Sort-Object calculated-expression issues
+# in PS5.1 when comparing across heterogeneous types).
+function Get-SeverityRank {
+    param([string]$Severity)
+    if     ($Severity -eq 'Critical') { return 0 }
+    elseif ($Severity -eq 'Warning')  { return 1 }
+    elseif ($Severity -eq 'Info')     { return 2 }
+    else { return 3 }
+}
+
+# Top-level trap so that any unhandled exception prints a useful line/column
+# rather than the generic "Argument types do not match".
+trap {
+    $err = $_
+    Write-Host ("=" * 80) -ForegroundColor Red
+    Write-Host "ANALYZER ERROR" -ForegroundColor Red
+    Write-Host ("Exception : " + $err.Exception.Message) -ForegroundColor Red
+    if ($err.InvocationInfo) {
+        Write-Host ("Location  : " + $err.InvocationInfo.PositionMessage) -ForegroundColor Red
+    }
+    if ($err.ScriptStackTrace) {
+        Write-Host "Stack:" -ForegroundColor Red
+        Write-Host $err.ScriptStackTrace -ForegroundColor DarkGray
+    }
+    Write-Host ("=" * 80) -ForegroundColor Red
+    exit 99
+}
+
 # ===========================================================================
 # Encoding-aware log readers (mirrors perf analyzer)
 # ===========================================================================
@@ -581,21 +609,68 @@ function New-SvgBar {
     return $svg
 }
 
-function Convert-HtmlToPdf {
-    param([string]$Html, [string]$Pdf)
+function Get-ChromiumBrowser {
     $candidates = @(
         "$env:ProgramFiles\Microsoft\Edge\Application\msedge.exe",
         "${env:ProgramFiles(x86)}\Microsoft\Edge\Application\msedge.exe",
-        "$env:LOCALAPPDATA\Microsoft\Edge\Application\msedge.exe"
+        "$env:LOCALAPPDATA\Microsoft\Edge\Application\msedge.exe",
+        "$env:ProgramFiles\Google\Chrome\Application\chrome.exe",
+        "${env:ProgramFiles(x86)}\Google\Chrome\Application\chrome.exe",
+        "$env:LOCALAPPDATA\Google\Chrome\Application\chrome.exe",
+        "$env:ProgramFiles\Chromium\Application\chrome.exe",
+        "$env:ProgramFiles\BraveSoftware\Brave-Browser\Application\brave.exe",
+        "$env:LOCALAPPDATA\BraveSoftware\Brave-Browser\Application\brave.exe"
     )
-    $edge = $candidates | Where-Object { Test-Path $_ } | Select-Object -First 1
-    if (-not $edge) {
-        Write-Warning 'Microsoft Edge not found -- skipping PDF conversion.'
-        return $false
+    return ($candidates | Where-Object { Test-Path $_ } | Select-Object -First 1)
+}
+
+# Convert HTML to PDF, trying multiple fallbacks so the report is produced
+# even when Microsoft Edge is not installed:
+#   1. Any Chromium-based browser (Edge / Chrome / Chromium / Brave) headless
+#   2. wkhtmltopdf in PATH or Program Files
+#   3. Microsoft Word COM (ships with Office on most admin workstations)
+#   4. (give up; HTML stays)
+function Convert-HtmlToPdf {
+    param([string]$Html, [string]$Pdf)
+    $abs = (Resolve-Path $Html).Path
+    $uri = ([System.Uri]$abs).AbsoluteUri
+    Write-Host "PDF: trying conversion methods..."
+
+    $browser = Get-ChromiumBrowser
+    if ($browser) {
+        Write-Host "PDF:   trying $browser"
+        & $browser --headless --disable-gpu --no-pdf-header-footer --print-to-pdf="$Pdf" $uri 2>$null | Out-Null
+        if (Test-Path $Pdf) { Write-Host "PDF: rendered via $(Split-Path -Leaf $browser)"; return $true }
     }
-    $uri = ([System.Uri](Resolve-Path $Html).Path).AbsoluteUri
-    & $edge --headless --disable-gpu --no-pdf-header-footer --print-to-pdf="$Pdf" $uri 2>&1 | Out-Null
-    return (Test-Path $Pdf)
+
+    $wk = Get-Command wkhtmltopdf -ErrorAction SilentlyContinue
+    if (-not $wk) {
+        $wkPath = "$env:ProgramFiles\wkhtmltopdf\bin\wkhtmltopdf.exe"
+        if (Test-Path $wkPath) { $wk = Get-Item $wkPath }
+    }
+    if ($wk) {
+        Write-Host "PDF:   trying wkhtmltopdf"
+        & $wk.Path --quiet --enable-local-file-access $abs $Pdf 2>$null | Out-Null
+        if (Test-Path $Pdf) { Write-Host "PDF: rendered via wkhtmltopdf"; return $true }
+    }
+
+    try {
+        Write-Host "PDF:   trying Microsoft Word COM"
+        $word = New-Object -ComObject Word.Application -ErrorAction Stop
+        $word.Visible = $false
+        $word.DisplayAlerts = 0
+        $doc = $word.Documents.Open($abs, $false, $true)
+        $doc.SaveAs2($Pdf, 17)   # 17 = wdFormatPDF
+        $doc.Close($false)
+        $word.Quit()
+        [void][System.Runtime.InteropServices.Marshal]::ReleaseComObject($word)
+        if (Test-Path $Pdf) { Write-Host "PDF: rendered via Microsoft Word"; return $true }
+    } catch {
+        Write-Verbose "Word COM fallback failed: $($_.Exception.Message)"
+    }
+
+    Write-Warning "Could not render PDF (no Edge/Chrome/Chromium/Brave/wkhtmltopdf/Word found). HTML kept at $Html."
+    return $false
 }
 
 # ===========================================================================
@@ -655,7 +730,8 @@ foreach ($r in $report) {
         }
     }
 }
-$aggregated      = $titleAgg.Values | Sort-Object @{ Expression = { switch ($_.Severity) { 'Critical' {0} 'Warning' {1} 'Info' {2} default {3} } } }, Title
+foreach ($v in $titleAgg.Values) { $v | Add-Member -NotePropertyName _Rank -NotePropertyValue (Get-SeverityRank $v.Severity) -Force }
+$aggregated      = $titleAgg.Values | Sort-Object _Rank, Title
 $serverFindings  = @($aggregated | Where-Object { $_.Scope -eq 'Server' })
 $dbFindings      = @($aggregated | Where-Object { $_.Scope -eq 'Database' })
 
@@ -938,11 +1014,13 @@ $snipHtml += "</section>"
 
 # Per-DB appendix
 $apxHtml = "<section class='section appendix'><h2>9. Appendix A: Per-Database Findings</h2><p>Full findings per database for reference.</p>"
-foreach ($r in ($report | Sort-Object @{Expression={ if ($_.Name -eq '_server') {0} else {1} }}, Name)) {
+$report | ForEach-Object { $_ | Add-Member -NotePropertyName _NameRank -NotePropertyValue (& { if ($_.Name -eq '_server') { 0 } else { 1 } }) -Force }
+foreach ($r in ($report | Sort-Object _NameRank, Name)) {
     if (@($r.Findings).Count -eq 0) { continue }
     $apxHtml += "<h3>$(Esc $r.Name) <span class='tag'>$($r.Critical) crit</span><span class='tag'>$($r.Warning) warn</span><span class='tag'>$($r.Info) info</span></h3>"
     $apxHtml += "<table><thead><tr><th>Sev</th><th>Scope</th><th>Script</th><th>Finding</th></tr></thead><tbody>"
-    foreach ($f in ($r.Findings | Sort-Object @{Expression={ switch ($_.Severity) { 'Critical' {0} 'Warning' {1} 'Info' {2} default {3} } }}, Title)) {
+    $ranked = @(); foreach ($fx in $r.Findings) { $fx | Add-Member -NotePropertyName _Rank -NotePropertyValue (Get-SeverityRank $fx.Severity) -Force; $ranked += $fx }
+    foreach ($f in ($ranked | Sort-Object _Rank, Title)) {
         $sevC = $f.Severity.ToLower()
         $apxHtml += "<tr class='sev-$sevC'><td><span class='badge $sevC'>$($f.Severity)</span></td>"
         $apxHtml += "<td><span class='badge $($f.Scope.ToLower())'>$($f.Scope)</span></td>"

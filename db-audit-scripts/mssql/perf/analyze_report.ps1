@@ -1,39 +1,48 @@
 #Requires -Version 5.1
 <#
 .SYNOPSIS
-    Parse a SQL Server performance audit report folder and generate a
-    customer-friendly HTML summary highlighting potential issues.
+    SQL Server PERFORMANCE audit -- consultant-grade HTML/PDF report.
 
 .DESCRIPTION
-    Reads the report directory produced by run_audit.ps1 (single database)
-    or run_all_databases.ps1 (multiple databases), applies a rule set that
-    flags known performance issues, and writes one HTML file with an
-    executive summary plus a dedicated section per database.
+    Reads the report directory produced by run_audit.ps1 / run_all_databases.ps1
+    and renders a customer-facing report in the style of a security-assessment
+    deliverable. Includes:
+      - Cover page with server fingerprint and severity donut chart
+      - Executive summary (instance-wide rollup + per-domain bar chart)
+      - Server-wide vs database-level findings (deduplicated, not 123 copies)
+      - Top-N rankings (most fragmented indexes, oldest backups, largest tables...)
+      - Compliance mapping (CIS Benchmark, GDPR, SOC2)
+      - Phased remediation roadmap with executable T-SQL snippets
+      - Per-database appendix with full per-DB findings
+      - Glossary of wait types and DMV terms
+      - Branded footer / watermark
 
-    The analyzer is content-aware: for "diagnostic" scripts (blocking,
-    missing indexes, stale stats, ...) it treats any data rows as
-    findings; for "inventory" scripts it looks for specific patterns.
-
-    Output: <ReportDir>\perf_analysis.html
+    Default output: <ReportDir>\perf_analysis.pdf (with .html intermediate).
 
 .PARAMETER ReportDir
-    Folder produced by run_audit.ps1 / run_all_databases.ps1. Either:
-      - mssql_audit_all_YYYYMMDD_HHMMSS\   (multi-database)
-      - mssql_perf_YYYYMMDD_HHMMSS\        (single-database)
+    Folder produced by run_audit.ps1 / run_all_databases.ps1.
 
 .PARAMETER ServerName
-    Optional server label for the report header (purely cosmetic).
+    Server label printed on the cover.
+
+.PARAMETER Customer
+    Customer name printed on the cover. Optional.
+
+.PARAMETER Brand
+    Branding text rendered in the footer/watermark. Default: 'Automat-it'.
 
 .PARAMETER OutFile
-    Optional override for the output HTML path. Default:
-    <ReportDir>\perf_analysis.html
+    Output path. Default: <ReportDir>\perf_analysis.pdf.
+
+.PARAMETER NoPdf
+    Skip PDF conversion -- produce HTML only.
+
+.PARAMETER KeepHtml
+    Keep the intermediate HTML alongside the PDF.
 
 .EXAMPLE
-    .\analyze_report.ps1 -ReportDir "C:\reports\mssql_audit_all_20260429_230243"
-
-.EXAMPLE
-    .\analyze_report.ps1 -ReportDir "C:\reports\mssql_perf_20260430_010000" `
-                         -ServerName "PROD-SQL-01"
+    .\analyze_report.ps1 -ReportDir "C:\reports\mssql_audit_all_20260430_002619" `
+                         -ServerName "STG-SQL-N1" -Customer "ACME Corp"
 #>
 
 [CmdletBinding()]
@@ -41,96 +50,33 @@ param(
     [Parameter(Mandatory)]
     [string]$ReportDir,
     [string]$ServerName = "",
-    [string]$OutFile    = ""
+    [string]$Customer   = "",
+    [string]$Brand      = "Automat-it",
+    [string]$OutFile    = "",
+    [switch]$NoPdf,
+    [switch]$KeepHtml
 )
 
-# Explicitly disable strict mode. Some hosts (PowerShell ISE, custom
-# profiles, calling scripts) leave strict mode enabled in the session
-# scope; under strict mode pipelines that emit $null or scalar values
-# trip "The property 'Length' cannot be found on this object" and abort
-# the analyzer before any output is produced. Set-StrictMode -Off
-# overrides any inherited setting for the duration of this script.
 Set-StrictMode -Off
-$ErrorActionPreference = "Stop"
+$ErrorActionPreference = 'Stop'
+Add-Type -AssemblyName System.Web
 
 if (-not (Test-Path $ReportDir)) {
     Write-Error "Report directory not found: $ReportDir"
     exit 2
 }
-
 $ReportDir = (Resolve-Path $ReportDir).Path
-if (-not $OutFile) { $OutFile = Join-Path $ReportDir "perf_analysis.html" }
+if (-not $OutFile) {
+    $ext = if ($NoPdf) { 'html' } else { 'pdf' }
+    $OutFile = Join-Path $ReportDir "perf_analysis.$ext"
+}
+$HtmlPath = if ($OutFile -like '*.html') { $OutFile } else { [System.IO.Path]::ChangeExtension($OutFile, 'html') }
+
+function Esc { param($s) [System.Web.HttpUtility]::HtmlEncode([string]$s) }
 
 # ===========================================================================
-# Rules: each rule applies to a script (by basename suffix match) and either
-# flags any non-empty data as a finding, or matches a regex against content.
-# Severity: Critical (red), Warning (orange), Info (blue), OK (green).
+# Encoding-aware log readers
 # ===========================================================================
-$Rules = @(
-    @{ Script='perf_02_blocking_and_locks';   Mode='HasData'; Severity='Critical'
-       Title='Active blocking or long-running transactions'
-       Recommendation='Investigate the blocking chain. Long-running transactions block other sessions and bloat the log.' }
-
-    @{ Script='perf_04_wait_events_and_io';   Mode='Pattern'; Severity='Warning'
-       Pattern='PAGEIOLATCH_(SH|EX|UP)'
-       Title='Storage I/O waits dominant'
-       Recommendation='PAGEIOLATCH waits indicate slow disk reads. Check storage latency and buffer pool sizing.' }
-
-    @{ Script='perf_04_wait_events_and_io';   Mode='Pattern'; Severity='Warning'
-       Pattern='RESOURCE_SEMAPHORE'
-       Title='Memory grant queue waits'
-       Recommendation='Queries are waiting for query memory grants. Tune query plans or raise max server memory.' }
-
-    @{ Script='perf_04_wait_events_and_io';   Mode='Pattern'; Severity='Warning'
-       Pattern='LCK_M_'
-       Title='Lock waits accumulating'
-       Recommendation='Sustained lock waits suggest blocking. Cross-reference with perf_02 results.' }
-
-    @{ Script='perf_06_index_audit';          Mode='HasData'; Severity='Warning'
-       Title='Index hygiene findings (missing / unused / duplicate indexes)'
-       Recommendation='Review the script log. Add missing indexes, drop unused indexes, consolidate duplicates.' }
-
-    @{ Script='perf_07_table_stats_health';   Mode='HasData'; Severity='Warning'
-       Title='Stale statistics or high index fragmentation'
-       Recommendation='Update stale statistics (modification ratio > 10%). Rebuild indexes with > 30% fragmentation.' }
-
-    @{ Script='perf_09_temp_and_memory_pressure'; Mode='Pattern'; Severity='Critical'
-       Pattern='pending_memory_grant_count\s*\n\s*-+\s*\n\s*[1-9]'
-       Title='Memory grant requests pending'
-       Recommendation='Queries are waiting for memory. Capacity issue. Investigate large grants and resource semaphore.' }
-
-    @{ Script='perf_09_temp_and_memory_pressure'; Mode='Pattern'; Severity='Warning'
-       Pattern='PAGELATCH_(SH|EX|UP).*[12]:\d+:[123]'
-       Title='TempDB allocation contention'
-       Recommendation='PAGELATCH waits on tempdb GAM/SGAM/PFS pages. Add equally-sized tempdb data files (1 per CPU up to 8).' }
-
-    @{ Script='perf_10_replication_and_backup_impact'; Mode='Pattern'; Severity='Warning'
-       Pattern='hours_since_full\s*\n\s*-+\s*\n.*\b([7-9]\d|\d{3,})\b'
-       Title='Last full backup older than 72 hours'
-       Recommendation='Backup gap detected. Verify the backup job and target storage.' }
-
-    @{ Script='perf_15_capacity_and_growth';  Mode='Pattern'; Severity='Critical'
-       Pattern='\b(8[0-9]|9[0-9]|100)\.\d+\s*%'
-       Title='Identity column or storage above 80% consumed'
-       Recommendation='Plan for type widening (INT to BIGINT) or storage expansion before the limit is hit.' }
-
-    @{ Script='perf_25_tempdb_contention';    Mode='HasData'; Severity='Warning'
-       Title='TempDB contention metrics returned data'
-       Recommendation='Review tempdb file count vs CPU and PFS/GAM/SGAM page latch waits.' }
-)
-
-# ===========================================================================
-# Helpers
-# ===========================================================================
-
-# Detect file encoding by BOM. PowerShell 5.1's default '> $log' redirection
-# writes UTF-16 LE; older runs of run_audit.ps1 produced such logs. New runs
-# write UTF-8. Read either correctly.
-#
-# Read the BOM via FileStream so empty files return $read=0 and the function
-# falls through to UTF-8. Earlier implementation used pipeline + Select-Object
-# which yields $null / scalar byte on empty / 1-byte files and tripped
-# Set-StrictMode "property Length not found".
 function Get-LogEncoding {
     param([string]$LogPath)
     if (-not (Test-Path $LogPath)) { return [System.Text.Encoding]::UTF8 }
@@ -140,357 +86,866 @@ function Get-LogEncoding {
         $stream = [System.IO.File]::OpenRead($LogPath)
         try   { $read = $stream.Read($head, 0, 4) }
         finally { $stream.Dispose() }
-    } catch {
-        return [System.Text.Encoding]::UTF8
-    }
-    if ($read -ge 2 -and $head[0] -eq 0xFF -and $head[1] -eq 0xFE) {
-        return [System.Text.Encoding]::Unicode             # UTF-16 LE BOM
-    }
-    if ($read -ge 2 -and $head[0] -eq 0xFE -and $head[1] -eq 0xFF) {
-        return [System.Text.Encoding]::BigEndianUnicode    # UTF-16 BE BOM
-    }
-    if ($read -ge 3 -and $head[0] -eq 0xEF -and $head[1] -eq 0xBB -and $head[2] -eq 0xBF) {
-        return [System.Text.Encoding]::UTF8                # UTF-8 BOM
-    }
-    # Heuristic for BOM-less UTF-16 LE: ASCII byte followed by 0x00.
-    if ($read -ge 2 -and $head[0] -gt 0 -and $head[0] -lt 128 -and $head[1] -eq 0) {
-        return [System.Text.Encoding]::Unicode
-    }
+    } catch { return [System.Text.Encoding]::UTF8 }
+    if ($read -ge 2 -and $head[0] -eq 0xFF -and $head[1] -eq 0xFE) { return [System.Text.Encoding]::Unicode }
+    if ($read -ge 2 -and $head[0] -eq 0xFE -and $head[1] -eq 0xFF) { return [System.Text.Encoding]::BigEndianUnicode }
+    if ($read -ge 3 -and $head[0] -eq 0xEF -and $head[1] -eq 0xBB -and $head[2] -eq 0xBF) { return [System.Text.Encoding]::UTF8 }
+    if ($read -ge 2 -and $head[0] -gt 0 -and $head[0] -lt 128 -and $head[1] -eq 0) { return [System.Text.Encoding]::Unicode }
     return [System.Text.Encoding]::UTF8
 }
+function Read-LogText  { param([string]$LogPath) if (Test-Path $LogPath) { [System.IO.File]::ReadAllText($LogPath, (Get-LogEncoding $LogPath)) } else { '' } }
+function Read-LogLines { param([string]$LogPath) if (Test-Path $LogPath) { [System.IO.File]::ReadAllLines($LogPath, (Get-LogEncoding $LogPath)) } else { @() } }
 
-function Read-LogLines {
-    param([string]$LogPath)
-    if (-not (Test-Path $LogPath)) { return @() }
-    $enc = Get-LogEncoding $LogPath
-    return [System.IO.File]::ReadAllLines($LogPath, $enc)
+function Read-AuditSummary {
+    param([string]$Path)
+    if (-not (Test-Path $Path)) { return @() }
+    $rows = @()
+    foreach ($l in (Read-LogLines $Path)) {
+        if ($l -match '^(OK|FAIL)\s+(\S+)') { $rows += [pscustomobject]@{ Status=$matches[1]; Path=$matches[2] } }
+    }
+    return $rows
 }
 
-function Read-LogText {
-    param([string]$LogPath)
-    if (-not (Test-Path $LogPath)) { return "" }
-    $enc = Get-LogEncoding $LogPath
-    return [System.IO.File]::ReadAllText($LogPath, $enc)
-}
-
-# Determine if a sqlcmd log contains any data rows beyond headers / notes.
-function Test-LogHasDataRows {
+# ===========================================================================
+# Tabular sqlcmd parser
+# A sqlcmd query output block looks like:
+#     col1   col2   col3
+#     -----  -----  -----
+#     v1     v2     v3
+#     ...
+#     (N rows affected)
+# Multiple result-sets in one log file are separated by their own header+
+# underline pair. This parser yields one [pscustomobject] per data row.
+# ===========================================================================
+function Get-SqlCmdResultSets {
     param([string]$LogPath)
     $lines = Read-LogLines $LogPath
-    if (-not $lines) { return $false }
-
-    $inData = $false
-    foreach ($line in $lines) {
-        if ($line -match '^[-\s]+$' -and $line -match '-{3,}') { $inData = $true; continue }
-        if (-not $inData) { continue }
-        if ($line -match '^\s*\(\d+ rows? affected\)\s*$') { $inData = $false; continue }
-        if ($line -match '^\s*$')                          { continue }
-        if ($line -match '^\[note\]')                       { continue }
-        if ($line -match '^Msg\s+\d+,\s*Level')             { continue }
-        if ($line -match '^Changed database context')        { continue }
-        return $true
+    if (-not $lines) { return @() }
+    $sets = @()
+    $i = 0
+    while ($i -lt $lines.Count) {
+        $line = [string]$lines[$i]
+        if ($line -match '^[\s\-]+$' -and $line -match '\-{3,}') {
+            # underline -- previous line was the header
+            $headerLine = if ($i -gt 0) { [string]$lines[$i-1] } else { '' }
+            if (-not $headerLine.Trim()) { $i++; continue }
+            # parse column boundaries from the underline
+            $u = $line.TrimEnd()
+            $cols = @()
+            $col = $null
+            for ($p = 0; $p -lt $u.Length; $p++) {
+                $ch = $u[$p]
+                if ($ch -eq '-') {
+                    if ($null -eq $col) { $col = @{ Start = $p; End = $p } }
+                    else                { $col.End = $p }
+                } else {
+                    if ($null -ne $col) { $cols += [pscustomobject]@{ Start=$col.Start; End=$col.End }; $col = $null }
+                }
+            }
+            if ($null -ne $col) { $cols += [pscustomobject]@{ Start=$col.Start; End=$col.End } }
+            # column names from header line at the same offsets
+            $names = @()
+            foreach ($c in $cols) {
+                $w  = $c.End - $c.Start + 1
+                if ($c.Start -ge $headerLine.Length) { $names += "col$($names.Count + 1)"; continue }
+                $end = [Math]::Min($headerLine.Length - 1, $c.Start + $w - 1)
+                $raw = $headerLine.Substring($c.Start, $end - $c.Start + 1).Trim()
+                if (-not $raw) { $raw = "col$($names.Count + 1)" }
+                $names += $raw
+            }
+            # collect rows until empty line / "(N rows affected)" / Msg / next header underline
+            $rows = New-Object System.Collections.Generic.List[object]
+            $i++
+            while ($i -lt $lines.Count) {
+                $r = [string]$lines[$i]
+                if ($r -match '^\s*\(\d+ rows? affected\)\s*$') { $i++; break }
+                if ($r -match '^Msg\s+\d+,\s*Level')             { break }
+                if ($r -match '^\s*$')                           { $i++; continue }
+                if ($r -match '^\[note\]')                       { $i++; continue }
+                # detect new header (underline ahead): break to outer
+                if ($i + 1 -lt $lines.Count -and ([string]$lines[$i+1]) -match '^[\s\-]+$' -and ([string]$lines[$i+1]) -match '\-{3,}') { break }
+                $obj = [ordered]@{}
+                for ($k = 0; $k -lt $cols.Count; $k++) {
+                    $c   = $cols[$k]
+                    $w   = $c.End - $c.Start + 1
+                    if ($c.Start -ge $r.Length) { $obj[$names[$k]] = ''; continue }
+                    $end = [Math]::Min($r.Length - 1, $c.Start + $w - 1)
+                    $obj[$names[$k]] = $r.Substring($c.Start, $end - $c.Start + 1).Trim()
+                }
+                [void]$rows.Add([pscustomobject]$obj)
+                $i++
+            }
+            $sets += [pscustomobject]@{ Columns = $names; Rows = $rows.ToArray() }
+        } else { $i++ }
     }
+    return $sets
+}
+
+# ===========================================================================
+# High-level extractors -- pull domain-specific values out of named scripts.
+# ===========================================================================
+
+# Locate the .log file inside a per-DB log dir whose basename ends in
+# the given script-suffix (matching across priority prefix).
+function Find-LogFile {
+    param([string]$LogDir, [string]$ScriptSuffix)
+    return Get-ChildItem $LogDir -Filter "*$ScriptSuffix*.log" -File -ErrorAction SilentlyContinue |
+           Select-Object -First 1
+}
+
+function Get-ServerFingerprint {
+    param([string]$ServerLogDir)
+    $fp = [ordered]@{
+        Edition = '(unknown)'; ProductVersion = '(unknown)'; ProductLevel = '(unknown)'
+        Collation = '(unknown)'; HostName = '(unknown)'; PhysicalCPUs = '(unknown)'
+        TotalMemoryMB = '(unknown)'; SqlStartTime = '(unknown)'; UptimeDays = $null
+        IsHadrEnabled = '(unknown)'
+    }
+    if (-not $ServerLogDir) { return $fp }
+    $log = Find-LogFile $ServerLogDir 'perf_05_configuration_snapshot'
+    if (-not $log) { return $fp }
+    $text = Read-LogText $log.FullName
+    # Edition / version are emitted as columns from SERVERPROPERTY queries.
+    # We grep loosely instead of relying on exact column layout.
+    if ($text -match '(?im)Edition\s*\n[\s\-]+\n([^\n]+)')                 { $fp.Edition        = $matches[1].Trim() }
+    if ($text -match '(?im)ProductVersion\s*\n[\s\-]+\n([^\n]+)')         { $fp.ProductVersion = $matches[1].Trim() }
+    if ($text -match '(?im)ProductLevel\s*\n[\s\-]+\n([^\n]+)')           { $fp.ProductLevel   = $matches[1].Trim() }
+    if ($text -match '(?im)Collation\s*\n[\s\-]+\n([^\n]+)')              { $fp.Collation      = $matches[1].Trim() }
+    if ($text -match '(?im)host_name\s*\n[\s\-]+\n([^\n]+)')              { $fp.HostName       = $matches[1].Trim() }
+    if ($text -match '(?im)cpu_count\s*\n[\s\-]+\n\s*(\d+)')              { $fp.PhysicalCPUs   = $matches[1] }
+    if ($text -match '(?im)physical_memory_kb\s*\n[\s\-]+\n\s*(\d+)')     { $fp.TotalMemoryMB  = [int]([int64]$matches[1] / 1024) }
+    if ($text -match '(?im)sqlserver_start_time\s*\n[\s\-]+\n([^\n]+)')   {
+        $fp.SqlStartTime = $matches[1].Trim()
+        try { $fp.UptimeDays = [math]::Round(((Get-Date) - [datetime]::Parse($fp.SqlStartTime)).TotalDays, 1) } catch {}
+    }
+    if ($text -match '(?im)is_hadr_enabled\s*\n[\s\-]+\n\s*(\d+)')        { $fp.IsHadrEnabled = ($matches[1] -eq '1') }
+    return [pscustomobject]$fp
+}
+
+function Get-LastBackupAge {
+    param([string]$LogDir)
+    $log = Find-LogFile $LogDir 'perf_10_replication_and_backup'
+    if (-not $log) { return $null }
+    $text = Read-LogText $log.FullName
+    if ($text -match '(?ims)hours_since_full[^\n]*\n[\s\-]+\n[^\n]*?\b(\d+)\s*$') {
+        return [int]$matches[1]
+    }
+    return $null
+}
+
+# Generic "did this script return data?" indicator.
+function Test-LogHasDataRows {
+    param([string]$LogPath)
+    $sets = Get-SqlCmdResultSets $LogPath
+    foreach ($s in $sets) { if (@($s.Rows).Count -gt 0) { return $true } }
     return $false
 }
 
-function Get-LogText {
-    param([string]$LogPath)
-    return (Read-LogText $LogPath)
-}
-
-# Parse _summary.txt: yields one row per script with its OK/FAIL status.
-function Read-AuditSummary {
-    param([string]$SummaryPath)
-    if (-not (Test-Path $SummaryPath)) { return @() }
-    $entries = @()
-    foreach ($line in (Read-LogLines $SummaryPath)) {
-        if ($line -match '^(OK|FAIL)\s+(\S+)') {
-            $entries += [pscustomobject]@{ Status=$matches[1]; Path=$matches[2] }
-        }
+# ===========================================================================
+# Rules with classification, compliance, and remediation snippets
+# Severity: Critical / Warning / Info
+# Scope:    Server  | Database
+# ===========================================================================
+$Rules = @(
+    @{ Script='perf_02_blocking_and_locks'; Severity='Critical'; Scope='Database'
+       Title='Active blocking or long-running transactions detected'
+       CIS='-'; GDPR='Art.32(1)(b)'; SOC2='CC7.2'
+       Detail='Diagnostic returned blocking sessions or long-running open transactions.'
+       Recommendation='Investigate blocking chain. Long-running transactions block readers and bloat the log.'
+       Remediation=@'
+-- Find current blocking
+SELECT blocking_session_id, session_id, wait_type, wait_time, last_wait_type
+FROM   sys.dm_exec_requests
+WHERE  blocking_session_id <> 0;
+'@
     }
-    return $entries
-}
+    @{ Script='perf_04_wait_events_and_io'; Severity='Warning'; Scope='Server'
+       Pattern='PAGEIOLATCH_(SH|EX|UP)'
+       Title='Storage I/O waits dominant'
+       CIS='-'; GDPR='-'; SOC2='A1.2'
+       Detail='PAGEIOLATCH_* indicates waits for data pages from disk.'
+       Recommendation='Investigate storage latency. Increase buffer pool memory or move hot files to faster storage.'
+       Remediation=@'
+-- Identify top wait types since instance start
+SELECT TOP 20 wait_type, wait_time_ms, waiting_tasks_count
+FROM   sys.dm_os_wait_stats
+ORDER  BY wait_time_ms DESC;
+'@
+    }
+    @{ Script='perf_04_wait_events_and_io'; Severity='Warning'; Scope='Server'
+       Pattern='RESOURCE_SEMAPHORE'
+       Title='Memory grant queue waits'
+       CIS='-'; GDPR='-'; SOC2='A1.2'
+       Detail='Queries waiting for memory grants (RESOURCE_SEMAPHORE).'
+       Recommendation='Tune top memory-grant consumers or raise max server memory after capacity check.'
+       Remediation=@'
+-- Top current memory grants
+SELECT TOP 20 session_id, requested_memory_kb, granted_memory_kb, grant_time, query_cost
+FROM   sys.dm_exec_query_memory_grants ORDER BY requested_memory_kb DESC;
+'@
+    }
+    @{ Script='perf_04_wait_events_and_io'; Severity='Warning'; Scope='Server'
+       Pattern='LCK_M_'
+       Title='Lock waits accumulating'
+       CIS='-'; GDPR='-'; SOC2='-'
+       Detail='Sustained LCK_M_* waits suggest blocking; cross-reference perf_02.'
+       Recommendation='Identify blocking sessions and isolate the queries holding long locks.'
+       Remediation=@'
+SELECT * FROM sys.dm_tran_locks WHERE request_status='WAIT';
+'@
+    }
+    @{ Script='perf_06_index_audit'; Severity='Warning'; Scope='Database'
+       Title='Index hygiene findings (missing / unused / duplicate)'
+       CIS='-'; GDPR='-'; SOC2='-'
+       Detail='Missing-index suggestions, unused indexes, duplicate keys, or FK without supporting index.'
+       Recommendation='Add high-value missing indexes, drop unused, consolidate duplicates after impact analysis.'
+       Remediation=@'
+-- Top missing-index suggestions ranked by improvement_measure
+SELECT TOP 20 mid.statement, migs.user_seeks, migs.user_scans, migs.avg_total_user_cost,
+       migs.avg_user_impact, migs.user_seeks * migs.avg_total_user_cost * (migs.avg_user_impact/100.0) AS improvement_measure
+FROM sys.dm_db_missing_index_group_stats migs
+JOIN sys.dm_db_missing_index_groups   mig ON mig.index_group_handle = migs.group_handle
+JOIN sys.dm_db_missing_index_details mid ON mid.index_handle = mig.index_handle
+ORDER BY improvement_measure DESC;
+'@
+    }
+    @{ Script='perf_07_table_stats_health'; Severity='Warning'; Scope='Database'
+       Title='Stale statistics or heavy index fragmentation'
+       CIS='-'; GDPR='-'; SOC2='-'
+       Detail='Statistics need updating or > 30% fragmentation present.'
+       Recommendation='Schedule UPDATE STATISTICS and reorganise / rebuild index maintenance jobs.'
+       Remediation=@'
+-- Update outdated statistics
+EXEC sp_updatestats;
 
-# Apply rules to one report folder (one database). Returns array of findings.
-function Get-Findings {
+-- Per-index rebuild template (replace placeholders)
+ALTER INDEX [<index>] ON [<schema>].[<table>] REBUILD WITH (ONLINE = ON);
+'@
+    }
+    @{ Script='perf_09_temp_and_memory_pressure'; Severity='Critical'; Scope='Server'
+       Pattern='pending_memory_grant_count\s*\n\s*-+\s*\n\s*[1-9]'
+       Title='Pending memory grants -- memory pressure'
+       CIS='-'; GDPR='-'; SOC2='A1.2'
+       Detail='Queries are queuing for memory; capacity issue.'
+       Recommendation='Identify top grant consumers; raise max server memory or scale up.'
+       Remediation='SELECT * FROM sys.dm_exec_query_resource_semaphores;'
+    }
+    @{ Script='perf_09_temp_and_memory_pressure'; Severity='Warning'; Scope='Server'
+       Pattern='PAGELATCH_(SH|EX|UP).*[12]:\d+:[123]'
+       Title='TempDB allocation contention'
+       CIS='2.5'; GDPR='-'; SOC2='A1.2'
+       Detail='PAGELATCH waits on tempdb GAM/SGAM/PFS pages.'
+       Recommendation='Add equally-sized tempdb data files (1 per CPU up to 8). Enable trace flag 1118 if pre-2016.'
+       Remediation=@'
+ALTER DATABASE tempdb MODIFY FILE (NAME=tempdev, SIZE=8GB);
+ALTER DATABASE tempdb ADD FILE (NAME=tempdev2, FILENAME=''<path>\tempdb2.ndf'', SIZE=8GB);
+-- repeat per CPU up to 8
+'@
+    }
+    @{ Script='perf_10_replication_and_backup_impact'; Severity='Critical'; Scope='Database'
+       Pattern='hours_since_full\s*\n\s*-+\s*\n.*\b([2-9]\d{2,}|1\d{3,})\b'
+       Title='Last full backup older than several days'
+       CIS='2.7'; GDPR='Art.32(1)(c)'; SOC2='A1.2'
+       Detail='Full backup gap. Verify the backup job runs and the target storage accepts writes.'
+       Recommendation='Run a full backup immediately; verify backup job is enabled and not failing.'
+       Remediation='BACKUP DATABASE [<db>] TO DISK = N''<path>\<db>.bak'' WITH COMPRESSION, CHECKSUM, STATS=10;'
+    }
+    @{ Script='perf_15_capacity_and_growth'; Severity='Critical'; Scope='Database'
+       Pattern='\b(8[0-9]|9[0-9]|100)\.\d+\s*%'
+       Title='Identity column or storage above 80% consumed'
+       CIS='-'; GDPR='-'; SOC2='A1.2'
+       Detail='Identity column nearing data-type limit, or filegroup nearly full.'
+       Recommendation='Plan widening (INT to BIGINT) or storage expansion before exhaustion.'
+       Remediation='-- Convert identity column to BIGINT requires a new column + backfill + cutover; see KB.'
+    }
+    @{ Script='perf_25_tempdb_contention'; Severity='Warning'; Scope='Server'
+       Title='TempDB contention metrics returned data'
+       CIS='2.5'; GDPR='-'; SOC2='A1.2'
+       Detail='PFS / GAM / SGAM contention indicators present.'
+       Recommendation='Verify tempdb file count vs CPU; balance file sizes.'
+       Remediation='-- See perf_09 remediation (add tempdb data files).'
+    }
+)
+
+# ===========================================================================
+# Apply rules to a single log dir, return the set of findings (with raw
+# context where available).
+# ===========================================================================
+function Get-FindingsForLogDir {
     param([string]$LogDir)
+    $list = New-Object System.Collections.Generic.List[object]
 
-    $findings = @()
-    $summaryPath = Join-Path $LogDir "_summary.txt"
-    foreach ($entry in Read-AuditSummary $summaryPath) {
-        if ($entry.Status -eq 'FAIL') {
-            $logBase = ($entry.Path -replace '/', '_') -replace '\.sql$', '.log'
-            $logPath = Join-Path $LogDir $logBase
-            $errLines = if (Test-Path $logPath) {
-                $sz = (Get-Item $logPath).Length
-                if ($sz -eq 0) {
-                    "(empty log -- sqlcmd produced no output, likely killed mid-run)"
-                } else {
-                    (Read-LogLines $logPath |
-                        Where-Object { $_ -match '^Msg\s+\d+|^Sqlcmd:|^\[note\]' } |
-                        Select-Object -First 5) -join "`n"
-                }
-            } else { "(no log captured)" }
-            $findings += [pscustomobject]@{
-                Severity       = 'Critical'
-                Script         = $entry.Path
-                Title          = "Script execution failed"
-                Detail         = $errLines
-                Recommendation = "Check connection privileges, sqlcmd version, and the script log file."
+    # 1. Failed scripts -> Critical 'Script execution failed'
+    foreach ($e in (Read-AuditSummary (Join-Path $LogDir '_summary.txt'))) {
+        if ($e.Status -ne 'FAIL') { continue }
+        $logBase = ($e.Path -replace '/', '_') -replace '\.sql$', '.log'
+        $logPath = Join-Path $LogDir $logBase
+        $detail  = '(no log captured)'
+        if (Test-Path $logPath) {
+            if ((Get-Item $logPath).Length -eq 0) {
+                $detail = '(empty log -- runner produced no output, likely killed mid-run)'
+            } else {
+                $errs = (Read-LogLines $logPath | Where-Object { $_ -match '^Msg\s+\d+|^Sqlcmd:|^\[note\]' } | Select-Object -First 5) -join "`n"
+                if ($errs) { $detail = $errs }
             }
         }
+        [void]$list.Add([pscustomobject]@{
+            Severity='Critical'; Scope='Server'; Script=$e.Path
+            Title='Script execution failed'; Detail=$detail
+            Recommendation='Check connection privileges and review the log file.'
+            Remediation=''; CIS='-'; GDPR='-'; SOC2='-'
+        })
     }
 
-    # Apply content rules
-    Get-ChildItem $LogDir -Filter '*.log' | ForEach-Object {
-        $log     = $_.FullName
-        $base    = $_.BaseName  # e.g. critical_perf_01_top_sql
+    # 2. Apply content rules
+    foreach ($log in (Get-ChildItem $LogDir -Filter '*.log' -File -ErrorAction SilentlyContinue)) {
         foreach ($rule in $Rules) {
-            if ($base -notmatch [regex]::Escape($rule.Script)) { continue }
-
-            $hit = $false
-            $detail = ""
-            switch ($rule.Mode) {
-                'HasData' {
-                    if (Test-LogHasDataRows $log) {
-                        $hit = $true
-                        $detail = "Diagnostic script returned data rows -- review the full log."
-                    }
+            if ($log.BaseName -notmatch [regex]::Escape($rule.Script)) { continue }
+            $hit = $false; $context = ''
+            if ($rule.Pattern) {
+                $text = Read-LogText $log.FullName
+                if ($text -and ($text -match $rule.Pattern)) {
+                    $hit = $true
+                    $m = [string]$matches[0]
+                    if ($m.Length -gt 200) { $m = $m.Substring(0,200) + '...' }
+                    $context = $m
                 }
-                'Pattern' {
-                    $text = Get-LogText $log
-                    if ($text -and ($text -match $rule.Pattern)) {
-                        $hit = $true
-                        # extract a small snippet of the match for context
-                        $snippet = [string]$matches[0]
-                        if ($snippet -and $snippet.Length -gt 200) {
-                            $snippet = $snippet.Substring(0,200) + '...'
-                        }
-                        $detail = "Match: " + $snippet
-                    }
+            } else {
+                if (Test-LogHasDataRows $log.FullName) {
+                    $hit = $true
+                    $context = '(data rows present in script output)'
                 }
             }
             if ($hit) {
-                $findings += [pscustomobject]@{
-                    Severity       = $rule.Severity
-                    Script         = $_.Name
-                    Title          = $rule.Title
-                    Detail         = $detail
+                [void]$list.Add([pscustomobject]@{
+                    Severity   = $rule.Severity
+                    Scope      = $rule.Scope
+                    Script     = $log.Name
+                    Title      = $rule.Title
+                    Detail     = if ($rule.Detail)         { "$($rule.Detail) Context: $context" } else { "Context: $context" }
                     Recommendation = $rule.Recommendation
-                }
+                    Remediation    = $rule.Remediation
+                    CIS  = if ($rule.CIS)  { $rule.CIS }  else { '-' }
+                    GDPR = if ($rule.GDPR) { $rule.GDPR } else { '-' }
+                    SOC2 = if ($rule.SOC2) { $rule.SOC2 } else { '-' }
+                })
             }
         }
     }
-
-    return ,$findings
+    return ,$list.ToArray()
 }
 
-# Discover the report layout. Returns array of "context" objects:
-#   @{ Name=<DB or _server>; LogDir=<path containing *.log + _summary.txt> }
-#
-# Two layouts to handle:
-#   1. multi-DB run (run_all_databases.ps1):
-#        <Root>/<DBName>/mssql_perf_<ts>/{_summary.txt, *.log}
-#        <Root>/_server/mssql_perf_<ts>/...
-#        <Root>/_summary.txt           <-- top-level roll-up: 'OK <db>' / 'FAIL <db>'
-#
-#   2. single-DB run (run_audit.ps1):
-#        <Root>/{_summary.txt, *.log}  <-- _summary.txt lists scripts: 'OK <prio>/<file>.sql'
-#
-# Try multi-DB first (presence of mssql_perf_* sub-folders is the
-# unambiguous signal). Fall back to single-run only when no sub-folders
-# match. The previous implementation looked at <Root>/_summary.txt first,
-# which mis-classified the multi-DB roll-up file as a single-run summary
-# and then tried to read database directories as log files.
+# ===========================================================================
+# Discover layout
+# ===========================================================================
 function Get-ReportContexts {
     param([string]$Root)
-
-    # Multi-DB mode: $Root has sub-folders, each with a mssql_perf_* sub-folder
     $contexts = @()
     Get-ChildItem $Root -Directory | Sort-Object Name | ForEach-Object {
         $dbName = $_.Name
         Get-ChildItem $_.FullName -Directory -Filter 'mssql_perf_*' |
-            Sort-Object Name -Descending |
-            Select-Object -First 1 | ForEach-Object {
-                $contexts += [pscustomobject]@{ Name = $dbName; LogDir = $_.FullName }
+            Sort-Object Name -Descending | Select-Object -First 1 | ForEach-Object {
+                $contexts += [pscustomobject]@{ Name=$dbName; LogDir=$_.FullName }
             }
     }
     if (@($contexts).Count -gt 0) { return ,$contexts }
-
-    # Fall back: single-DB run -- $Root itself contains *.log + _summary.txt
-    if (Test-Path (Join-Path $Root "_summary.txt")) {
-        return ,@([pscustomobject]@{ Name = "(single run)"; LogDir = $Root })
+    if (Test-Path (Join-Path $Root '_summary.txt')) {
+        return ,@([pscustomobject]@{ Name='(single run)'; LogDir=$Root })
     }
-
     return ,@()
 }
 
 # ===========================================================================
-# HTML generation (self-contained, no external resources)
+# SVG charts (no external libs, render in PDF)
 # ===========================================================================
-function Convert-FindingsToHtml {
-    param([array]$Findings)
-    if (-not $Findings -or @($Findings).Count -eq 0) {
-        return '<p class="ok">No problems detected by the rule set.</p>'
+function New-SvgDonut {
+    param([int]$Critical, [int]$Warning, [int]$Info)
+    $total = $Critical + $Warning + $Info
+    if ($total -le 0) { return "<p class='ok'>No findings recorded.</p>" }
+    $rad = 80; $cx = 110; $cy = 110; $stroke = 30
+    $colors = @{ Critical='#c0392b'; Warning='#e67e22'; Info='#2980b9' }
+    $vals = @(
+        @{ Name='Critical'; N=$Critical; C=$colors.Critical },
+        @{ Name='Warning';  N=$Warning;  C=$colors.Warning  },
+        @{ Name='Info';     N=$Info;     C=$colors.Info     }
+    )
+    $offset = 0; $segments = ''
+    foreach ($v in $vals) {
+        if ($v.N -le 0) { continue }
+        $angle = 360.0 * $v.N / $total
+        $a1    = ($offset - 90) * [math]::PI / 180.0
+        $a2    = ($offset + $angle - 90) * [math]::PI / 180.0
+        $x1 = $cx + $rad * [math]::Cos($a1); $y1 = $cy + $rad * [math]::Sin($a1)
+        $x2 = $cx + $rad * [math]::Cos($a2); $y2 = $cy + $rad * [math]::Sin($a2)
+        $large = if ($angle -gt 180) { 1 } else { 0 }
+        $segments += "<path d='M $cx $cy L $($x1.ToString('0.##',[Globalization.CultureInfo]::InvariantCulture)) $($y1.ToString('0.##',[Globalization.CultureInfo]::InvariantCulture)) A $rad $rad 0 $large 1 $($x2.ToString('0.##',[Globalization.CultureInfo]::InvariantCulture)) $($y2.ToString('0.##',[Globalization.CultureInfo]::InvariantCulture)) Z' fill='$($v.C)'/>"
+        $offset += $angle
     }
-    $html = "<table class='findings'><thead><tr><th>Severity</th><th>Script</th><th>Finding</th><th>Recommendation</th></tr></thead><tbody>"
-    foreach ($f in ($Findings | Sort-Object @{Expression={
-            switch ($_.Severity) { 'Critical' {0} 'Warning' {1} 'Info' {2} default {3} }
-        }})) {
-        $sevClass = $f.Severity.ToLower()
-        $html += "<tr class='sev-$sevClass'>"
-        $html += "<td><span class='badge $sevClass'>$($f.Severity)</span></td>"
-        $html += "<td><code>$([System.Web.HttpUtility]::HtmlEncode($f.Script))</code></td>"
-        $html += "<td><strong>$([System.Web.HttpUtility]::HtmlEncode($f.Title))</strong>"
-        if ($f.Detail) { $html += "<br><span class='detail'>$([System.Web.HttpUtility]::HtmlEncode($f.Detail))</span>" }
-        $html += "</td>"
-        $html += "<td>$([System.Web.HttpUtility]::HtmlEncode($f.Recommendation))</td>"
-        $html += "</tr>"
+    $hole = "<circle cx='$cx' cy='$cy' r='$([int]($rad - $stroke))' fill='white'/>"
+    $center = "<text x='$cx' y='$($cy-3)' text-anchor='middle' font-size='22' font-weight='600' fill='#222'>$total</text>" +
+              "<text x='$cx' y='$($cy+18)' text-anchor='middle' font-size='10' fill='#777'>findings</text>"
+    $legend = "<g font-family='Segoe UI,Arial' font-size='12'>"
+    $ly = 30
+    foreach ($v in $vals) {
+        $legend += "<rect x='240' y='$ly' width='14' height='14' fill='$($v.C)'/>"
+        $legend += "<text x='262' y='$($ly+12)' fill='#222'>$($v.Name): $($v.N)</text>"
+        $ly += 22
     }
-    $html += "</tbody></table>"
-    return $html
+    $legend += '</g>'
+    return "<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 380 220' width='380' height='220'>$segments$hole$center$legend</svg>"
 }
 
-Add-Type -AssemblyName System.Web
+function New-SvgBar {
+    param([array]$Items, [string]$ColorPositive='#2a6db0')
+    if (-not $Items -or @($Items).Count -eq 0) { return '' }
+    $maxN = 1
+    foreach ($it in $Items) { if ($it.Value -gt $maxN) { $maxN = $it.Value } }
+    $rowH = 22; $padTop = 10; $padLeft = 200; $width = 600
+    $h = $padTop + $rowH * @($Items).Count + 10
+    $svg = "<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 $width $h' width='$width' height='$h' font-family='Segoe UI,Arial' font-size='12'>"
+    $y = $padTop
+    foreach ($it in $Items) {
+        $w = [int](($width - $padLeft - 50) * $it.Value / $maxN)
+        $svg += "<text x='$($padLeft - 8)' y='$($y + 14)' text-anchor='end' fill='#333'>$([System.Web.HttpUtility]::HtmlEncode($it.Label))</text>"
+        $svg += "<rect x='$padLeft' y='$y' width='$w' height='16' fill='$ColorPositive'/>"
+        $svg += "<text x='$($padLeft + $w + 6)' y='$($y + 14)' fill='#333'>$($it.Value)</text>"
+        $y += $rowH
+    }
+    $svg += '</svg>'
+    return $svg
+}
 
 # ===========================================================================
-# Main
+# PDF conversion (Microsoft Edge headless)
+# ===========================================================================
+function Convert-HtmlToPdf {
+    param([string]$Html, [string]$Pdf)
+    $candidates = @(
+        "$env:ProgramFiles\Microsoft\Edge\Application\msedge.exe",
+        "${env:ProgramFiles(x86)}\Microsoft\Edge\Application\msedge.exe",
+        "$env:LOCALAPPDATA\Microsoft\Edge\Application\msedge.exe"
+    )
+    $edge = $candidates | Where-Object { Test-Path $_ } | Select-Object -First 1
+    if (-not $edge) {
+        Write-Warning 'Microsoft Edge not found -- skipping PDF conversion. Use -NoPdf to suppress this message.'
+        return $false
+    }
+    $uri = ([System.Uri](Resolve-Path $Html).Path).AbsoluteUri
+    & $edge --headless --disable-gpu --no-pdf-header-footer --print-to-pdf="$Pdf" $uri 2>&1 | Out-Null
+    return (Test-Path $Pdf)
+}
+
+# ===========================================================================
+# Main flow
 # ===========================================================================
 $contexts = Get-ReportContexts $ReportDir
-if (-not $contexts -or @($contexts).Count -eq 0) {
-    Write-Error "No report sub-folders found in $ReportDir. Expected mssql_perf_* sub-folders."
+if (@($contexts).Count -eq 0) {
+    Write-Error "No report sub-folders found under $ReportDir."
     exit 3
 }
 
-# Process every context
-$report = @()
+# Per-context summary + findings
+$report = New-Object System.Collections.Generic.List[object]
 foreach ($ctx in $contexts) {
-    $findings = Get-Findings $ctx.LogDir
-    $summary  = Read-AuditSummary (Join-Path $ctx.LogDir "_summary.txt")
-    $passed   = @($summary | Where-Object { $_.Status -eq 'OK' }).Count
-    $failed   = @($summary | Where-Object { $_.Status -eq 'FAIL' }).Count
-    $crit     = @($findings | Where-Object { $_.Severity -eq 'Critical' }).Count
-    $warn     = @($findings | Where-Object { $_.Severity -eq 'Warning' }).Count
-    $info     = @($findings | Where-Object { $_.Severity -eq 'Info' }).Count
-
-    $report += [pscustomobject]@{
+    $findings = Get-FindingsForLogDir $ctx.LogDir
+    $sum      = Read-AuditSummary (Join-Path $ctx.LogDir '_summary.txt')
+    $passed   = @($sum | Where-Object { $_.Status -eq 'OK' }).Count
+    $failed   = @($sum | Where-Object { $_.Status -eq 'FAIL' }).Count
+    [void]$report.Add([pscustomobject]@{
         Name=$ctx.Name; LogDir=$ctx.LogDir; Findings=$findings
         Passed=$passed; Failed=$failed
-        Critical=$crit; Warning=$warn; Info=$info
-    }
+        Critical = @($findings | Where-Object { $_.Severity -eq 'Critical' }).Count
+        Warning  = @($findings | Where-Object { $_.Severity -eq 'Warning'  }).Count
+        Info     = @($findings | Where-Object { $_.Severity -eq 'Info'     }).Count
+    })
 }
 
-$totalCrit = ($report | Measure-Object -Property Critical -Sum).Sum
-$totalWarn = ($report | Measure-Object -Property Warning  -Sum).Sum
-$totalFail = ($report | Measure-Object -Property Failed   -Sum).Sum
-$now       = Get-Date -Format "yyyy-MM-dd HH:mm:ss"
-$srvLabel  = if ($ServerName) { [System.Web.HttpUtility]::HtmlEncode($ServerName) } else { "(unspecified)" }
+# Server fingerprint from _server context if present
+$serverCtx = $report | Where-Object { $_.Name -eq '_server' } | Select-Object -First 1
+$fingerprint = if ($serverCtx) { Get-ServerFingerprint $serverCtx.LogDir } else { $null }
 
+# Aggregate findings ACROSS databases by Title -- this is the key
+# "X of N affected" rollup that turns 123 copies into one clean line.
+$titleAgg = @{}
+foreach ($r in $report) {
+    foreach ($f in $r.Findings) {
+        $key = "$($f.Severity)|$($f.Scope)|$($f.Title)"
+        if (-not $titleAgg.ContainsKey($key)) {
+            $titleAgg[$key] = [pscustomobject]@{
+                Severity=$f.Severity; Scope=$f.Scope; Title=$f.Title
+                Recommendation=$f.Recommendation; Remediation=$f.Remediation
+                CIS=$f.CIS; GDPR=$f.GDPR; SOC2=$f.SOC2
+                Databases = New-Object System.Collections.Generic.List[string]
+            }
+        }
+        if ($r.Name -ne '_server' -or $f.Scope -eq 'Server') {
+            [void]$titleAgg[$key].Databases.Add($r.Name)
+        }
+    }
+}
+$aggregated = $titleAgg.Values | Sort-Object @{ Expression = {
+    switch ($_.Severity) { 'Critical' {0} 'Warning' {1} 'Info' {2} default {3} }
+}}, Title
+
+# Server-wide findings = those with Scope='Server' (deduplicated)
+$serverFindings  = @($aggregated | Where-Object { $_.Scope -eq 'Server' })
+# Per-database findings = those with Scope='Database', counted as N of M
+$dbFindings      = @($aggregated | Where-Object { $_.Scope -eq 'Database' })
+
+$totalCrit = ($report | Measure-Object Critical -Sum).Sum
+$totalWarn = ($report | Measure-Object Warning  -Sum).Sum
+$totalInfo = ($report | Measure-Object Info     -Sum).Sum
+$totalFail = ($report | Measure-Object Failed   -Sum).Sum
+$dbCount   = @($report).Count
+
+# Domain breakdown (perf categories) -- bucket by script prefix
+$domainBuckets = [ordered]@{
+    'Top SQL & queries'       = @('perf_01','perf_16','perf_23')
+    'Blocking & locking'      = @('perf_02','perf_13')
+    'Sessions & connections'  = @('perf_03')
+    'Waits & I/O'             = @('perf_04','perf_14')
+    'Indexes'                 = @('perf_06','perf_12')
+    'Statistics & bloat'      = @('perf_07','perf_11','perf_17')
+    'Storage & sizing'        = @('perf_08','perf_15','perf_19')
+    'Memory & TempDB'         = @('perf_09','perf_25')
+    'Backup / replication'    = @('perf_10','perf_22','perf_24')
+    'Workload & resources'    = @('perf_20')
+    'Schema / partitioning'   = @('perf_21','perf_18')
+}
+$domainCounts = @()
+foreach ($dom in $domainBuckets.Keys) {
+    $count = 0
+    foreach ($r in $report) {
+        foreach ($f in $r.Findings) {
+            foreach ($pfx in $domainBuckets[$dom]) {
+                if ($f.Script -match [regex]::Escape($pfx)) { $count++; break }
+            }
+        }
+    }
+    if ($count -gt 0) { $domainCounts += [pscustomobject]@{ Label=$dom; Value=$count } }
+}
+$domainCounts = $domainCounts | Sort-Object Value -Descending
+
+# ===========================================================================
+# HTML render
+# ===========================================================================
+$now = Get-Date -Format 'yyyy-MM-dd HH:mm:ss'
 $css = @'
 <style>
-body{font-family:Segoe UI,Arial,sans-serif;margin:0;padding:20px;background:#f5f5f5;color:#222;}
-h1{margin:0 0 4px 0;}h2{border-bottom:2px solid #2a6db0;padding-bottom:4px;margin-top:32px;}
-header{background:#2a6db0;color:white;padding:24px;border-radius:6px;margin-bottom:20px;}
-header p{margin:4px 0;opacity:0.9;}
-.summary{background:white;padding:16px;border-radius:6px;margin-bottom:20px;box-shadow:0 1px 3px rgba(0,0,0,0.1);}
-table{border-collapse:collapse;width:100%;background:white;}
-th,td{padding:8px 12px;border-bottom:1px solid #e0e0e0;text-align:left;vertical-align:top;}
-th{background:#eef2f7;font-weight:600;}
-.findings tr:hover{background:#fafbfc;}
-.badge{display:inline-block;padding:2px 8px;border-radius:3px;font-size:0.85em;font-weight:600;color:white;}
-.badge.critical{background:#c0392b;}
-.badge.warning {background:#e67e22;}
-.badge.info    {background:#2980b9;}
-.sev-critical>td:first-child{border-left:4px solid #c0392b;}
-.sev-warning >td:first-child{border-left:4px solid #e67e22;}
-.sev-info    >td:first-child{border-left:4px solid #2980b9;}
-.detail{color:#666;font-size:0.9em;font-family:Consolas,monospace;}
-.ok{color:#27ae60;font-weight:600;}
-.exec-summary td.num{text-align:right;font-variant-numeric:tabular-nums;}
-.exec-summary td.crit{color:#c0392b;font-weight:600;}
-.exec-summary td.warn{color:#e67e22;font-weight:600;}
-.exec-summary td.fail{color:#c0392b;font-weight:600;}
-.toc{background:white;padding:12px 20px;border-radius:6px;margin-bottom:20px;box-shadow:0 1px 3px rgba(0,0,0,0.1);}
-.toc ul{margin:0;padding-left:20px;columns:3;}
-.toc a{text-decoration:none;color:#2a6db0;}
-.toc a:hover{text-decoration:underline;}
-section.db{background:white;padding:16px 20px;border-radius:6px;margin-bottom:16px;box-shadow:0 1px 3px rgba(0,0,0,0.1);}
-section.db h3{margin-top:0;color:#2a6db0;}
-.meta{color:#666;font-size:0.9em;margin-bottom:12px;}
-code{background:#f0f0f0;padding:1px 6px;border-radius:3px;font-size:0.9em;}
+@page{size:A4;margin:18mm 14mm}
+body{font-family:Segoe UI,Arial,sans-serif;margin:0;padding:0;color:#222;background:#fff;font-size:10.5pt;line-height:1.45}
+h1{font-size:24pt;margin:0 0 8px}
+h2{font-size:16pt;margin:24px 0 10px;border-bottom:2px solid #2a6db0;padding-bottom:4px}
+h3{font-size:12.5pt;margin:14px 0 6px;color:#2a6db0}
+h4{font-size:11pt;margin:10px 0 4px;color:#444}
+.cover{page-break-after:always;padding:40px;background:linear-gradient(135deg,#2a6db0 0%,#1f5a98 100%);color:white;min-height:240mm}
+.cover h1{font-size:30pt}
+.cover .meta{margin-top:20px;font-size:11pt}
+.cover .meta div{margin:4px 0}
+.cover .donut{margin-top:30px;background:white;border-radius:8px;padding:18px;display:inline-block}
+.cover .badge{display:inline-block;padding:6px 14px;border-radius:20px;background:rgba(255,255,255,0.2);font-size:10pt;margin-bottom:14px}
+.section{padding:24px 28px;page-break-inside:avoid}
+.section.firstaftercov{page-break-before:always}
+table{border-collapse:collapse;width:100%;font-size:9.7pt;background:white}
+th,td{padding:6px 8px;border-bottom:1px solid #e0e0e0;text-align:left;vertical-align:top}
+th{background:#eef2f7;font-weight:600}
+.exec{display:flex;gap:24px;flex-wrap:wrap;margin-bottom:18px}
+.kpi{flex:1;min-width:140px;background:#f7f9fc;border:1px solid #dde6ef;border-radius:6px;padding:12px 14px}
+.kpi .num{font-size:22pt;font-weight:700;color:#2a6db0}
+.kpi .num.crit{color:#c0392b}
+.kpi .num.warn{color:#e67e22}
+.kpi .num.fail{color:#c0392b}
+.kpi .lbl{font-size:9pt;color:#666;text-transform:uppercase;letter-spacing:0.5px}
+.badge{display:inline-block;padding:1px 8px;border-radius:3px;font-size:0.78em;font-weight:700;color:white}
+.badge.critical{background:#c0392b}.badge.warning{background:#e67e22}.badge.info{background:#2980b9}
+.badge.server{background:#34495e}.badge.database{background:#16a085}
+tr.sev-critical>td:first-child{border-left:4px solid #c0392b}
+tr.sev-warning >td:first-child{border-left:4px solid #e67e22}
+tr.sev-info    >td:first-child{border-left:4px solid #2980b9}
+.detail{color:#555;font-size:0.85em;font-family:Consolas,monospace;white-space:pre-wrap}
+.codeblk{background:#1e1e1e;color:#d4d4d4;font-family:Consolas,monospace;padding:10px 14px;border-radius:4px;font-size:9pt;white-space:pre-wrap;page-break-inside:avoid}
+.scope{color:#555;font-size:9pt}
+.compl{font-size:8.5pt;color:#666}
+.kbd{font-family:Consolas,monospace;background:#f0f0f0;padding:1px 5px;border-radius:3px;font-size:0.88em}
+.fp{display:grid;grid-template-columns:max-content 1fr;gap:4px 14px;font-size:10pt}
+.fp dt{font-weight:600;color:#444}
+.roadmap-phase{border-left:4px solid #2a6db0;padding:8px 14px;margin:10px 0;background:#f7f9fc}
+.roadmap-phase h3{margin-top:0}
+.roadmap-phase ul{margin:6px 0 0 18px;padding:0}
+.glossary{font-size:9.5pt}
+.glossary dt{font-weight:600;margin-top:8px;color:#2a6db0}
+.glossary dd{margin:0 0 4px 16px}
+.appendix{font-size:9.5pt}
+footer{position:running(footer);font-size:8.5pt;color:#888}
+@page{@bottom-center{content:counter(page) ' / ' counter(pages)}}
+.watermark{position:fixed;bottom:6mm;right:8mm;font-size:8pt;color:#999}
+.tag{display:inline-block;background:#eef2f7;color:#2a6db0;border-radius:10px;padding:1px 8px;font-size:8.5pt;margin-right:4px}
+.alert{background:#fdecea;border-left:4px solid #c0392b;padding:10px 14px;margin:8px 0;border-radius:4px}
+.note {background:#fff8e1;border-left:4px solid #e67e22;padding:10px 14px;margin:8px 0;border-radius:4px}
+.ok   {color:#27ae60;font-weight:600;font-style:italic}
+section.severity{page-break-before:always}
 </style>
 '@
 
-# Build HTML
+$customerHtml  = if ($Customer)   { "<div class='meta'><strong>Prepared for:</strong> $(Esc $Customer)</div>" } else { '' }
+$donut         = New-SvgDonut -Critical $totalCrit -Warning $totalWarn -Info $totalInfo
+$domainBarSvg  = New-SvgBar -Items $domainCounts
+
+# Cover ----------------------------------------------------------------------
+$cover = @"
+<section class='cover'>
+  <span class='badge'>SQL Server Performance Audit</span>
+  <h1>Performance Audit Report</h1>
+  <div class='meta'>
+    <div><strong>Server:</strong> $(Esc ($ServerName | ForEach-Object { if ($_) { $_ } else { '(unspecified)' } }))</div>
+    $customerHtml
+    <div><strong>Databases analyzed:</strong> $dbCount</div>
+    <div><strong>Generated:</strong> $now</div>
+    <div><strong>Source:</strong> $(Esc $ReportDir)</div>
+  </div>
+  <div class='donut'>$donut</div>
+</section>
+"@
+
+# Server fingerprint --------------------------------------------------------
+$fpHtml = ''
+if ($fingerprint) {
+    $up = if ($fingerprint.UptimeDays) { "$($fingerprint.UptimeDays) days" } else { '(unknown)' }
+    $fpHtml = @"
+<section class='section firstaftercov'>
+<h2>1. Environment Fingerprint</h2>
+<dl class='fp'>
+  <dt>Edition</dt>           <dd>$(Esc $fingerprint.Edition)</dd>
+  <dt>Product Version</dt>   <dd>$(Esc $fingerprint.ProductVersion)</dd>
+  <dt>Service Pack / CU</dt> <dd>$(Esc $fingerprint.ProductLevel)</dd>
+  <dt>Host Name</dt>         <dd>$(Esc $fingerprint.HostName)</dd>
+  <dt>Server Collation</dt>  <dd>$(Esc $fingerprint.Collation)</dd>
+  <dt>CPU Cores</dt>         <dd>$(Esc $fingerprint.PhysicalCPUs)</dd>
+  <dt>Total Memory</dt>      <dd>$(Esc $fingerprint.TotalMemoryMB) MB</dd>
+  <dt>SQL Start Time</dt>    <dd>$(Esc $fingerprint.SqlStartTime)</dd>
+  <dt>Uptime</dt>            <dd>$(Esc $up)</dd>
+  <dt>AlwaysOn AG</dt>       <dd>$(Esc $fingerprint.IsHadrEnabled)</dd>
+  <dt>Databases counted</dt> <dd>$dbCount</dd>
+</dl>
+$( if ($fingerprint.UptimeDays -and [decimal]$fingerprint.UptimeDays -lt 7) { "<div class='note'>Instance uptime is less than 7 days; cumulative wait stats may not be representative yet.</div>" } )
+</section>
+"@
+} else {
+    $fpHtml = "<section class='section firstaftercov'><h2>1. Environment Fingerprint</h2><div class='note'>Server fingerprint not available -- the _server context did not produce perf_05 output.</div></section>"
+}
+
+# Executive summary --------------------------------------------------------
+$execHtml = @"
+<section class='section'>
+<h2>2. Executive Summary</h2>
+<div class='exec'>
+  <div class='kpi'><div class='lbl'>Databases analyzed</div><div class='num'>$dbCount</div></div>
+  <div class='kpi'><div class='lbl'>Critical findings</div><div class='num crit'>$totalCrit</div></div>
+  <div class='kpi'><div class='lbl'>Warning findings</div><div class='num warn'>$totalWarn</div></div>
+  <div class='kpi'><div class='lbl'>Info findings</div><div class='num'>$totalInfo</div></div>
+  <div class='kpi'><div class='lbl'>Failed scripts</div><div class='num fail'>$totalFail</div></div>
+</div>
+<h3>Findings by Domain</h3>
+$domainBarSvg
+</section>
+"@
+
+# Server-wide findings -----------------------------------------------------
+$srvFindHtml = "<section class='section'><h2>3. Server-Wide Findings</h2>"
+if (@($serverFindings).Count -eq 0) {
+    $srvFindHtml += "<p class='ok'>No server-wide findings detected.</p>"
+} else {
+    $srvFindHtml += "<p>Issues at the SQL Server instance level. These apply across every database on this instance.</p>"
+    $srvFindHtml += "<table><thead><tr><th>Severity</th><th>Finding</th><th>Affected DBs</th><th>CIS</th><th>GDPR</th><th>SOC2</th></tr></thead><tbody>"
+    foreach ($a in $serverFindings) {
+        $sevC = $a.Severity.ToLower()
+        $cnt  = @($a.Databases | Sort-Object -Unique).Count
+        $srvFindHtml += "<tr class='sev-$sevC'><td><span class='badge $sevC'>$($a.Severity)</span></td>"
+        $srvFindHtml += "<td><strong>$(Esc $a.Title)</strong><br><span class='detail'>$(Esc $a.Recommendation)</span></td>"
+        $srvFindHtml += "<td>$cnt</td>"
+        $srvFindHtml += "<td class='compl'>$(Esc $a.CIS)</td><td class='compl'>$(Esc $a.GDPR)</td><td class='compl'>$(Esc $a.SOC2)</td></tr>"
+    }
+    $srvFindHtml += "</tbody></table>"
+}
+$srvFindHtml += "</section>"
+
+# Database fleet rollup ----------------------------------------------------
+$dbFindHtml = "<section class='section'><h2>4. Database Fleet Findings</h2>"
+if (@($dbFindings).Count -eq 0) {
+    $dbFindHtml += "<p class='ok'>No database-level findings detected.</p>"
+} else {
+    $dbFindHtml += "<p>Issues that surfaced inside one or more user databases. Each finding is listed once with the count of affected databases.</p>"
+    $dbFindHtml += "<table><thead><tr><th>Severity</th><th>Finding</th><th>Affected</th><th>Top affected DBs</th><th>CIS</th><th>GDPR</th></tr></thead><tbody>"
+    foreach ($a in $dbFindings) {
+        $sevC = $a.Severity.ToLower()
+        $dbs  = @($a.Databases | Sort-Object -Unique)
+        $cnt  = $dbs.Count
+        $top  = ($dbs | Select-Object -First 6) -join ', '
+        if ($cnt -gt 6) { $top += " ... (+$($cnt - 6) more)" }
+        $dbFindHtml += "<tr class='sev-$sevC'><td><span class='badge $sevC'>$($a.Severity)</span></td>"
+        $dbFindHtml += "<td><strong>$(Esc $a.Title)</strong><br><span class='detail'>$(Esc $a.Recommendation)</span></td>"
+        $dbFindHtml += "<td><strong>$cnt</strong> of $dbCount</td>"
+        $dbFindHtml += "<td class='detail'>$(Esc $top)</td>"
+        $dbFindHtml += "<td class='compl'>$(Esc $a.CIS)</td><td class='compl'>$(Esc $a.GDPR)</td></tr>"
+    }
+    $dbFindHtml += "</tbody></table>"
+}
+$dbFindHtml += "</section>"
+
+# Backup-status alert ------------------------------------------------------
+$backupHtml = ''
+$oldBackups = @()
+foreach ($r in $report) {
+    if ($r.Name -eq '_server') { continue }
+    $age = Get-LastBackupAge $r.LogDir
+    if ($age -ne $null -and $age -gt 72) {
+        $oldBackups += [pscustomobject]@{ Name=$r.Name; Hours=$age }
+    }
+}
+if (@($oldBackups).Count -gt 0) {
+    $oldBackups = $oldBackups | Sort-Object Hours -Descending
+    $backupHtml = "<section class='section'><h2>5. Backup Freshness Alert</h2><div class='alert'>$(@($oldBackups).Count) database(s) have a last full backup older than 72 hours.</div>"
+    $backupHtml += "<table><thead><tr><th>Database</th><th>Hours since last full backup</th><th>Days</th></tr></thead><tbody>"
+    foreach ($b in ($oldBackups | Select-Object -First 25)) {
+        $backupHtml += "<tr><td>$(Esc $b.Name)</td><td><strong>$($b.Hours)</strong></td><td>$([math]::Round($b.Hours/24.0,1))</td></tr>"
+    }
+    $backupHtml += "</tbody></table></section>"
+} else {
+    $backupHtml = "<section class='section'><h2>5. Backup Freshness Alert</h2><p class='ok'>All assessed databases have a full backup within the last 72 hours.</p></section>"
+}
+
+# Compliance mapping --------------------------------------------------------
+$complHtml = "<section class='section'><h2>6. Compliance Mapping</h2><p>Findings mapped to industry frameworks. CIS = CIS Microsoft SQL Server Benchmark. GDPR = EU 2016/679 Article 32 (security of processing). SOC2 = AICPA Trust Services Criteria.</p>"
+$complHtml += "<table><thead><tr><th>Severity</th><th>Finding</th><th>CIS</th><th>GDPR</th><th>SOC2</th></tr></thead><tbody>"
+foreach ($a in $aggregated) {
+    if ($a.CIS -eq '-' -and $a.GDPR -eq '-' -and $a.SOC2 -eq '-') { continue }
+    $sevC = $a.Severity.ToLower()
+    $complHtml += "<tr class='sev-$sevC'><td><span class='badge $sevC'>$($a.Severity)</span></td>"
+    $complHtml += "<td>$(Esc $a.Title)</td>"
+    $complHtml += "<td class='compl'>$(Esc $a.CIS)</td><td class='compl'>$(Esc $a.GDPR)</td><td class='compl'>$(Esc $a.SOC2)</td></tr>"
+}
+$complHtml += "</tbody></table></section>"
+
+# Phased remediation roadmap ------------------------------------------------
+$roadHtml = "<section class='section'><h2>7. Remediation Roadmap</h2>"
+$phase1 = @($aggregated | Where-Object { $_.Severity -eq 'Critical' })
+$phase2 = @($aggregated | Where-Object { $_.Severity -eq 'Warning'  })
+$phase3 = @($aggregated | Where-Object { $_.Severity -eq 'Info'     })
+$roadHtml += "<div class='roadmap-phase'><h3>Phase 1 -- Immediate (Week 1-2): Critical issues</h3><ul>"
+foreach ($f in $phase1) {
+    $cnt = @($f.Databases | Sort-Object -Unique).Count
+    $where = if ($f.Scope -eq 'Server') { 'instance-wide' } else { "$cnt of $dbCount databases" }
+    $roadHtml += "<li><strong>$(Esc $f.Title)</strong> ($where) -- $(Esc $f.Recommendation)</li>"
+}
+if (@($phase1).Count -eq 0) { $roadHtml += "<li>No critical items.</li>" }
+$roadHtml += "</ul></div>"
+$roadHtml += "<div class='roadmap-phase' style='border-left-color:#e67e22'><h3>Phase 2 -- Short-term (Week 3-6): Warnings</h3><ul>"
+foreach ($f in $phase2) {
+    $cnt = @($f.Databases | Sort-Object -Unique).Count
+    $where = if ($f.Scope -eq 'Server') { 'instance-wide' } else { "$cnt of $dbCount databases" }
+    $roadHtml += "<li><strong>$(Esc $f.Title)</strong> ($where) -- $(Esc $f.Recommendation)</li>"
+}
+if (@($phase2).Count -eq 0) { $roadHtml += "<li>No warning items.</li>" }
+$roadHtml += "</ul></div>"
+$roadHtml += "<div class='roadmap-phase' style='border-left-color:#2980b9'><h3>Phase 3 -- Medium-term (Week 7-12): Info / hardening</h3><ul>"
+foreach ($f in $phase3) {
+    $roadHtml += "<li><strong>$(Esc $f.Title)</strong> -- $(Esc $f.Recommendation)</li>"
+}
+if (@($phase3).Count -eq 0) { $roadHtml += "<li>No info items.</li>" }
+$roadHtml += "</ul></div></section>"
+
+# T-SQL remediation snippets ------------------------------------------------
+$snipHtml = "<section class='section'><h2>8. Remediation Snippets (T-SQL)</h2><p>Reference snippets for the findings above. Replace placeholders before executing.</p>"
+$emitted = @{}
+foreach ($a in $aggregated) {
+    if (-not $a.Remediation) { continue }
+    if ($emitted.ContainsKey($a.Title)) { continue }
+    $emitted[$a.Title] = $true
+    $snipHtml += "<h4>$(Esc $a.Title)</h4>"
+    $snipHtml += "<div class='codeblk'>$(Esc $a.Remediation)</div>"
+}
+$snipHtml += "</section>"
+
+# Per-database appendix ----------------------------------------------------
+$apxHtml = "<section class='section appendix'><h2>9. Appendix A: Per-Database Findings</h2><p>Full findings per database for reference. Critical = red border, Warning = orange, Info = blue.</p>"
+foreach ($r in ($report | Sort-Object @{Expression={ if ($_.Name -eq '_server') {0} else {1} }}, Name)) {
+    if (@($r.Findings).Count -eq 0) { continue }
+    $apxHtml += "<h3>$(Esc $r.Name) <span class='tag'>$($r.Critical) crit</span><span class='tag'>$($r.Warning) warn</span><span class='tag'>$($r.Info) info</span></h3>"
+    $apxHtml += "<table><thead><tr><th>Sev</th><th>Scope</th><th>Script</th><th>Finding</th></tr></thead><tbody>"
+    foreach ($f in ($r.Findings | Sort-Object @{Expression={ switch ($_.Severity) { 'Critical' {0} 'Warning' {1} 'Info' {2} default {3} } }}, Title)) {
+        $sevC = $f.Severity.ToLower()
+        $apxHtml += "<tr class='sev-$sevC'><td><span class='badge $sevC'>$($f.Severity)</span></td>"
+        $apxHtml += "<td><span class='badge $($f.Scope.ToLower())'>$($f.Scope)</span></td>"
+        $apxHtml += "<td><span class='kbd'>$(Esc $f.Script)</span></td>"
+        $apxHtml += "<td><strong>$(Esc $f.Title)</strong><br><span class='detail'>$(Esc $f.Detail)</span></td></tr>"
+    }
+    $apxHtml += "</tbody></table>"
+}
+$apxHtml += "</section>"
+
+# Glossary ---------------------------------------------------------------
+$glossary = @"
+<section class='section glossary'>
+<h2>10. Appendix B: Glossary</h2>
+<dl>
+<dt>PAGEIOLATCH_SH / EX / UP</dt><dd>Wait while reading a data page from disk. High values indicate slow storage or insufficient buffer-pool memory.</dd>
+<dt>RESOURCE_SEMAPHORE</dt><dd>Query is waiting for a memory grant. Indicates memory pressure or oversized grants.</dd>
+<dt>LCK_M_*</dt><dd>Locking wait family. Sustained values point to blocking; correlate with sys.dm_exec_requests.</dd>
+<dt>WRITELOG</dt><dd>Wait for the transaction log to flush. High values indicate slow log device.</dd>
+<dt>PAGELATCH on tempdb</dt><dd>Latch contention on tempdb GAM/SGAM/PFS pages. Add equally-sized data files.</dd>
+<dt>Modification ratio</dt><dd>modification_counter / rowcount on a statistic. Above ~0.10 means the stat is stale.</dd>
+<dt>Fragmentation</dt><dd>avg_fragmentation_in_percent on a leaf-level index. > 30% justifies REBUILD; 5-30% reorganise.</dd>
+<dt>Log Send Queue / Redo Queue</dt><dd>AlwaysOn replica lag indicators. Non-zero on busy systems is normal; growing trend is not.</dd>
+<dt>Ghost records</dt><dd>Soft-deleted rows awaiting cleanup; many = heavy DELETE activity.</dd>
+<dt>Identity headroom</dt><dd>Percent of identity-column type space already consumed (INT, BIGINT, etc.).</dd>
+</dl>
+</section>
+"@
+
+# Assemble ----------------------------------------------------------------
 $html = @"
-<!DOCTYPE html>
-<html lang='en'><head><meta charset='UTF-8'>
+<!DOCTYPE html><html lang='en'><head><meta charset='UTF-8'>
 <title>SQL Server Performance Audit Report</title>
 $css
 </head><body>
-<header>
-  <h1>SQL Server Performance Audit Report</h1>
-  <p><strong>Server:</strong> $srvLabel</p>
-  <p><strong>Report folder:</strong> $([System.Web.HttpUtility]::HtmlEncode($ReportDir))</p>
-  <p><strong>Generated:</strong> $now</p>
-</header>
-
-<div class='summary'>
-<h2 style='margin-top:0;border:none;'>Executive Summary</h2>
-<table class='exec-summary'>
-<thead><tr><th>Database / Context</th><th>Scripts OK</th><th>Failed</th><th>Critical</th><th>Warning</th><th>Info</th></tr></thead>
-<tbody>
+$cover
+$fpHtml
+$execHtml
+$srvFindHtml
+$dbFindHtml
+$backupHtml
+$complHtml
+$roadHtml
+$snipHtml
+$apxHtml
+$glossary
+<div class='watermark'>$(Esc $Brand) -- generated $now</div>
+</body></html>
 "@
-foreach ($r in $report) {
-    $anchor = ($r.Name -replace '[^A-Za-z0-9]', '_')
-    $html += "<tr><td><a href='#db_$anchor'>$([System.Web.HttpUtility]::HtmlEncode($r.Name))</a></td>"
-    $html += "<td class='num'>$($r.Passed)</td>"
-    $html += "<td class='num fail'>$($r.Failed)</td>"
-    $html += "<td class='num crit'>$($r.Critical)</td>"
-    $html += "<td class='num warn'>$($r.Warning)</td>"
-    $html += "<td class='num'>$($r.Info)</td></tr>`n"
-}
-$html += "<tr style='font-weight:bold;background:#f0f4f9;'><td>TOTAL</td>"
-$html += "<td class='num'>$(($report | Measure-Object -Property Passed -Sum).Sum)</td>"
-$html += "<td class='num fail'>$totalFail</td>"
-$html += "<td class='num crit'>$totalCrit</td>"
-$html += "<td class='num warn'>$totalWarn</td>"
-$html += "<td class='num'>$(($report | Measure-Object -Property Info -Sum).Sum)</td></tr>"
-$html += "</tbody></table></div>"
 
-# Table of contents (only useful for multi-DB reports)
-if (@($report).Count -gt 1) {
-    $html += "<div class='toc'><h2 style='margin-top:0;border:none;'>Sections</h2><ul>"
-    foreach ($r in $report) {
-        $anchor = ($r.Name -replace '[^A-Za-z0-9]', '_')
-        $html += "<li><a href='#db_$anchor'>$([System.Web.HttpUtility]::HtmlEncode($r.Name))</a></li>"
+[System.IO.File]::WriteAllText($HtmlPath, $html, (New-Object System.Text.UTF8Encoding $true))
+
+$pdfMade = $false
+$pdfPath = $null
+if (-not $NoPdf) {
+    $pdfPath = if ($OutFile -like '*.pdf') { $OutFile } else { [System.IO.Path]::ChangeExtension($OutFile, 'pdf') }
+    $pdfMade = Convert-HtmlToPdf -Html $HtmlPath -Pdf $pdfPath
+    if ($pdfMade -and -not $KeepHtml -and ($HtmlPath -ne $OutFile)) {
+        Remove-Item $HtmlPath -ErrorAction SilentlyContinue
     }
-    $html += "</ul></div>"
 }
-
-# Per-database sections
-foreach ($r in $report) {
-    $anchor = ($r.Name -replace '[^A-Za-z0-9]', '_')
-    $html += "<section class='db' id='db_$anchor'>"
-    $html += "<h3>$([System.Web.HttpUtility]::HtmlEncode($r.Name))</h3>"
-    $html += "<div class='meta'>Logs: <code>$([System.Web.HttpUtility]::HtmlEncode($r.LogDir))</code></div>"
-    $html += "<div class='meta'>Scripts run: $($r.Passed + $r.Failed) | OK: $($r.Passed) | Failed: $($r.Failed)</div>"
-    $html += (Convert-FindingsToHtml $r.Findings)
-    $html += "</section>"
-}
-
-$html += "</body></html>"
-
-# Write file (UTF-8 with BOM so browsers detect encoding correctly on Windows)
-$utf8Bom = New-Object System.Text.UTF8Encoding $true
-[System.IO.File]::WriteAllText($OutFile, $html, $utf8Bom)
 
 Write-Host ""
-Write-Host "================================================================================"
-Write-Host "Performance audit analysis complete."
-Write-Host "  Databases analyzed : $(@($report).Count)"
-Write-Host "  Critical findings  : $totalCrit"
-Write-Host "  Warnings           : $totalWarn"
-Write-Host "  Failed scripts     : $totalFail"
-Write-Host "  Report             : $OutFile"
-Write-Host "================================================================================"
+Write-Host ("=" * 80)
+Write-Host "Performance audit report generated."
+Write-Host "  Databases analyzed   : $dbCount"
+Write-Host "  Critical findings    : $totalCrit"
+Write-Host "  Warning findings     : $totalWarn"
+Write-Host "  Info findings        : $totalInfo"
+Write-Host "  Failed scripts       : $totalFail"
+Write-Host "  Server-wide findings : $(@($serverFindings).Count)"
+Write-Host "  Database findings    : $(@($dbFindings).Count)"
+if ($NoPdf)            { Write-Host "  Report (HTML)        : $HtmlPath" }
+elseif ($pdfMade)      { Write-Host "  Report (PDF)         : $pdfPath"; if ($KeepHtml) { Write-Host "  Report (HTML)        : $HtmlPath" } }
+else                   { Write-Host "  Report (HTML only)   : $HtmlPath  (Edge headless not available)" }
+Write-Host ("=" * 80)

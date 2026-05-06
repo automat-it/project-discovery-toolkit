@@ -32,22 +32,39 @@ powershell -ExecutionPolicy Bypass -File .\run_audit.ps1 -Server "sql-server.int
 
 ## Report analyzer (`analyze_report.ps1`)
 
-After a run completes, parse the report folder into a customer-friendly
-HTML summary that highlights potential security issues across all databases:
+Generates a **consultant-grade PDF** report (HTML intermediate) with:
+
+* Cover page (server, customer, severity donut chart)
+* Environment fingerprint (auth mode, sysadmin count, audit status)
+* Executive summary (KPIs + findings-by-domain bar chart)
+* **Server-wide findings** (deduplicated, instance-level)
+* **Database fleet rollup** ("X of N databases affected")
+* **Top-N inventories** -- privileged accounts, weak-password logins,
+  PII columns extracted from sec_03 / sec_05 / sec_09 logs
+* **Compliance mapping** (CIS Benchmark, GDPR Art.32, SOC2, HIPAA, PCI DSS)
+* **Phased remediation roadmap** (Week 1-2 / 3-6 / 7-12)
+* T-SQL remediation snippets (executable, with placeholders)
+* Per-database appendix
+* Glossary (sysadmin, TDE, Always Encrypted, DDM, ...)
+* Branded watermark
 
 ```powershell
-# Multi-database report
+# Default: produces sec_analysis.pdf
 .\analyze_report.ps1 -ReportDir "C:\reports\mssql_audit_all_20260429_230243" `
-                     -ServerName "sql-server.internal"
+                     -ServerName "sql-server.internal" -Customer "ACME Corp"
 
-# Single-database report
-.\analyze_report.ps1 -ReportDir "C:\reports\mssql_sec_20260430_010000"
+# HTML only
+.\analyze_report.ps1 -ReportDir "..." -NoPdf
+
+# Keep both PDF and HTML
+.\analyze_report.ps1 -ReportDir "..." -KeepHtml
+
+# Custom branding
+.\analyze_report.ps1 -ReportDir "..." -Brand "Your Company"
 ```
 
-The analyzer writes `sec_analysis.html` into the report folder. The HTML
-contains an executive-summary table (counts of Critical / Warning / Info
-findings per database) plus a section per database with the matched
-findings, severity, and remediation hints.
+PDF is rendered via **Microsoft Edge headless** (ships with every modern
+Windows install). If Edge is not found, the analyzer falls back to HTML.
 
 Output layout:
 

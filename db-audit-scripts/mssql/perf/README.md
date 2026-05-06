@@ -32,7 +32,7 @@ powershell -ExecutionPolicy Bypass -File .\run_audit.ps1 -Server "sql-server.int
 
 ## Report analyzer (`analyze_report.ps1`)
 
-Generates a **consultant-grade PDF** report (HTML intermediate) with:
+Generates a **PDF file** report (HTML intermediate) with:
 
 * Cover page (server, customer, severity donut chart)
 * Environment fingerprint (edition, build, CPU, RAM, uptime, AG state)
@@ -45,7 +45,6 @@ Generates a **consultant-grade PDF** report (HTML intermediate) with:
 * T-SQL remediation snippets (executable, with placeholders)
 * Per-database appendix
 * Glossary (wait types, DMV terms)
-* Branded watermark
 
 ```powershell
 # Default: produces perf_analysis.pdf

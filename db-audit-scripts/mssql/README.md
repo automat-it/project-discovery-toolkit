@@ -113,7 +113,7 @@ reports\
 ## Report analyzer (`perf/analyze_report.ps1`, `sec/analyze_report.ps1`)
 
 After a run completes, the analyzer turns the raw log folder into a
-**consultant-grade PDF deliverable**. Two analyzers — one per audit
+**PDF file**. Two analyzers — one per audit
 category. Each produces a single multi-page report covering every
 database in the run:
 
@@ -142,8 +142,8 @@ database in the run:
   reference
 * **Glossary appendix** — wait types, DMV terms, encryption
   primitives for non-DBA readers
-* **Branded watermark** — configurable via `-Brand` (default
-  `Automat-it`)
+* **Title page** — green Automat-it band with logo, AWS Partner Network
+  badge, customer name, server, generation date
 
 ```powershell
 cd db-audit-scripts\mssql
@@ -160,7 +160,7 @@ cd db-audit-scripts\mssql
 # Keep both PDF and the intermediate HTML
 .\perf\analyze_report.ps1 -ReportDir "..." -KeepHtml
 
-# Custom branding text in footer
+# Custom cover-page brand text (default 'Automat-it')
 .\perf\analyze_report.ps1 -ReportDir "..." -Brand "Your Company"
 
 # Custom output path

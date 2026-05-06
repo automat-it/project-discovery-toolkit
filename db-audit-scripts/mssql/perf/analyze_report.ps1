@@ -372,8 +372,8 @@ function Convert-SeveritySectionToHtml {
             $hits += [pscustomobject]@{ Name=$r.Name; Findings=$list }
         }
     }
-    $total = ($hits | Measure-Object -Property @{Expression={@($_.Findings).Count}} -Sum).Sum
-    if ($null -eq $total) { $total = 0 }
+    $total = 0
+    foreach ($h in $hits) { $total += @($h.Findings).Count }
     $html = "<section class='severity sev-$sevClass'>"
     $html += "<h2 class='sev-h2 sev-$sevClass'><span class='badge $sevClass'>$Severity</span> $Severity Findings <span class='count'>($total total across $(@($hits).Count) database(s))</span></h2>"
     if ($hits.Count -eq 0) {

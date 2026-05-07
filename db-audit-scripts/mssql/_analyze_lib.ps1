@@ -376,21 +376,64 @@ function Get-ChromiumBrowser {
     return $null
 }
 
+# Wait up to $TimeoutSeconds for the PDF file to appear AND its size
+# to stabilise. Chromium with the legacy --headless flag occasionally
+# returns from the parent process before the renderer has flushed the
+# PDF to disk; an immediate Test-Path then misses it.
+function _Wait-ForPdf {
+    param([string]$Pdf, [int]$TimeoutSeconds = 15)
+    $deadline = (Get-Date).AddSeconds($TimeoutSeconds)
+    $lastSize = -1
+    while ((Get-Date) -lt $deadline) {
+        if (Test-Path -LiteralPath $Pdf) {
+            $sz = (Get-Item -LiteralPath $Pdf).Length
+            if ($sz -gt 0 -and $sz -eq $lastSize) { return $true }
+            $lastSize = $sz
+        }
+        Start-Sleep -Milliseconds 250
+    }
+    return (Test-Path -LiteralPath $Pdf)
+}
+
 function Convert-HtmlToPdf {
     param([string]$Html, [string]$Pdf)
     $abs = (Resolve-Path -LiteralPath $Html).Path
     $uri = ([System.Uri]$abs).AbsoluteUri
     Write-Host 'PDF: trying conversion methods...'
+    if (Test-Path -LiteralPath $Pdf) { Remove-Item -LiteralPath $Pdf -Force -ErrorAction SilentlyContinue }
 
     $browser = Get-ChromiumBrowser
     if ($browser) {
         Write-Host "PDF:   trying $browser"
+        # Unique --user-data-dir so an already-running browser instance
+        # cannot IPC-handle the --print-to-pdf request and detach the
+        # launcher, plus -Wait via Start-Process so we synchronously
+        # block until the renderer exits and the file is on disk.
+        $tmpProfile = Join-Path $env:TEMP ("_audit_pdf_" + [guid]::NewGuid().ToString('N'))
+        $errLog     = Join-Path $env:TEMP ("_audit_chr_" + [guid]::NewGuid().ToString('N') + '.log')
+        $args = @(
+            '--headless', '--disable-gpu', '--no-pdf-header-footer',
+            '--no-first-run', '--no-default-browser-check', '--disable-extensions',
+            "--user-data-dir=$tmpProfile",
+            "--print-to-pdf=$Pdf",
+            $uri
+        )
         $prevEAP = $ErrorActionPreference; $ErrorActionPreference = 'Continue'
         try {
-            & $browser --headless --disable-gpu --no-pdf-header-footer --print-to-pdf="$Pdf" $uri *>$null
+            # Redirect ONLY stderr so Start-Process does not refuse
+            # 'identical paths' validation; chromium does not produce
+            # interesting stdout in headless mode.
+            Start-Process -FilePath $browser -ArgumentList $args `
+                          -Wait -NoNewWindow `
+                          -RedirectStandardError $errLog | Out-Null
         } catch {
+            Write-Verbose "Chromium launch raised: $($_.Exception.Message)"
         } finally { $ErrorActionPreference = $prevEAP }
-        if (Test-Path $Pdf) { Write-Host "PDF: rendered via $(Split-Path -Leaf $browser)"; return $true }
+
+        $ok = _Wait-ForPdf -Pdf $Pdf -TimeoutSeconds 15
+        Remove-Item -LiteralPath $tmpProfile -Recurse -Force -ErrorAction SilentlyContinue
+        Remove-Item -LiteralPath $errLog -Force -ErrorAction SilentlyContinue
+        if ($ok) { Write-Host "PDF: rendered via $(Split-Path -Leaf $browser)"; return $true }
     }
 
     $wk = Get-Command wkhtmltopdf -ErrorAction SilentlyContinue
@@ -400,9 +443,16 @@ function Convert-HtmlToPdf {
     }
     if ($wk) {
         Write-Host 'PDF:   trying wkhtmltopdf'
+        $errLog = Join-Path $env:TEMP ("_audit_wk_" + [guid]::NewGuid().ToString('N') + '.log')
         $prevEAP = $ErrorActionPreference; $ErrorActionPreference = 'Continue'
-        try { & $wk.Path --quiet --enable-local-file-access $abs $Pdf *>$null } catch {} finally { $ErrorActionPreference = $prevEAP }
-        if (Test-Path $Pdf) { Write-Host 'PDF: rendered via wkhtmltopdf'; return $true }
+        try {
+            Start-Process -FilePath $wk.Path `
+                          -ArgumentList @('--quiet','--enable-local-file-access',$abs,$Pdf) `
+                          -Wait -NoNewWindow `
+                          -RedirectStandardError $errLog | Out-Null
+        } catch {} finally { $ErrorActionPreference = $prevEAP }
+        Remove-Item -LiteralPath $errLog -Force -ErrorAction SilentlyContinue
+        if (_Wait-ForPdf -Pdf $Pdf -TimeoutSeconds 10) { Write-Host 'PDF: rendered via wkhtmltopdf'; return $true }
     }
 
     try {
@@ -415,6 +465,13 @@ function Convert-HtmlToPdf {
         [void][System.Runtime.InteropServices.Marshal]::ReleaseComObject($word)
         if (Test-Path $Pdf) { Write-Host 'PDF: rendered via Microsoft Word'; return $true }
     } catch {}
+
+    # Final defensive check -- if a renderer wrote the PDF asynchronously
+    # while we were trying fallbacks, treat it as success.
+    if (Test-Path -LiteralPath $Pdf) {
+        Write-Host 'PDF: file present (rendered asynchronously)'
+        return $true
+    }
 
     Write-Warning "Could not render PDF (no Edge/Chrome/Chromium/Brave/wkhtmltopdf/Word found). HTML kept at $Html."
     return $false

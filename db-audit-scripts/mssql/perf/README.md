@@ -30,50 +30,71 @@ $env:SQLCMDPASSWORD = "s3cr3t"
 powershell -ExecutionPolicy Bypass -File .\run_audit.ps1 -Server "sql-server.internal" -Category perf
 ```
 
-## Report analyzer (`analyze_report.ps1`)
+## Report analyzer (`perf\analyze_report.ps1`)
 
-Generates a **PDF file** report (HTML intermediate) with:
+After a run completes, the analyzer turns the raw `.log` folder into a
+single multi-page **PDF report** covering every database in the run:
 
-* Cover page (server, customer, severity donut chart)
-* Environment fingerprint (edition, build, CPU, RAM, uptime, AG state)
-* Executive summary (KPIs + findings-by-domain bar chart)
-* **Server-wide findings** (deduplicated, instance-level)
-* **Database fleet rollup** ("X of N databases affected")
-* Backup-freshness alert (databases > 72h since last full backup)
-* **Compliance mapping** (CIS, GDPR Art.32, SOC2)
-* **Phased remediation roadmap** (Week 1-2 / 3-6 / 7-12)
-* T-SQL remediation snippets (executable, with placeholders)
+* Cover page — server, customer, severity donut chart, generation date
+* Environment fingerprint — edition, build, CPU, RAM, uptime, collation, AG state
+* Executive summary — KPI cards + findings-by-domain bar chart
+* **Server-wide findings** — instance-level issues, deduplicated
+* **Database fleet rollup** — "X of N databases affected"
+* Backup-freshness alert — databases > 72h since last full backup
+* **Compliance mapping** — CIS Benchmark, GDPR Art.32, SOC2
+* **Phased remediation roadmap** — Phase 1 (Week 1-2, Critical),
+  Phase 2 (Week 3-6, Warning), Phase 3 (Week 7-12, hardening)
+* T-SQL remediation snippets — executable, with placeholders
 * Per-database appendix
-* Glossary (wait types, DMV terms)
+* Glossary appendix — wait types, DMV terms
 
 ```powershell
-# Default: produces perf_analysis.pdf
-.\analyze_report.ps1 -ReportDir "C:\reports\mssql_audit_all_20260429_230243" `
-                     -ServerName "sql-server.internal" -Customer "ACME Corp"
+cd db-audit-scripts\mssql
 
-# HTML only (skip PDF)
-.\analyze_report.ps1 -ReportDir "..." -NoPdf
+# Default: produces perf_analysis.pdf inside the report folder
+.\perf\analyze_report.ps1 -ReportDir "C:\reports\mssql_audit_all_YYYYMMDD_HHMMSS" `
+                          -ServerName "sql-server.internal" -Customer "ACME Corp"
 
-# Keep both PDF and HTML
-.\analyze_report.ps1 -ReportDir "..." -KeepHtml
+# HTML only (skip PDF — opens in any browser)
+.\perf\analyze_report.ps1 -ReportDir "..." -NoPdf
 
-# Custom branding
-.\analyze_report.ps1 -ReportDir "..." -Brand "Your Company"
+# Keep both PDF and the intermediate HTML
+.\perf\analyze_report.ps1 -ReportDir "..." -KeepHtml
+
+# Custom cover-page brand text (default 'Automat-it')
+.\perf\analyze_report.ps1 -ReportDir "..." -Brand "Your Company"
+
+# Custom output path
+.\perf\analyze_report.ps1 -ReportDir "..." -OutFile "C:\reports\client_perf.pdf"
 ```
 
 ### PDF rendering pipeline
 
-PDF is produced even when Microsoft Edge is not installed. The analyzer
-tries the following methods in order:
+The analyzer tries the following methods in order — the first one
+available wins:
 
-1. Microsoft Edge headless (`msedge.exe --headless --print-to-pdf`)
-2. Google Chrome / Chromium / Brave headless (Program Files, x86, LocalAppData)
-3. `wkhtmltopdf` in PATH or `Program Files\wkhtmltopdf\bin\`
-4. Microsoft Word COM (`SaveAs2 wdFormatPDF=17`) -- ships with Office
-5. HTML only -- if none of the above is available
+1. **Microsoft Edge headless** (`msedge.exe --headless --print-to-pdf`)
+   — preinstalled on every modern Windows.
+2. **Google Chrome / Chromium / Brave** headless — searched in
+   `Program Files`, `Program Files (x86)`, and `LocalAppData`.
+3. **wkhtmltopdf** — in `PATH` or `Program Files\wkhtmltopdf\bin\`.
+4. **Microsoft Word COM** (`SaveAs2 wdFormatPDF=17`) — ships with Office.
+5. **HTML only** — if none of the above is available, the HTML file is
+   kept next to where the PDF would have been.
 
 The method that succeeded is logged on stdout
 (`PDF: rendered via msedge.exe`).
+
+The chromium-based path uses a unique temporary profile and polls the
+output file until its size stabilises, so it works even when Chrome
+is already running on the machine.
+
+### Brand assets
+
+`..\assets\ait_bg_cover.png` is the cover-page background;
+`..\assets\ait_bg_page.png` is the per-page watermark. The analyzer
+copies both files next to the HTML before rendering. Replace these
+files in place to rebrand without editing PowerShell.
 
 Output layout:
 

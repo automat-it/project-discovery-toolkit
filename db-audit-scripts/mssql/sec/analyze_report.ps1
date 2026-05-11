@@ -64,17 +64,24 @@ function Get-ServerFingerprint {
         AuditsConfigured = $null; AuditsRunning = $null; HostName = '(unknown)'
     }
     if (-not $ServerLogDir) { return [pscustomobject]$fp }
+
     $log05 = Find-LogFile $ServerLogDir 'sec_05_authentication'
     if ($log05) {
-        $t = Get-LogText $log05.FullName
-        if ($t -match '(?im)authentication_mode\s*\n[\s\-]+\n([^\n]+)') { $fp.AuthMode = $matches[1].Trim() }
+        $v = Get-ColumnValue $log05.FullName @('authentication_mode')
+        if ($v) { $fp.AuthMode = $v }
     }
     $log06 = Find-LogFile $ServerLogDir 'sec_06_audit_logging'
     if ($log06) {
-        $t = Get-LogText $log06.FullName
-        if ($t -match '(?im)server_audits_defined\s+server_audits_running[^\n]*\n[\s\-]+\n[^\n]*?(\d+)\s+(\d+)') {
-            $fp.AuditsConfigured = [int]$matches[1]
-            $fp.AuditsRunning    = [int]$matches[2]
+        $sets = Get-LogResultSets $log06.FullName
+        if ($sets -and $sets.Count -ge 1) { $fp.AuditsConfigured = [int]$sets[0].Rows.Length }
+        if ($sets -and $sets.Count -ge 2) {
+            $running = 0
+            foreach ($row in $sets[1].Rows) {
+                $status = [string]$row.status_desc
+                if (-not $status) { $status = [string]$row.'status_desc' }
+                if ($status -match '(?i)started|running|on') { $running++ }
+            }
+            $fp.AuditsRunning = $running
         }
     }
     $log03 = Find-LogFile $ServerLogDir 'sec_03_admin_and_superusers'
@@ -489,14 +496,33 @@ $srvLabel = if ($ServerName) { Esc $ServerName } else { '(unspecified)' }
 $custHtml = if ($Customer)   { Esc $Customer }   else { '' }
 Add-To $sb "<section class='cover'><div class='cover-content'><h1>SQL Server Security Audit Report</h1><div class='sub'>$custHtml</div><div class='meta'><strong>Server:</strong> $srvLabel &nbsp;&middot;&nbsp; <strong>$dbCount</strong> databases analyzed</div><div class='date'>$now</div></div></section>"
 
+# Executive summary -- placed first so readers see the high-level
+# picture (counts, severity mix, domain breakdown) before any details.
+Add-To $sb "<section class='section firstaftercov'><h2>1. Executive Summary</h2>"
+Add-To $sb "<p>Snapshot of this audit: how many databases were analysed, the severity mix of findings, and which security domains drove the count.</p>"
+Add-To $sb "<div class='exec'>"
+Add-To $sb "<div class='kpi'><div class='lbl'>Databases analyzed</div><div class='num'>$dbCount</div></div>"
+Add-To $sb "<div class='kpi'><div class='lbl'>Critical findings</div><div class='num crit'>$totalCrit</div></div>"
+Add-To $sb "<div class='kpi'><div class='lbl'>Warning findings</div><div class='num warn'>$totalWarn</div></div>"
+Add-To $sb "<div class='kpi'><div class='lbl'>Info findings</div><div class='num'>$totalInfo</div></div>"
+Add-To $sb "<div class='kpi'><div class='lbl'>Failed scripts</div><div class='num fail'>$totalFail</div></div>"
+Add-To $sb "</div>"
+Add-To $sb "<div style='display:flex;gap:20px;align-items:flex-start;flex-wrap:wrap'>"
+Add-To $sb "<div>$donut</div>"
+Add-To $sb "<div style='flex:1;min-width:320px'><h3 style='margin-top:0'>Findings by Domain</h3>$domainBarSvg</div>"
+Add-To $sb "</div></section>"
+
 # Fingerprint
-Add-To $sb "<section class='section firstaftercov'><h2>1. Environment Fingerprint</h2>"
+Add-To $sb "<section class='section'><h2>2. Environment Fingerprint</h2>"
 if ($fingerprint) {
+    $sysTxt = if ($null -ne $fingerprint.SysadminMembers) { $fingerprint.SysadminMembers } else { '(unknown)' }
+    $cfgTxt = if ($null -ne $fingerprint.AuditsConfigured) { $fingerprint.AuditsConfigured } else { '(unknown)' }
+    $runTxt = if ($null -ne $fingerprint.AuditsRunning)   { $fingerprint.AuditsRunning }   else { '(unknown)' }
     Add-To $sb "<dl class='fp'>"
     Add-To $sb "<dt>Authentication mode</dt><dd>$(Esc $fingerprint.AuthMode)</dd>"
-    Add-To $sb "<dt>Sysadmin members</dt><dd>$(Esc $fingerprint.SysadminMembers)</dd>"
-    Add-To $sb "<dt>Server audits configured</dt><dd>$(Esc $fingerprint.AuditsConfigured)</dd>"
-    Add-To $sb "<dt>Server audits running</dt><dd>$(Esc $fingerprint.AuditsRunning)</dd>"
+    Add-To $sb "<dt>Sysadmin members</dt><dd>$sysTxt</dd>"
+    Add-To $sb "<dt>Server audits configured</dt><dd>$cfgTxt</dd>"
+    Add-To $sb "<dt>Server audits running</dt><dd>$runTxt</dd>"
     Add-To $sb "<dt>Databases counted</dt><dd>$dbCount</dd>"
     Add-To $sb "</dl>"
     if ($fingerprint.AuthMode -match '(?i)mixed') {
@@ -509,15 +535,6 @@ if ($fingerprint) {
     Add-To $sb "<div class='note'>Server fingerprint not available -- _server context did not produce sec_* output.</div>"
 }
 Add-To $sb "</section>"
-
-# Executive summary
-Add-To $sb "<section class='section'><h2>2. Executive Summary</h2><div class='exec'>"
-Add-To $sb "<div class='kpi'><div class='lbl'>Databases analyzed</div><div class='num'>$dbCount</div></div>"
-Add-To $sb "<div class='kpi'><div class='lbl'>Critical findings</div><div class='num crit'>$totalCrit</div></div>"
-Add-To $sb "<div class='kpi'><div class='lbl'>Warning findings</div><div class='num warn'>$totalWarn</div></div>"
-Add-To $sb "<div class='kpi'><div class='lbl'>Info findings</div><div class='num'>$totalInfo</div></div>"
-Add-To $sb "<div class='kpi'><div class='lbl'>Failed scripts</div><div class='num fail'>$totalFail</div></div>"
-Add-To $sb "</div><h3>Findings by Domain</h3>$domainBarSvg</section>"
 
 # Server-wide findings
 Add-To $sb "<section class='section'><h2>3. Server-Wide Findings</h2>"

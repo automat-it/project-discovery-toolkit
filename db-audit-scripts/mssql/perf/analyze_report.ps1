@@ -92,19 +92,39 @@ function Get-ServerFingerprint {
     if (-not $ServerLogDir) { return [pscustomobject]$fp }
     $log = Find-LogFile $ServerLogDir 'perf_05_configuration_snapshot'
     if (-not $log) { return [pscustomobject]$fp }
-    $text = Get-LogText $log.FullName
-    if ($text -match '(?im)Edition\s*\n[\s\-]+\n([^\n]+)')             { $fp.Edition        = $matches[1].Trim() }
-    if ($text -match '(?im)ProductVersion\s*\n[\s\-]+\n([^\n]+)')     { $fp.ProductVersion = $matches[1].Trim() }
-    if ($text -match '(?im)ProductLevel\s*\n[\s\-]+\n([^\n]+)')       { $fp.ProductLevel   = $matches[1].Trim() }
-    if ($text -match '(?im)Collation\s*\n[\s\-]+\n([^\n]+)')          { $fp.Collation      = $matches[1].Trim() }
-    if ($text -match '(?im)host_name\s*\n[\s\-]+\n([^\n]+)')          { $fp.HostName       = $matches[1].Trim() }
-    if ($text -match '(?im)cpu_count\s*\n[\s\-]+\n\s*(\d+)')          { $fp.PhysicalCPUs   = $matches[1] }
-    if ($text -match '(?im)physical_memory_kb\s*\n[\s\-]+\n\s*(\d+)') { $fp.TotalMemoryMB  = [int]([int64]$matches[1] / 1024) }
-    if ($text -match '(?im)sqlserver_start_time\s*\n[\s\-]+\n([^\n]+)') {
-        $fp.SqlStartTime = $matches[1].Trim()
-        try { $fp.UptimeDays = [math]::Round(((Get-Date) - [datetime]::Parse($fp.SqlStartTime)).TotalDays, 1) } catch {}
+
+    # perf_05 result-set layout (sqlcmd horizontal output, parsed by Get-LogResultSets):
+    #   set 0: edition, version, patch_level, engine_edition, server_collation,
+    #          is_clustered, is_hadr_enabled, full_text_installed, machine_name, server_name
+    #   set 1: cpu_count, hyperthread_ratio, physical_memory_gb, committed_gb,
+    #          committed_target_gb, max_workers_count, scheduler_count, sqlserver_start_time
+    $logPath = $log.FullName
+    $v = Get-ColumnValue $logPath @('edition');                          if ($v) { $fp.Edition        = $v }
+    $v = Get-ColumnValue $logPath @('version','product_version');        if ($v) { $fp.ProductVersion = $v }
+    $v = Get-ColumnValue $logPath @('patch_level','product_level');      if ($v) { $fp.ProductLevel   = $v }
+    $v = Get-ColumnValue $logPath @('server_collation','collation');     if ($v) { $fp.Collation      = $v }
+    $v = Get-ColumnValue $logPath @('machine_name','host_name','server_name')
+    if ($v) { $fp.HostName = $v }
+    $v = Get-ColumnValue $logPath @('cpu_count');                        if ($v) { $fp.PhysicalCPUs   = $v }
+    $v = Get-ColumnValue $logPath @('physical_memory_gb')
+    if ($v) {
+        try { $fp.TotalMemoryMB = [int]([double]::Parse($v, [Globalization.CultureInfo]::InvariantCulture) * 1024) } catch {}
+    } else {
+        $v = Get-ColumnValue $logPath @('physical_memory_kb')
+        if ($v) { try { $fp.TotalMemoryMB = [int]([int64]$v / 1024) } catch {} }
     }
-    if ($text -match '(?im)is_hadr_enabled\s*\n[\s\-]+\n\s*(\d+)') { $fp.IsHadrEnabled = ($matches[1] -eq '1') }
+    $v = Get-ColumnValue $logPath @('sqlserver_start_time')
+    if ($v) {
+        $fp.SqlStartTime = $v
+        try {
+            $dt = [datetime]::Parse($v, [Globalization.CultureInfo]::InvariantCulture)
+            $fp.UptimeDays = [math]::Round(((Get-Date) - $dt).TotalDays, 1)
+        } catch {}
+    }
+    $v = Get-ColumnValue $logPath @('is_hadr_enabled')
+    if ($null -ne $v -and $v -ne '') {
+        $fp.IsHadrEnabled = if ($v -eq '1') { 'Enabled' } elseif ($v -eq '0') { 'Not enabled' } else { $v }
+    }
     return [pscustomobject]$fp
 }
 
@@ -400,10 +420,27 @@ $srvLabel = if ($ServerName) { Esc $ServerName } else { '(unspecified)' }
 $custHtml = if ($Customer)   { Esc $Customer }   else { '' }
 Add-To $sb "<section class='cover'><div class='cover-content'><h1>SQL Server Performance Audit Report</h1><div class='sub'>$custHtml</div><div class='meta'><strong>Server:</strong> $srvLabel &nbsp;&middot;&nbsp; <strong>$dbCount</strong> databases analyzed</div><div class='date'>$now</div></div></section>"
 
+# Executive summary -- placed first so readers see the high-level
+# picture (counts, severity mix, domain breakdown) before any details.
+Add-To $sb "<section class='section firstaftercov'><h2>1. Executive Summary</h2>"
+Add-To $sb "<p>Snapshot of this audit: how many databases were analysed, the severity mix of findings, and which functional areas drove the count.</p>"
+Add-To $sb "<div class='exec'>"
+Add-To $sb "<div class='kpi'><div class='lbl'>Databases analyzed</div><div class='num'>$dbCount</div></div>"
+Add-To $sb "<div class='kpi'><div class='lbl'>Critical findings</div><div class='num crit'>$totalCrit</div></div>"
+Add-To $sb "<div class='kpi'><div class='lbl'>Warning findings</div><div class='num warn'>$totalWarn</div></div>"
+Add-To $sb "<div class='kpi'><div class='lbl'>Info findings</div><div class='num'>$totalInfo</div></div>"
+Add-To $sb "<div class='kpi'><div class='lbl'>Failed scripts</div><div class='num fail'>$totalFail</div></div>"
+Add-To $sb "</div>"
+Add-To $sb "<div style='display:flex;gap:20px;align-items:flex-start;flex-wrap:wrap'>"
+Add-To $sb "<div>$donut</div>"
+Add-To $sb "<div style='flex:1;min-width:320px'><h3 style='margin-top:0'>Findings by Domain</h3>$domainBarSvg</div>"
+Add-To $sb "</div></section>"
+
 # Fingerprint
-Add-To $sb "<section class='section firstaftercov'><h2>1. Environment Fingerprint</h2>"
+Add-To $sb "<section class='section'><h2>2. Environment Fingerprint</h2>"
 if ($fingerprint) {
     $up = if ($fingerprint.UptimeDays) { "$($fingerprint.UptimeDays) days" } else { '(unknown)' }
+    $memTxt = if ($fingerprint.TotalMemoryMB -is [int]) { "{0:N0} MB" -f $fingerprint.TotalMemoryMB } else { '(unknown)' }
     Add-To $sb "<dl class='fp'>"
     Add-To $sb "<dt>Edition</dt><dd>$(Esc $fingerprint.Edition)</dd>"
     Add-To $sb "<dt>Product Version</dt><dd>$(Esc $fingerprint.ProductVersion)</dd>"
@@ -411,7 +448,7 @@ if ($fingerprint) {
     Add-To $sb "<dt>Host Name</dt><dd>$(Esc $fingerprint.HostName)</dd>"
     Add-To $sb "<dt>Server Collation</dt><dd>$(Esc $fingerprint.Collation)</dd>"
     Add-To $sb "<dt>CPU Cores</dt><dd>$(Esc $fingerprint.PhysicalCPUs)</dd>"
-    Add-To $sb "<dt>Total Memory</dt><dd>$(Esc $fingerprint.TotalMemoryMB) MB</dd>"
+    Add-To $sb "<dt>Total Memory</dt><dd>$memTxt</dd>"
     Add-To $sb "<dt>SQL Start Time</dt><dd>$(Esc $fingerprint.SqlStartTime)</dd>"
     Add-To $sb "<dt>Uptime</dt><dd>$(Esc $up)</dd>"
     Add-To $sb "<dt>AlwaysOn AG</dt><dd>$(Esc $fingerprint.IsHadrEnabled)</dd>"
@@ -424,15 +461,6 @@ if ($fingerprint) {
     Add-To $sb "<div class='note'>Server fingerprint not available -- the _server context did not produce perf_05 output.</div>"
 }
 Add-To $sb "</section>"
-
-# Executive summary
-Add-To $sb "<section class='section'><h2>2. Executive Summary</h2><div class='exec'>"
-Add-To $sb "<div class='kpi'><div class='lbl'>Databases analyzed</div><div class='num'>$dbCount</div></div>"
-Add-To $sb "<div class='kpi'><div class='lbl'>Critical findings</div><div class='num crit'>$totalCrit</div></div>"
-Add-To $sb "<div class='kpi'><div class='lbl'>Warning findings</div><div class='num warn'>$totalWarn</div></div>"
-Add-To $sb "<div class='kpi'><div class='lbl'>Info findings</div><div class='num'>$totalInfo</div></div>"
-Add-To $sb "<div class='kpi'><div class='lbl'>Failed scripts</div><div class='num fail'>$totalFail</div></div>"
-Add-To $sb "</div><h3>Findings by Domain</h3>$domainBarSvg</section>"
 
 # Server-wide findings
 Add-To $sb "<section class='section'><h2>3. Server-Wide Findings</h2>"

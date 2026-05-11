@@ -188,6 +188,43 @@ function Find-LogFile {
         Select-Object -First 1
 }
 
+# Look up a column value across the parsed result sets of a log file.
+# Column names are matched case-insensitively after stripping spaces /
+# underscores, so 'cpu_count', 'CPU Count', and 'cpucount' all match.
+# Returns the first non-empty value found, or $null.
+function Get-ColumnValue {
+    param(
+        [string]$LogPath,
+        [string[]]$ColumnAliases,
+        [int]$SetIndex = -1   # -1 = search all sets; otherwise restrict to one set
+    )
+    if (-not (Test-Path $LogPath)) { return $null }
+    $sets = Get-LogResultSets $LogPath
+    if (-not $sets -or $sets.Count -eq 0) { return $null }
+    $aliasNorm = New-Object System.Collections.Generic.List[string]
+    foreach ($a in $ColumnAliases) {
+        $n = ($a -replace '[\s_]', '').ToLowerInvariant()
+        if ($n) { [void]$aliasNorm.Add($n) }
+    }
+    $setStart = if ($SetIndex -ge 0) { $SetIndex } else { 0 }
+    $setEnd   = if ($SetIndex -ge 0) { $SetIndex } else { $sets.Count - 1 }
+    for ($si = $setStart; $si -le $setEnd; $si++) {
+        if ($si -ge $sets.Count) { continue }
+        $set = $sets[$si]
+        if (-not $set.Columns) { continue }
+        for ($ci = 0; $ci -lt $set.Columns.Length; $ci++) {
+            $cnorm = ([string]$set.Columns[$ci] -replace '[\s_]', '').ToLowerInvariant()
+            if ($aliasNorm.Contains($cnorm)) {
+                foreach ($row in $set.Rows) {
+                    $v = [string]$row.($set.Columns[$ci])
+                    if ($v -and $v.Trim()) { return $v.Trim() }
+                }
+            }
+        }
+    }
+    return $null
+}
+
 function Test-LogHasDataRows {
     param([string]$LogPath)
     foreach ($s in (Get-LogResultSets $LogPath)) { if ($s.Rows -and $s.Rows.Length -gt 0) { return $true } }

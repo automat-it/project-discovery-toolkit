@@ -401,7 +401,16 @@ foreach ($r in $report) {
     }
 }
 $aggregated = @($titleAgg.Values | Sort-Object _Rank, Title)
-foreach ($a in $aggregated) { $a.UniqueDbsCached = @($a.Databases | Sort-Object -Unique) }
+$anchorSeen = @{}
+foreach ($a in $aggregated) {
+    $a.UniqueDbsCached = @($a.Databases | Sort-Object -Unique)
+    $slug = New-Slug "$($a.Severity)-$($a.Scope)-$($a.Title)"
+    if ($anchorSeen.ContainsKey($slug)) {
+        $anchorSeen[$slug]++
+        $slug = "$slug-$($anchorSeen[$slug])"
+    } else { $anchorSeen[$slug] = 1 }
+    Add-Member -InputObject $a -NotePropertyName Anchor -NotePropertyValue "f-$slug" -Force
+}
 $serverFindings = @($aggregated | Where-Object { $_.Scope -eq 'Server'   })
 $dbFindings     = @($aggregated | Where-Object { $_.Scope -eq 'Database' })
 
@@ -481,6 +490,14 @@ tr.sev-info    >td:first-child{border-left:4px solid #2980b9}
 .alert{background:#fdecea;border-left:4px solid #c0392b;padding:10px 14px;margin:8px 0;border-radius:4px}
 .note {background:#fff8e1;border-left:4px solid #e67e22;padding:10px 14px;margin:8px 0;border-radius:4px}
 .ok   {color:#27ae60;font-weight:600;font-style:italic}
+.issue-list{list-style:none;padding:0;margin:6px 0 0}
+.issue-list li{background:rgba(255,255,255,0.92);border-left:4px solid #c0392b;border-radius:4px;padding:8px 12px;margin:6px 0;page-break-inside:avoid}
+.issue-list li.warn{border-left-color:#e67e22}
+.issue-list .it{display:flex;justify-content:space-between;gap:12px;align-items:baseline}
+.issue-list .ti{font-weight:700;color:#1F497D}
+.issue-list .sc{font-size:8.5pt;color:#666;white-space:nowrap}
+.issue-list .ac{margin:4px 0 0;color:#333;font-size:9.5pt}
+.issue-list a.jump{font-size:8.5pt;color:#1F497D;text-decoration:none;border-bottom:1px dotted #1F497D}
 section.severity{page-break-before:always}
 </style>
 '@
@@ -510,7 +527,25 @@ Add-To $sb "</div>"
 Add-To $sb "<div style='display:flex;gap:20px;align-items:flex-start;flex-wrap:wrap'>"
 Add-To $sb "<div>$donut</div>"
 Add-To $sb "<div style='flex:1;min-width:320px'><h3 style='margin-top:0'>Findings by Domain</h3>$domainBarSvg</div>"
-Add-To $sb "</div></section>"
+Add-To $sb "</div>"
+
+# Top issues -- what to fix first, with anchor links to the detailed row.
+$topIssues = @($aggregated | Where-Object { $_.Severity -in @('Critical','Warning') } | Select-Object -First 10)
+Add-To $sb "<h3>Top issues -- what to fix</h3>"
+if ($topIssues.Length -eq 0) {
+    Add-To $sb "<p class='ok'>No critical or warning issues detected.</p>"
+} else {
+    Add-To $sb "<p>The highest-priority findings. Click an issue title to jump to the detailed row, affected databases, and the T-SQL remediation snippet.</p>"
+    Add-To $sb "<ol class='issue-list'>"
+    foreach ($a in $topIssues) {
+        $sevC  = $a.Severity.ToLower()
+        $where = if ($a.Scope -eq 'Server') { 'instance-wide' } else { "$($a.UniqueDbsCached.Count) of $dbCount databases" }
+        $cls   = if ($sevC -eq 'warning') { 'warn' } else { '' }
+        Add-To $sb "<li class='$cls'><div class='it'><span class='ti'><a class='jump' href='#$($a.Anchor)'>$(Esc $a.Title)</a></span><span class='sc'><span class='badge $sevC'>$($a.Severity)</span> &middot; $where</span></div><div class='ac'><strong>Action:</strong> $(Esc $a.Recommendation)</div></li>"
+    }
+    Add-To $sb "</ol>"
+}
+Add-To $sb "</section>"
 
 # Fingerprint
 Add-To $sb "<section class='section'><h2>2. Environment Fingerprint</h2>"
@@ -544,7 +579,7 @@ if ($serverFindings.Length -eq 0) {
     Add-To $sb "<table><thead><tr><th>Severity</th><th>Finding</th><th>CIS</th><th>GDPR</th><th>SOC2</th><th>HIPAA</th><th>PCI</th></tr></thead><tbody>"
     foreach ($a in $serverFindings) {
         $sevC = $a.Severity.ToLower()
-        Add-To $sb "<tr class='sev-$sevC'><td><span class='badge $sevC'>$($a.Severity)</span></td><td><strong>$(Esc $a.Title)</strong><br><span class='detail'>$(Esc $a.Recommendation)</span></td><td class='compl'>$(Esc $a.CIS)</td><td class='compl'>$(Esc $a.GDPR)</td><td class='compl'>$(Esc $a.SOC2)</td><td class='compl'>$(Esc $a.HIPAA)</td><td class='compl'>$(Esc $a.PCI)</td></tr>"
+        Add-To $sb "<tr id='$($a.Anchor)' class='sev-$sevC'><td><span class='badge $sevC'>$($a.Severity)</span></td><td><strong>$(Esc $a.Title)</strong><br><span class='detail'>$(Esc $a.Recommendation)</span></td><td class='compl'>$(Esc $a.CIS)</td><td class='compl'>$(Esc $a.GDPR)</td><td class='compl'>$(Esc $a.SOC2)</td><td class='compl'>$(Esc $a.HIPAA)</td><td class='compl'>$(Esc $a.PCI)</td></tr>"
     }
     Add-To $sb "</tbody></table>"
 }
@@ -562,7 +597,7 @@ if ($dbFindings.Length -eq 0) {
         $cnt  = $dbs.Count
         $top  = ($dbs | Select-Object -First 6) -join ', '
         if ($cnt -gt 6) { $top += " ... (+$($cnt - 6) more)" }
-        Add-To $sb "<tr class='sev-$sevC'><td><span class='badge $sevC'>$($a.Severity)</span></td><td><strong>$(Esc $a.Title)</strong><br><span class='detail'>$(Esc $a.Recommendation)</span></td><td><strong>$cnt</strong> of $dbCount</td><td class='detail'>$(Esc $top)</td><td class='compl'>$(Esc $a.CIS)</td><td class='compl'>$(Esc $a.GDPR)</td></tr>"
+        Add-To $sb "<tr id='$($a.Anchor)' class='sev-$sevC'><td><span class='badge $sevC'>$($a.Severity)</span></td><td><strong>$(Esc $a.Title)</strong><br><span class='detail'>$(Esc $a.Recommendation)</span></td><td><strong>$cnt</strong> of $dbCount</td><td class='detail'>$(Esc $top)</td><td class='compl'>$(Esc $a.CIS)</td><td class='compl'>$(Esc $a.GDPR)</td></tr>"
     }
     Add-To $sb "</tbody></table>"
 }

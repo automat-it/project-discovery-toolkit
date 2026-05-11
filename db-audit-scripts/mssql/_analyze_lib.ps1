@@ -48,6 +48,18 @@ function Get-SeverityRank {
 function New-Sb { [System.Text.StringBuilder]::new() }
 function Add-To { param($Sb, [string]$S) [void]$Sb.Append($S) }
 
+# Deterministic anchor id for cross-linking from the executive summary
+# to the detailed finding row. Strips characters that aren't safe in
+# an HTML id attribute and lowercases the result.
+function New-Slug {
+    param([string]$Text)
+    if (-not $Text) { return 'f' }
+    $s = ($Text -replace '[^A-Za-z0-9]+', '-').Trim('-').ToLowerInvariant()
+    if (-not $s) { return 'f' }
+    if ($s.Length -gt 80) { $s = $s.Substring(0, 80).TrimEnd('-') }
+    return $s
+}
+
 # -----------------------------------------------------------------------------
 # Encoding-aware log reader with per-run cache
 #   $script:_LogCache[<FullPath>] = @{ Text=...; Lines=...; Sets=... }

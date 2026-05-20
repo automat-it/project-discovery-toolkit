@@ -35,14 +35,20 @@ SELECT
     rolcanlogin,
     rolvaliduntil,
     CASE
-        WHEN rolvaliduntil IS NULL THEN 'no expiry'
-        WHEN rolvaliduntil < now() THEN 'EXPIRED'
-        WHEN rolvaliduntil < now() + interval '30 days' THEN 'expiring within 30 days'
-        WHEN rolvaliduntil < now() + interval '90 days' THEN 'expiring within 90 days'
+        WHEN rolvaliduntil IS NULL                       THEN 'no expiry'
+        WHEN rolvaliduntil = 'infinity'::timestamptz     THEN 'no expiry (infinity)'
+        WHEN rolvaliduntil < now()                       THEN 'EXPIRED'
+        WHEN rolvaliduntil < now() + interval '30 days'  THEN 'expiring within 30 days'
+        WHEN rolvaliduntil < now() + interval '90 days'  THEN 'expiring within 90 days'
         ELSE 'ok'
     END                                                   AS expiry_state,
-    CASE WHEN rolvaliduntil IS NOT NULL
-         THEN EXTRACT(day FROM rolvaliduntil - now())::int
+    -- 'infinity' rolvaliduntil produces an infinite interval which fails to
+    -- cast to int; treat infinity (and the rare -infinity) as NULL.
+    CASE
+        WHEN rolvaliduntil IS NULL                       THEN NULL
+        WHEN rolvaliduntil =  'infinity'::timestamptz    THEN NULL
+        WHEN rolvaliduntil = '-infinity'::timestamptz    THEN NULL
+        ELSE EXTRACT(day FROM rolvaliduntil - now())::int
     END                                                   AS days_until_expiry
 FROM pg_roles
 WHERE rolcanlogin = true
@@ -102,9 +108,14 @@ ORDER BY s.srvname;
 -- ---------------------------------------------------------------------------
 SELECT
     (SELECT COUNT(*) FROM pg_roles
-      WHERE rolcanlogin AND rolvaliduntil IS NOT NULL AND rolvaliduntil < now()) AS expired_logins,
+      WHERE rolcanlogin
+        AND rolvaliduntil IS NOT NULL
+        AND rolvaliduntil <> 'infinity'::timestamptz
+        AND rolvaliduntil < now())                                               AS expired_logins,
     (SELECT COUNT(*) FROM pg_roles
-      WHERE rolcanlogin AND rolvaliduntil IS NOT NULL
+      WHERE rolcanlogin
+        AND rolvaliduntil IS NOT NULL
+        AND rolvaliduntil <> 'infinity'::timestamptz
         AND rolvaliduntil BETWEEN now() AND now() + interval '30 days')          AS expiring_30d,
     (SELECT setting FROM pg_settings WHERE name = 'ssl')                         AS ssl_enabled,
     (SELECT setting FROM pg_settings WHERE name = 'ssl_cert_file')               AS ssl_cert_file,

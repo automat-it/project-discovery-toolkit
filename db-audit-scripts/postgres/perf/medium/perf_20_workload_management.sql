@@ -95,13 +95,31 @@ ORDER BY xact_start;
 -- ---------------------------------------------------------------------------
 -- In-flight operations (pg_stat_progress_* — added incrementally across
 -- 9.6 → 14; missing ones are simply empty).
+--
+-- Version note: PostgreSQL 17 replaced the dead-tuple COUNT columns
+-- (max_dead_tuples, num_dead_tuples) with BYTE-oriented columns
+-- (max_dead_tuple_bytes, dead_tuple_bytes, num_dead_item_ids,
+-- indexes_total, indexes_processed). We pick the right set per version.
 -- ---------------------------------------------------------------------------
+SELECT current_setting('server_version_num')::int >= 170000 AS pg17_or_newer
+\gset
+\if :pg17_or_newer
+SELECT
+    'vacuum'       AS progress_type,
+    pid, datname,
+    phase, heap_blks_total, heap_blks_scanned, heap_blks_vacuumed,
+    index_vacuum_count,
+    max_dead_tuple_bytes, dead_tuple_bytes, num_dead_item_ids,
+    indexes_total, indexes_processed
+FROM pg_stat_progress_vacuum;
+\else
 SELECT
     'vacuum'       AS progress_type,
     pid, datname,
     phase, heap_blks_total, heap_blks_scanned, heap_blks_vacuumed,
     index_vacuum_count, max_dead_tuples, num_dead_tuples
 FROM pg_stat_progress_vacuum;
+\endif
 
 SELECT 'analyze' AS progress_type, * FROM pg_stat_progress_analyze;
 

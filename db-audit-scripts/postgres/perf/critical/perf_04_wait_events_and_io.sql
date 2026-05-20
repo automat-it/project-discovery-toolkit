@@ -105,11 +105,30 @@ LIMIT 30;
 -- ---------------------------------------------------------------------------
 -- Per-statement I/O (top by physical reads from pg_stat_statements).
 --
--- Version note: in PostgreSQL 17 the blk_read_time / blk_write_time columns
--- were split into shared_blk_read_time / shared_blk_write_time (and
--- local_blk_read_time / local_blk_write_time). On PG 17+ replace the two
--- columns below with their shared_* counterparts.
+-- Version note: in PostgreSQL 17 the legacy blk_read_time / blk_write_time
+-- columns were removed and split into shared_blk_read_time /
+-- shared_blk_write_time, local_blk_*, temp_blk_*. We pick the right column
+-- set per server version so the script works on both PG <= 16 and PG 17+.
 -- ---------------------------------------------------------------------------
+SELECT current_setting('server_version_num')::int >= 170000 AS pg17_or_newer
+\gset
+\if :pg17_or_newer
+SELECT
+    shared_blks_read                                     AS disk_reads,
+    pg_size_pretty(shared_blks_read * 8192::bigint)      AS disk_read_size,
+    shared_blks_hit                                      AS cache_hits,
+    shared_blk_read_time                                 AS shared_read_time_ms,
+    shared_blk_write_time                                AS shared_write_time_ms,
+    local_blk_read_time                                  AS local_read_time_ms,
+    local_blk_write_time                                 AS local_write_time_ms,
+    calls,
+    round(mean_exec_time::numeric, 2)                    AS mean_ms,
+    left(query, 200)                                     AS query
+FROM pg_stat_statements
+WHERE shared_blks_read > 0
+ORDER BY shared_blks_read DESC
+LIMIT 25;
+\else
 SELECT
     shared_blks_read                                     AS disk_reads,
     pg_size_pretty(shared_blks_read * 8192::bigint)      AS disk_read_size,
@@ -123,6 +142,7 @@ FROM pg_stat_statements
 WHERE shared_blks_read > 0
 ORDER BY shared_blks_read DESC
 LIMIT 25;
+\endif
 
 -- ---------------------------------------------------------------------------
 -- track_io_timing setting (must be ON for blk_read_time / blk_write_time)

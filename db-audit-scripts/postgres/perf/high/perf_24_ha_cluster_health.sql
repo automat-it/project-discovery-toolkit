@@ -6,17 +6,47 @@
 --          orchestrator residue (Patroni / repmgr), and backup readiness.
 --          Complements perf_22 (per-standby lag) with cluster posture.
 -- Read-only.
+--
+-- Portability:
+--   * primary_conninfo / primary_slot_name are SUSET GUCs. Reading them
+--     normally requires pg_read_all_settings membership; on AWS Aurora
+--     the engine hard-blocks the read for non-superusers even when
+--     pg_has_role() reports the membership. We therefore branch on a
+--     reliable Aurora marker (rdsadmin role) rather than on pg_has_role.
+--   * AWS Aurora doesn't expose WAL archiving (pg_stat_archiver returns
+--     zeros) but the view itself queries fine, so we always run it.
 -- =============================================================================
+
+SELECT
+    EXISTS (SELECT 1 FROM pg_roles WHERE rolname='rdsadmin')      AS is_aws_rds,
+    pg_has_role(current_user, 'pg_read_all_settings', 'MEMBER')   AS can_read_all_settings
+\gset
 
 -- ---------------------------------------------------------------------------
 -- Node role + write-ability
 -- ---------------------------------------------------------------------------
+\if :is_aws_rds
+SELECT
+    pg_is_in_recovery()                                   AS is_standby,
+    CASE WHEN pg_is_in_recovery() THEN 'standby' ELSE 'primary' END AS role,
+    current_setting('cluster_name', true)                 AS cluster_name,
+    '(hard-blocked on Aurora regardless of role)'         AS primary_conninfo,
+    '(hard-blocked on Aurora regardless of role)'         AS primary_slot_name;
+\elif :can_read_all_settings
 SELECT
     pg_is_in_recovery()                                   AS is_standby,
     CASE WHEN pg_is_in_recovery() THEN 'standby' ELSE 'primary' END AS role,
     current_setting('cluster_name', true)                 AS cluster_name,
     current_setting('primary_conninfo', true)             AS primary_conninfo,
     current_setting('primary_slot_name', true)            AS primary_slot_name;
+\else
+SELECT
+    pg_is_in_recovery()                                   AS is_standby,
+    CASE WHEN pg_is_in_recovery() THEN 'standby' ELSE 'primary' END AS role,
+    current_setting('cluster_name', true)                 AS cluster_name,
+    '(restricted -- needs pg_read_all_settings)'          AS primary_conninfo,
+    '(restricted -- needs pg_read_all_settings)'          AS primary_slot_name;
+\endif
 
 -- ---------------------------------------------------------------------------
 -- Synchronous replication quorum state

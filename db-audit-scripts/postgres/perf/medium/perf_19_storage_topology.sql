@@ -5,7 +5,14 @@
 --          tablespace size, data/WAL/log directories, and any cluster
 --          objects placed off the default tablespace.
 -- Read-only.
+--
+-- Portability: pg_current_wal_lsn() is blocked on AWS Aurora regardless of
+-- wal_level. The replication-slot block below uses a $wal_lsn variable that
+-- is NULL on Aurora and pg_current_wal_lsn() elsewhere so the rest of the
+-- script still runs.
 -- =============================================================================
+
+SELECT EXISTS (SELECT 1 FROM pg_roles WHERE rolname='rdsadmin') AS is_aws_rds \gset
 
 -- ---------------------------------------------------------------------------
 -- Tablespace inventory + physical location (requires pg_read_server_files
@@ -85,20 +92,25 @@ ORDER BY total_bytes DESC NULLS LAST;
 
 -- ---------------------------------------------------------------------------
 -- WAL / replication slot usage — disk pressure on pg_wal
+-- pg_current_wal_lsn() is blocked on Aurora; skip the size computation
+-- there but still surface slot inventory.
 -- ---------------------------------------------------------------------------
+\if :is_aws_rds
 SELECT
-    slot_name,
-    slot_type,
-    database,
-    active,
-    restart_lsn,
-    confirmed_flush_lsn,
+    slot_name, slot_type, database, active, restart_lsn, confirmed_flush_lsn,
+    '(blocked on Aurora)' AS retained_bytes
+FROM pg_replication_slots
+ORDER BY slot_name;
+\else
+SELECT
+    slot_name, slot_type, database, active, restart_lsn, confirmed_flush_lsn,
     pg_wal_lsn_diff(
         pg_current_wal_lsn(),
         COALESCE(restart_lsn, pg_current_wal_lsn())
     )                                                    AS retained_bytes
 FROM pg_replication_slots
 ORDER BY retained_bytes DESC NULLS LAST;
+\endif
 
 -- ---------------------------------------------------------------------------
 -- Temporary-file activity (spills to disk in tempdir / temp_tablespaces)

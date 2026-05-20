@@ -6,7 +6,15 @@
 --          Upstream: pg_stat_replication (primary side),
 --          pg_stat_wal_receiver / pg_stat_subscription (replica side).
 -- Read-only.
+--
+-- Portability: AWS Aurora blocks pg_current_wal_lsn(),
+-- pg_last_wal_*(), pg_stat_get_wal_receiver() and friends because Aurora
+-- replication is managed by the storage layer, not by streaming WAL. We
+-- detect Aurora via the rdsadmin role and emit [note] lines in place of
+-- the unsupported queries so the rest of the script still runs.
 -- =============================================================================
+
+SELECT EXISTS (SELECT 1 FROM pg_roles WHERE rolname='rdsadmin') AS is_aws_rds \gset
 
 -- ---------------------------------------------------------------------------
 -- Global replication config
@@ -44,55 +52,65 @@ SELECT
 -- and the standby acknowledging each step. sync_state tells you whether
 -- this replica is 'sync', 'potential', 'async', 'quorum'.
 -- ---------------------------------------------------------------------------
+\if :is_aws_rds
 SELECT
-    application_name,
-    client_addr,
-    usename,
-    state,
-    sync_state,
-    sync_priority,
+    application_name, client_addr, usename, state, sync_state, sync_priority,
+    '(blocked on Aurora)' AS send_pending_bytes,
+    pg_wal_lsn_diff(sent_lsn, flush_lsn)                  AS flush_pending_bytes,
+    pg_wal_lsn_diff(flush_lsn, replay_lsn)                AS replay_pending_bytes,
+    '(blocked on Aurora)' AS total_lag_bytes,
+    write_lag, flush_lag, replay_lag, backend_start, reply_time
+FROM pg_stat_replication
+ORDER BY application_name NULLS LAST;
+\else
+SELECT
+    application_name, client_addr, usename, state, sync_state, sync_priority,
     pg_wal_lsn_diff(pg_current_wal_lsn(), sent_lsn)       AS send_pending_bytes,
     pg_wal_lsn_diff(sent_lsn, flush_lsn)                  AS flush_pending_bytes,
     pg_wal_lsn_diff(flush_lsn, replay_lsn)                AS replay_pending_bytes,
     pg_wal_lsn_diff(pg_current_wal_lsn(), replay_lsn)     AS total_lag_bytes,
-    write_lag,
-    flush_lag,
-    replay_lag,
-    backend_start,
-    reply_time
+    write_lag, flush_lag, replay_lag, backend_start, reply_time
 FROM pg_stat_replication
 ORDER BY total_lag_bytes DESC NULLS LAST;
+\endif
 
 -- ---------------------------------------------------------------------------
 -- Replication slots — retained WAL per slot. An inactive slot with a
 -- growing restart_lsn is the #1 cause of a primary filling its WAL.
 -- ---------------------------------------------------------------------------
+\if :is_aws_rds
 SELECT
-    slot_name,
-    slot_type,
-    database,
-    plugin,
-    active,
-    active_pid,
-    temporary,
-    restart_lsn,
-    confirmed_flush_lsn,
+    slot_name, slot_type, database, plugin, active, active_pid, temporary,
+    restart_lsn, confirmed_flush_lsn,
+    '(blocked on Aurora -- pg_wal_lsn_diff requires logical wal_level)' AS retained_wal_bytes,
+    '-'                                                   AS assessment
+FROM pg_replication_slots
+ORDER BY slot_name;
+\else
+SELECT
+    slot_name, slot_type, database, plugin, active, active_pid, temporary,
+    restart_lsn, confirmed_flush_lsn,
     pg_wal_lsn_diff(pg_current_wal_lsn(), restart_lsn)    AS retained_wal_bytes,
     CASE
         WHEN active = false
              AND pg_wal_lsn_diff(pg_current_wal_lsn(), restart_lsn) > 1073741824::bigint
-          THEN 'CRITICAL — inactive slot retaining > 1 GB WAL'
+          THEN 'CRITICAL -- inactive slot retaining > 1 GB WAL'
         WHEN pg_wal_lsn_diff(pg_current_wal_lsn(), restart_lsn) > 10737418240::bigint
-          THEN 'HIGH — > 10 GB WAL retention'
+          THEN 'HIGH -- > 10 GB WAL retention'
         ELSE 'ok'
     END                                                   AS assessment
 FROM pg_replication_slots
 ORDER BY retained_wal_bytes DESC NULLS LAST;
+\endif
 
 -- ---------------------------------------------------------------------------
 -- Standby-side: WAL receiver status
--- pg_stat_wal_receiver is empty on a primary.
+-- pg_stat_wal_receiver is empty on a primary; the underlying
+-- pg_stat_get_wal_receiver() function is blocked on Aurora.
 -- ---------------------------------------------------------------------------
+\if :is_aws_rds
+SELECT '[note] pg_stat_wal_receiver is blocked on AWS Aurora -- skipped' AS note;
+\else
 SELECT
     pid, status, receive_start_lsn, receive_start_tli,
     written_lsn, flushed_lsn,
@@ -103,8 +121,13 @@ SELECT
     sender_host, sender_port,
     conninfo
 FROM pg_stat_wal_receiver;
+\endif
 
--- Replay lag relative to wall clock on a standby
+-- Replay lag relative to wall clock on a standby (Aurora blocks the LSN fns
+-- AND pg_last_xact_replay_timestamp).
+\if :is_aws_rds
+SELECT '[note] pg_last_xact_replay_timestamp and pg_last_wal_* are blocked on AWS Aurora' AS note;
+\else
 SELECT
     now() - pg_last_xact_replay_timestamp()               AS replay_clock_lag,
     pg_last_wal_receive_lsn()                             AS last_received,
@@ -113,6 +136,7 @@ SELECT
               AND pg_last_wal_replay_lsn()  IS NOT NULL
          THEN pg_wal_lsn_diff(pg_last_wal_receive_lsn(), pg_last_wal_replay_lsn())
     END                                                   AS receive_to_replay_bytes;
+\endif
 
 -- ---------------------------------------------------------------------------
 -- Logical replication — subscriptions and per-subscription workers

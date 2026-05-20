@@ -146,13 +146,16 @@ JOIN pg_foreign_data_wrapper fdw ON fdw.oid = s.srvfdw;
 
 -- ---------------------------------------------------------------------------
 -- User mappings to foreign servers (potential credential leak)
+-- We query pg_user_mappings (the view) rather than pg_user_mapping (the
+-- table). The view is granted to the public role -- the table requires
+-- server ownership or membership in pg_read_server_files. The view also
+-- automatically masks umoptions to NULL when the caller can't see them.
 -- ---------------------------------------------------------------------------
 SELECT
-    pg_get_userbyid(um.umuser)                           AS local_user,
-    s.srvname                                            AS foreign_server,
+    COALESCE(um.usename, 'PUBLIC')                       AS local_user,
+    um.srvname                                           AS foreign_server,
     um.umoptions                                         AS options
-FROM pg_user_mapping um
-JOIN pg_foreign_server s ON s.oid = um.umserver;
+FROM pg_user_mappings um;
 
 -- ---------------------------------------------------------------------------
 -- Functions executable by PUBLIC and owned by superusers (escalation risk)

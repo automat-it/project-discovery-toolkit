@@ -10,13 +10,55 @@
 -- Background writer / checkpointer cumulative stats.
 --
 -- Version note: PostgreSQL 17 split the bgwriter / checkpointer counters.
--- Checkpoint columns (checkpoints_timed, checkpoints_req, checkpoint_write_time,
--- checkpoint_sync_time, buffers_checkpoint, buffers_backend,
--- buffers_backend_fsync) moved to the new pg_stat_checkpointer view and were
--- removed from pg_stat_bgwriter. On PG 17+ run this block against
--- pg_stat_checkpointer (for checkpoint metrics) and keep pg_stat_bgwriter
--- only for buffers_clean / maxwritten_clean / buffers_alloc / stats_reset.
+-- Checkpoint metrics moved to the new pg_stat_checkpointer view, with
+-- renamed columns (num_timed, num_requested, write_time, sync_time,
+-- buffers_written). buffers_backend / buffers_backend_fsync were removed
+-- entirely -- backend-initiated writes are now tracked in pg_stat_io.
+-- pg_stat_bgwriter retains only buffers_clean / maxwritten_clean /
+-- buffers_alloc / stats_reset on PG 17+.
 -- ---------------------------------------------------------------------------
+SELECT current_setting('server_version_num')::int >= 170000 AS pg17_or_newer
+\gset
+
+\if :pg17_or_newer
+-- PG 17+: pg_stat_checkpointer for checkpoint counters, pg_stat_bgwriter for
+-- background-writer counters. Combine via cross join (each view is single-row).
+SELECT
+    ckpt.num_timed                                       AS scheduled_checkpoints,
+    ckpt.num_requested                                   AS forced_checkpoints,
+    CASE WHEN ckpt.num_timed + ckpt.num_requested > 0
+         THEN round(100.0 * ckpt.num_requested
+                    / (ckpt.num_timed + ckpt.num_requested), 2)
+         ELSE 0
+    END                                                  AS forced_pct,
+    ckpt.write_time                                      AS checkpoint_write_time_ms,
+    ckpt.sync_time                                       AS checkpoint_sync_time_ms,
+    ckpt.buffers_written                                 AS buffers_written_by_checkpoint,
+    bgw.buffers_clean                                    AS buffers_written_by_bgwriter,
+    bgw.buffers_alloc                                    AS buffers_allocated,
+    bgw.maxwritten_clean                                 AS bgwriter_max_written_stops,
+    ckpt.restartpoints_timed                             AS restartpoints_scheduled,
+    ckpt.restartpoints_req                               AS restartpoints_requested,
+    ckpt.restartpoints_done                              AS restartpoints_completed,
+    ckpt.stats_reset                                     AS ckpt_stats_reset,
+    bgw.stats_reset                                      AS bgw_stats_reset
+FROM pg_stat_checkpointer ckpt
+CROSS JOIN pg_stat_bgwriter bgw;
+
+-- PG 17+: backend-initiated writes live in pg_stat_io. Surface the totals
+-- so the operator can spot "queries are doing their own writes" pressure.
+SELECT
+    backend_type,
+    sum(writes)                                          AS backend_writes,
+    sum(fsyncs)                                          AS backend_fsyncs,
+    sum(extends)                                         AS backend_extends
+FROM pg_stat_io
+WHERE writes > 0 OR fsyncs > 0 OR extends > 0
+GROUP BY backend_type
+ORDER BY backend_writes DESC;
+
+\else
+-- PG <= 16: all counters live in pg_stat_bgwriter.
 SELECT
     checkpoints_timed                                    AS scheduled_checkpoints,
     checkpoints_req                                      AS forced_checkpoints,
@@ -35,6 +77,7 @@ SELECT
     maxwritten_clean                                     AS bgwriter_max_written_stops,
     stats_reset
 FROM pg_stat_bgwriter;
+\endif
 
 -- ---------------------------------------------------------------------------
 -- Checkpoint and bgwriter configuration
@@ -61,22 +104,26 @@ WHERE name IN (
 ORDER BY name;
 
 -- ---------------------------------------------------------------------------
--- WAL activity (PostgreSQL 14+ only). Guarded by server version.
+-- WAL activity (PostgreSQL 14+ only). Guarded by server version + Aurora.
+-- pg_stat_wal's backing function pg_stat_get_wal() is blocked on Aurora.
 -- ---------------------------------------------------------------------------
-SELECT current_setting('server_version_num')::int >= 140000 AS pg14_or_newer
+SELECT
+    current_setting('server_version_num')::int >= 140000   AS pg14_or_newer,
+    EXISTS (SELECT 1 FROM pg_roles WHERE rolname='rdsadmin') AS is_aws_rds
 \gset
-\if :pg14_or_newer
-SELECT *
-FROM pg_stat_wal;
+\if :is_aws_rds
+SELECT '[note] pg_stat_wal is blocked on AWS Aurora -- skipped' AS note;
+\elif :pg14_or_newer
+SELECT * FROM pg_stat_wal;
 \else
-SELECT 'pg_stat_wal requires PostgreSQL 14 or newer — skipped' AS note;
+SELECT 'pg_stat_wal requires PostgreSQL 14 or newer -- skipped' AS note;
 \endif
 
 -- ---------------------------------------------------------------------------
--- Quick interpretation hints
+-- Quick interpretation hints (post-PG17 nomenclature in parentheses)
 -- ---------------------------------------------------------------------------
 SELECT
-    'checkpoint_req should be << checkpoint_timed (forced_pct < 5%)' AS hint_1,
-    'buffers_backend should be << buffers_checkpoint'                 AS hint_2,
-    'buffers_backend_fsync should be 0'                               AS hint_3,
-    'maxwritten_clean > 0 means bgwriter_lru_maxpages too low'        AS hint_4;
+    'forced_pct (num_requested / num_timed in PG17) should stay under 5%' AS hint_1,
+    'buffers_written_by_backends (pg_stat_io writes in PG17) should be << buffers_written_by_checkpoint' AS hint_2,
+    'backend fsyncs > 0 indicates wal_buffers / sync IO pressure'         AS hint_3,
+    'bgwriter_max_written_stops > 0 means bgwriter_lru_maxpages too low'  AS hint_4;

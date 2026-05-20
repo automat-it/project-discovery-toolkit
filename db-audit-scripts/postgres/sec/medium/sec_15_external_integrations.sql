@@ -76,13 +76,13 @@ ORDER BY s.srvname;
 
 -- ---------------------------------------------------------------------------
 -- User mappings (MASKED)
+-- We use pg_user_mappings (the view) rather than pg_user_mapping (the
+-- privileged table). The view is readable by everyone and masks umoptions
+-- to NULL for rows the caller can't see.
 -- ---------------------------------------------------------------------------
 SELECT
-    CASE
-        WHEN um.umuser = 0 THEN 'PUBLIC'
-        ELSE pg_get_userbyid(um.umuser)
-    END                                                  AS local_user,
-    s.srvname                                            AS foreign_server,
+    COALESCE(um.usename, 'PUBLIC')                       AS local_user,
+    um.srvname                                           AS foreign_server,
     fdw.fdwname                                          AS fdw,
     COALESCE(
         (
@@ -98,9 +98,9 @@ SELECT
         ),
         ''
     )                                                    AS options_masked
-FROM pg_user_mapping um
+FROM pg_user_mappings um
 JOIN pg_foreign_server s
-  ON s.oid = um.umserver
+  ON s.srvname = um.srvname
 JOIN pg_foreign_data_wrapper fdw
   ON fdw.oid = s.srvfdw
 ORDER BY local_user, foreign_server;
@@ -110,19 +110,16 @@ ORDER BY local_user, foreign_server;
 -- ---------------------------------------------------------------------------
 \if :unmask_secrets
 SELECT
-    'UNMASKED OUTPUT ENABLED — handle with care'         AS warning;
+    'UNMASKED OUTPUT ENABLED -- handle with care'        AS warning;
 
 SELECT
-    CASE
-        WHEN um.umuser = 0 THEN 'PUBLIC'
-        ELSE pg_get_userbyid(um.umuser)
-    END                                                  AS local_user,
-    s.srvname                                            AS foreign_server,
+    COALESCE(um.usename, 'PUBLIC')                       AS local_user,
+    um.srvname                                           AS foreign_server,
     fdw.fdwname                                          AS fdw,
     COALESCE(array_to_string(um.umoptions, ', '), '')    AS options_unmasked
-FROM pg_user_mapping um
+FROM pg_user_mappings um
 JOIN pg_foreign_server s
-  ON s.oid = um.umserver
+  ON s.srvname = um.srvname
 JOIN pg_foreign_data_wrapper fdw
   ON fdw.oid = s.srvfdw
 ORDER BY local_user, foreign_server;
@@ -189,6 +186,6 @@ ORDER BY n.nspname, p.proname;
 SELECT
     (SELECT count(*) FROM pg_foreign_data_wrapper)       AS fdw_count,
     (SELECT count(*) FROM pg_foreign_server)             AS foreign_server_count,
-    (SELECT count(*) FROM pg_user_mapping)               AS user_mapping_count,
+    (SELECT count(*) FROM pg_user_mappings)              AS user_mapping_count,
     (SELECT count(*) FROM pg_foreign_table)              AS foreign_table_count,
     (SELECT count(*) FROM pg_extension WHERE extname = 'dblink') AS dblink_installed;

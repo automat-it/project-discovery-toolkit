@@ -3,12 +3,17 @@
 analyze_report.py -- PostgreSQL security audit report analyzer.
 
 Reads the report directory produced by run_audit.sh, applies a security
-rule set, and writes one HTML file with an executive summary plus a
-dedicated section per database.
+rule set, and writes one HTML file with:
+
+  * Environment fingerprint card (server, version, auth/SSL state, ...)
+  * Executive summary (KPI counts + Top issues with what-to-do)
+  * Per-finding concrete objects (privileged roles, public grants, PII
+    columns, SECURITY DEFINER functions, expiring credentials, ...) so
+    the reader has actionable targets, not "review the log".
 
 Usage:
     ./analyze_report.py <report_dir>
-    ./analyze_report.py <report_dir> --server prod-pg-01 --out report.html
+    ./analyze_report.py <report_dir> --server prod-pg-01
 
 Standard library only.
 """
@@ -16,141 +21,247 @@ Standard library only.
 from __future__ import annotations
 
 import argparse
-import datetime as _dt
-import html
 import re
 import sys
 from pathlib import Path
 
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+from _analyze_lib import (  # noqa: E402
+    SHARED_CSS, context_label, esc, has_data_rows, kv_grid, now_str,
+    object_table, parse_result_sets, read_fingerprint, read_log_text,
+    read_summary, read_target, render_fingerprint_card, severity_rank,
+)
+
+
+# ---------------------------------------------------------------------------
+# Sec-specific extractors -- pull concrete objects from logs
+# ---------------------------------------------------------------------------
+def _ext_superusers(text):
+    for s in parse_result_sets(text):
+        lc = [c.lower() for c in s['columns']]
+        if 'rolname' in lc or 'rolsuper' in lc:
+            return s['rows'][:200]
+    return []
+
+
+def _ext_public_grants(text):
+    """sec_04 emits multiple sub-tables (default privileges, schema-level
+    grants, object-level grants, public connect ...). Render each as a
+    separate small table so column names match their content."""
+    sets = parse_result_sets(text)
+    groups = []
+    for i, s in enumerate(sets):
+        if not s['rows']:
+            continue
+        lc = [c.lower() for c in s['columns']]
+        if any(c in lc for c in ('grantee', 'object', 'schema', 'role',
+                                 'privilege_type', 'object_type')):
+            groups.append(dict(
+                label=f"Excessive grants -- subset #{len(groups)+1}",
+                columns=s['columns'],
+                rows=s['rows'][:200],
+            ))
+    return groups
+
+
+def _ext_pii_columns(text):
+    for s in parse_result_sets(text):
+        lc = [c.lower() for c in s['columns']]
+        if 'column_name' in lc or 'column' in lc:
+            return s["rows"][:200]
+    return []
+
+
+def _ext_dangerous(text):
+    """sec_10 emits SECURITY DEFINER funcs + dangerous languages + event
+    triggers + foreign servers, etc. Render each as a separate small
+    table; the SQL script's ORDER OF OUTPUT defines our labels."""
+    sets = parse_result_sets(text)
+    labels = [
+        'SECURITY DEFINER functions',
+        'SECURITY DEFINER functions owned by superusers',
+        'Functions in untrusted languages',
+        'User-defined functions in language "internal"',
+        'Installed procedural languages',
+        'Event triggers (DDL interceptors)',
+        'Superuser-owned triggers on user tables',
+        'Foreign Data Wrappers',
+        'Foreign servers',
+        'User mappings (masked)',
+        'Public-executable SECURITY DEFINER functions',
+    ]
+    groups = []
+    for i, s in enumerate(sets):
+        if not s['rows']:
+            continue
+        groups.append(dict(
+            label=labels[i] if i < len(labels) else f'Result set #{i+1}',
+            columns=s['columns'],
+            rows=s['rows'][:200],
+        ))
+    return groups
+
+
+def _ext_dormant(text):
+    for s in parse_result_sets(text):
+        if 'rolname' in s['columns']:
+            return s['rows'][:200]
+    return []
+
+
+def _ext_failed_logins(text):
+    for s in parse_result_sets(text):
+        lc = [c.lower() for c in s['columns']]
+        if any(c in lc for c in ('login_name', 'client_addr', 'event_type', 'reason')):
+            return s['rows'][:200]
+    return []
+
+
+def _ext_cert_expiry(text):
+    for s in parse_result_sets(text):
+        if 'expiry_state' in s['columns'] or 'days_until_expiry' in s['columns']:
+            # keep only rows where expiry_state != 'no expiry'
+            keep = []
+            for r in s['rows']:
+                state = (r.get('expiry_state') or '').lower()
+                if state and 'no expiry' not in state and 'ok' not in state:
+                    keep.append(r)
+            return keep[:200]
+    return []
+
+
+def _ext_audit_gaps(text):
+    out = []
+    for s in parse_result_sets(text):
+        out.extend(s['rows'][:200])
+    return out[:200]
+
+
 RULES = [
-    dict(script='sec_01_users_and_roles_inventory', mode='has_data', severity='Info',
-         title='User / role inventory captured',
-         recommendation='Review the principal list. Remove unused logins and rotate dormant role memberships.'),
-
-    dict(script='sec_03_admin_and_superusers',       mode='has_data', severity='Info',
-         title='Superuser / privileged role membership',
-         recommendation='Reduce SUPERUSER and pg_signal_backend memberships to the minimum required.'),
-
-    dict(script='sec_04_public_and_excessive_grants',  mode='has_data', severity='Warning',
-         title='Permissions granted to PUBLIC or excessive scope',
-         recommendation='PUBLIC grants apply to every role. Move them to specific roles or revoke.'),
-
-    dict(script='sec_05_authentication_and_passwords',  mode='pattern', severity='Critical',
-         pattern=r'(?im)^\s*trust\s|method\s*\|\s*trust',
-         title='pg_hba.conf uses "trust" authentication',
-         recommendation='Trust auth allows password-less access. Replace with scram-sha-256 / cert.'),
-
-    dict(script='sec_05_authentication_and_passwords',  mode='pattern', severity='Warning',
-         pattern=r'(?im)password_encryption\s*\|\s*md5',
-         title='password_encryption is md5',
-         recommendation='md5 password hashing is deprecated. Switch to scram-sha-256 and re-set passwords.'),
-
-    dict(script='sec_06_audit_logging',               mode='pattern', severity='Warning',
-         pattern=r'(?im)log_statement\s*\|\s*none',
-         title='log_statement is "none"',
-         recommendation='No SQL statements are being logged. Set log_statement to ddl or all for security review.'),
-
-    dict(script='sec_07_encryption_status',           mode='pattern', severity='Warning',
-         pattern=r'(?im)ssl\s*\|\s*off',
-         title='SSL is disabled on the server',
-         recommendation='Enable SSL and require it for all client connections.'),
-
-    dict(script='sec_08_network_exposure',            mode='pattern', severity='Warning',
-         pattern=r'(?im)listen_addresses\s*\|\s*\*',
-         title='listen_addresses is "*" (all interfaces)',
-         recommendation='Bind only to required interfaces. Restrict via firewall or pg_hba host rules.'),
-
-    dict(script='sec_09_sensitive_data_discovery',    mode='has_data', severity='Warning',
-         title='Columns with PII / sensitive name patterns',
-         recommendation='Review whether these columns hold sensitive data. Apply pgcrypto or column-level access controls.'),
-
-    dict(script='sec_10_dangerous_objects',           mode='has_data', severity='Warning',
-         title='Privileged extensions / SECURITY DEFINER functions',
-         recommendation='Audit each finding. SECURITY DEFINER functions should set search_path explicitly.'),
-
-    dict(script='sec_12_dba_role_review',             mode='has_data', severity='Info',
-         title='DBA role expansion review',
-         recommendation='Review nested role grants and CREATE / SUPERUSER chains.'),
-
-    dict(script='sec_17_recovery_and_backup_security', mode='pattern', severity='Warning',
-         pattern=r'(?im)\barchive_mode\s*\|\s*off\b',
-         title='archive_mode is off',
-         recommendation='Without WAL archiving, point-in-time recovery is not possible.'),
-
-    dict(script='sec_20_failed_login_patterns',       mode='has_data', severity='Warning',
-         title='Failed login activity recorded',
-         recommendation='Review failed login source IPs and roles. Tune brute-force defenses.'),
+    dict(
+        script='sec_03_admin_and_superusers',
+        mode='has_data', severity='Info',
+        title='Superuser / privileged role membership',
+        recommendation='Reduce SUPERUSER, pg_signal_backend, pg_read_all_data '
+                       'memberships to the minimum required.',
+        extractor=_ext_superusers,
+        ext_label='Privileged accounts (sample)',
+    ),
+    dict(
+        script='sec_04_public_and_excessive_grants',
+        mode='has_data', severity='Warning',
+        title='Permissions granted to PUBLIC or excessive scope',
+        recommendation='PUBLIC grants apply to every role. Move them to specific '
+                       'roles or REVOKE.',
+        extractor=_ext_public_grants,
+        ext_label='Excessive grants (sample)',
+    ),
+    dict(
+        script='sec_05_authentication_and_passwords',
+        mode='pattern', severity='Critical',
+        pattern=r'(?im)^\s*trust\s|method\s*\|\s*trust',
+        title='pg_hba.conf uses "trust" authentication',
+        recommendation='Trust auth allows password-less access. Replace with '
+                       'scram-sha-256 or cert.',
+    ),
+    dict(
+        script='sec_05_authentication_and_passwords',
+        mode='pattern', severity='Warning',
+        pattern=r'(?im)password_encryption\s*\|\s*md5',
+        title='password_encryption is md5',
+        recommendation='md5 password hashing is deprecated. Switch to scram-sha-256 '
+                       'and re-set all passwords.',
+    ),
+    dict(
+        script='sec_06_audit_logging',
+        mode='pattern', severity='Warning',
+        pattern=r'(?im)log_statement\s*\|\s*none',
+        title='log_statement is "none"',
+        recommendation='No SQL is logged. Set log_statement to ddl or all for audit.',
+    ),
+    dict(
+        script='sec_07_encryption_status',
+        mode='pattern', severity='Warning',
+        pattern=r'(?im)\bssl\s*\|\s*off\b',
+        title='SSL is disabled on the server',
+        recommendation='Enable SSL and require it via pg_hba (hostssl) for all clients.',
+    ),
+    dict(
+        script='sec_08_network_exposure',
+        mode='pattern', severity='Warning',
+        pattern=r'(?im)listen_addresses\s*\|\s*\*',
+        title='listen_addresses is "*" (all interfaces)',
+        recommendation='Bind only to required interfaces. Restrict via firewall '
+                       'or pg_hba host rules.',
+    ),
+    dict(
+        script='sec_09_sensitive_data_discovery',
+        mode='has_data', severity='Warning',
+        title='Columns with PII / sensitive name patterns',
+        recommendation='Verify whether these columns hold sensitive data. Apply '
+                       'pgcrypto column encryption or column-level access controls.',
+        extractor=_ext_pii_columns,
+        ext_label='Candidate PII columns (sample)',
+    ),
+    dict(
+        script='sec_10_dangerous_objects',
+        mode='has_data', severity='Warning',
+        title='Privileged extensions / SECURITY DEFINER functions',
+        recommendation='Audit each finding. SECURITY DEFINER functions should '
+                       'set search_path explicitly; untrusted languages need review.',
+        extractor=_ext_dangerous,
+        ext_label='Dangerous objects (sample)',
+    ),
+    dict(
+        script='sec_12_dormant_users',
+        mode='has_data', severity='Info',
+        title='Dormant or expired users',
+        recommendation='Review dormant accounts. Disable or remove unused logins.',
+        extractor=_ext_dormant,
+        ext_label='Dormant accounts (sample)',
+    ),
+    dict(
+        script='sec_17_recovery_and_backup_security',
+        mode='pattern', severity='Warning',
+        pattern=r'(?im)\barchive_mode\s*\|\s*off\b',
+        title='archive_mode is off',
+        recommendation='Without WAL archiving, point-in-time recovery is impossible.',
+    ),
+    dict(
+        script='sec_18_audit_gaps',
+        mode='has_data', severity='Info',
+        title='Audit configuration gaps',
+        recommendation='Cross-check pgaudit / log_* settings against your audit '
+                       'baseline.',
+        extractor=_ext_audit_gaps,
+        ext_label='Audit settings of interest',
+    ),
+    dict(
+        script='sec_20_failed_login_patterns',
+        mode='has_data', severity='Warning',
+        title='Failed login activity recorded',
+        recommendation='Review failed login source IPs and roles. Tune brute-force defenses.',
+        extractor=_ext_failed_logins,
+        ext_label='Failed-login events (sample)',
+    ),
+    dict(
+        script='sec_22_cert_and_key_expiry',
+        mode='has_data', severity='Warning',
+        title='Credentials / certificates approaching expiry',
+        recommendation='Plan rotation. Expired role passwords trigger silent auth '
+                       'failures; expired certs take TLS offline.',
+        extractor=_ext_cert_expiry,
+        ext_label='Roles with non-trivial expiry state',
+    ),
 ]
 
-SEPARATOR_RE  = re.compile(r'^[\s\-+]*\-{3,}[\s\-+]*$')
-ROW_COUNT_RE  = re.compile(r'^\(\s*\d+\s+rows?\s*\)\s*$')
-NOTE_RE       = re.compile(r'^(NOTICE|WARNING|psql:|--|\s*$)')
 
+# ---------------------------------------------------------------------------
+# Analysis
+# ---------------------------------------------------------------------------
+def find_findings(log_dir: Path) -> list:
+    findings: list = []
 
-_BOM_UTF16_LE = b'\xff\xfe'
-_BOM_UTF16_BE = b'\xfe\xff'
-_BOM_UTF8     = b'\xef\xbb\xbf'
-
-
-def _detect_encoding(path: Path) -> str:
-    try:
-        with path.open('rb') as f:
-            head = f.read(4)
-    except OSError:
-        return 'utf-8'
-    if head[:2] == _BOM_UTF16_LE: return 'utf-16'
-    if head[:2] == _BOM_UTF16_BE: return 'utf-16'
-    if head[:3] == _BOM_UTF8:     return 'utf-8-sig'
-    if len(head) >= 2 and 0 < head[0] < 128 and head[1] == 0:
-        return 'utf-16-le'        # BOM-less UTF-16 LE
-    return 'utf-8'
-
-
-def _read_log(path: Path) -> str:
-    enc = _detect_encoding(path)
-    try:
-        return path.read_text(encoding=enc, errors='replace')
-    except OSError:
-        return ''
-
-
-def log_has_data_rows(log_path: Path) -> bool:
-    """Return True if a psql log has data rows beyond headers / notices."""
-    text = _read_log(log_path)
-    if not text:
-        return False
-    in_data = False
-    for line in text.splitlines():
-        if SEPARATOR_RE.match(line):
-            in_data = True
-            continue
-        if not in_data:
-            continue
-        if ROW_COUNT_RE.match(line):
-            in_data = False
-            continue
-        if not line.strip() or NOTE_RE.match(line):
-            continue
-        return True
-    return False
-
-
-def read_log_text(log_path: Path) -> str:
-    return _read_log(log_path)
-
-
-
-def read_summary(summary_path: Path):
-    if not summary_path.exists():
-        return
-    for raw in _read_log(summary_path).splitlines():
-        m = re.match(r'^(OK|FAIL)\s+(\S+)', raw)
-        if m:
-            yield m.group(1), m.group(2)
-
-
-def find_findings(log_dir: Path) -> list[dict]:
-    findings: list[dict] = []
     for status, script in read_summary(log_dir / '_summary.txt'):
         if status != 'FAIL':
             continue
@@ -165,37 +276,64 @@ def find_findings(log_dir: Path) -> list[dict]:
                         if re.match(r'(ERROR|FATAL|psql:)', l)][:5]
                 if errs:
                     detail = '\n'.join(errs)
-        findings.append(dict(severity='Critical', script=script,
-                             title='Script execution failed', detail=detail,
-                             recommendation='Check connection privileges and the script log.'))
+        findings.append(dict(
+            severity='Critical', script=script,
+            title='Script execution failed', detail=detail,
+            recommendation='Check connection privileges and the script log.',
+            objects=[], object_columns=[], object_label='',
+        ))
 
     for log in sorted(log_dir.glob('*.log')):
         for rule in RULES:
             if rule['script'] not in log.stem:
                 continue
-            hit, detail = False, ''
+            text = read_log_text(log)
+            if not text:
+                continue
+            hit = False
+            detail = ''
             if rule['mode'] == 'has_data':
-                if log_has_data_rows(log):
+                if has_data_rows(text):
                     hit = True
-                    detail = 'Diagnostic script returned data rows -- review the full log.'
             elif rule['mode'] == 'pattern':
-                text = read_log_text(log)
-                m = re.search(rule['pattern'], text) if text else None
+                m = re.search(rule['pattern'], text)
                 if m:
                     hit = True
                     snip = m.group(0)
                     detail = 'Match: ' + (snip if len(snip) <= 200 else snip[:200] + '...')
-            if hit:
-                findings.append(dict(severity=rule['severity'], script=log.name,
-                                     title=rule['title'], detail=detail,
-                                     recommendation=rule['recommendation']))
+            if not hit:
+                continue
+            objs: list = []
+            ext_cols: list = []
+            object_groups: list = []
+            extractor = rule.get('extractor')
+            if extractor:
+                try:
+                    out = extractor(text)
+                except Exception:
+                    out = []
+                if (out and isinstance(out[0], dict)
+                        and {'label', 'columns', 'rows'} <= set(out[0].keys())):
+                    object_groups = out
+                else:
+                    objs = out
+                    if objs:
+                        ext_cols = list(objs[0].keys())
+            findings.append(dict(
+                severity=rule['severity'], script=log.name,
+                title=rule['title'], detail=detail,
+                recommendation=rule['recommendation'],
+                objects=objs, object_columns=ext_cols,
+                object_label=rule.get('ext_label', ''),
+                object_groups=object_groups,
+            ))
     return findings
 
 
-def discover_contexts(root: Path) -> list[dict]:
+def discover_contexts(root: Path) -> list:
     if (root / '_summary.txt').exists():
         return [dict(name='(single run)', log_dir=root)]
-    contexts: list[dict] = []
+    contexts: list = []
     for sub in sorted(p for p in root.iterdir() if p.is_dir()):
         runs = sorted(sub.glob('postgres_sec_*'), reverse=True)
         if runs:
@@ -203,128 +341,175 @@ def discover_contexts(root: Path) -> list[dict]:
     return contexts
 
 
-def severity_rank(s: str) -> int:
-    return {'Critical': 0, 'Warning': 1, 'Info': 2}.get(s, 3)
-
-
-def render_findings(findings: list[dict]) -> str:
-    if not findings:
-        return '<p class="ok">No problems detected by the rule set.</p>'
-    rows = []
-    for f in sorted(findings, key=lambda x: severity_rank(x['severity'])):
-        sev_class = f['severity'].lower()
-        detail_html = f'<br><span class="detail">{html.escape(f.get("detail",""))}</span>' if f.get('detail') else ''
-        rows.append(
-            f'<tr class="sev-{sev_class}">'
-            f'<td><span class="badge {sev_class}">{f["severity"]}</span></td>'
-            f'<td><code>{html.escape(f["script"])}</code></td>'
-            f'<td><strong>{html.escape(f["title"])}</strong>{detail_html}</td>'
-            f'<td>{html.escape(f["recommendation"])}</td>'
-            f'</tr>'
+# ---------------------------------------------------------------------------
+# HTML rendering
+# ---------------------------------------------------------------------------
+def render_top_issues(findings: list) -> str:
+    top = [f for f in findings if f['severity'] in ('Critical', 'Warning')]
+    top = sorted(top, key=lambda f: (severity_rank(f['severity']), f['script']))[:10]
+    if not top:
+        return "<p class='ok'>No critical or warning issues detected.</p>"
+    parts = ["<p>Highest-priority findings. Click a title to jump to the detail "
+             "row and the list of concrete objects.</p>"
+             "<ol class='issue-list'>"]
+    for f in top:
+        sev = f['severity'].lower()
+        cls = 'warn' if sev == 'warning' else ''
+        anchor = re.sub(r'[^A-Za-z0-9]', '-', f['script'] + '-' + f['title']).lower()
+        parts.append(
+            f"<li class='{cls}'><div class='it'>"
+            f"<span class='ti'><a class='jump' href='#f-{anchor}'>{esc(f['title'])}</a></span>"
+            f"<span class='sc'><span class='badge {sev}'>{f['severity']}</span> "
+            f"&middot; <code>{esc(f['script'])}</code></span></div>"
+            f"<div class='ac'><strong>Action:</strong> {esc(f['recommendation'])}</div>"
+            f"</li>"
         )
-    return ('<table class="findings"><thead><tr>'
-            '<th>Severity</th><th>Script</th><th>Finding</th><th>Recommendation</th>'
-            '</tr></thead><tbody>' + ''.join(rows) + '</tbody></table>')
+    parts.append("</ol>")
+    return ''.join(parts)
 
 
-CSS = """\
-<style>
-body{font-family:Segoe UI,Arial,sans-serif;margin:0;padding:20px;background:#f5f5f5;color:#222;}
-h1{margin:0 0 4px 0;}h2{border-bottom:2px solid #336791;padding-bottom:4px;margin-top:32px;}
-header{background:#336791;color:white;padding:24px;border-radius:6px;margin-bottom:20px;}
-header p{margin:4px 0;opacity:0.9;}
-.summary{background:white;padding:16px;border-radius:6px;margin-bottom:20px;box-shadow:0 1px 3px rgba(0,0,0,0.1);}
-table{border-collapse:collapse;width:100%;background:white;}
-th,td{padding:8px 12px;border-bottom:1px solid #e0e0e0;text-align:left;vertical-align:top;}
-th{background:#eaf0f6;font-weight:600;}
-.findings tr:hover{background:#fafbfc;}
-.badge{display:inline-block;padding:2px 8px;border-radius:3px;font-size:0.85em;font-weight:600;color:white;}
-.badge.critical{background:#c0392b;}.badge.warning{background:#e67e22;}.badge.info{background:#2980b9;}
-.sev-critical>td:first-child{border-left:4px solid #c0392b;}
-.sev-warning >td:first-child{border-left:4px solid #e67e22;}
-.sev-info    >td:first-child{border-left:4px solid #2980b9;}
-.detail{color:#666;font-size:0.9em;font-family:Consolas,monospace;white-space:pre-wrap;}
-.ok{color:#27ae60;font-weight:600;}
-.exec-summary td.num{text-align:right;font-variant-numeric:tabular-nums;}
-.exec-summary td.crit{color:#c0392b;font-weight:600;}
-.exec-summary td.warn{color:#e67e22;font-weight:600;}
-.exec-summary td.fail{color:#c0392b;font-weight:600;}
-.toc{background:white;padding:12px 20px;border-radius:6px;margin-bottom:20px;box-shadow:0 1px 3px rgba(0,0,0,0.1);}
-.toc ul{margin:0;padding-left:20px;columns:3;}
-.toc a{text-decoration:none;color:#336791;}.toc a:hover{text-decoration:underline;}
-section.db{background:white;padding:16px 20px;border-radius:6px;margin-bottom:16px;box-shadow:0 1px 3px rgba(0,0,0,0.1);}
-section.db h3{margin-top:0;color:#336791;}
-.meta{color:#666;font-size:0.9em;margin-bottom:12px;}
-code{background:#f0f0f0;padding:1px 6px;border-radius:3px;font-size:0.9em;}
-</style>"""
+def render_findings(findings: list) -> str:
+    """Card-based finding layout (see perf analyzer for rationale)."""
+    if not findings:
+        return "<p class='ok'>No problems detected by the rule set.</p>"
+    parts = []
+    for f in sorted(findings, key=lambda x: (severity_rank(x['severity']), x['script'])):
+        sev = f['severity'].lower()
+        anchor = re.sub(r'[^A-Za-z0-9]', '-', f['script'] + '-' + f['title']).lower()
+        parts.append(f"<div class='finding sev-{sev}' id='f-{anchor}'>")
+        parts.append(
+            f"<div class='finding-head'>"
+            f"<span class='badge {sev}'>{f['severity']}</span>"
+            f"<span class='finding-title'>{esc(f['title'])}</span>"
+            f"<span class='finding-script'><code>{esc(f['script'])}</code></span>"
+            f"</div>"
+            f"<div class='finding-rec'><strong>Action:</strong> "
+            f"{esc(f['recommendation'])}</div>"
+        )
+        if f.get('detail'):
+            parts.append(f"<div class='finding-detail'>{esc(f['detail'])}</div>")
+        if f.get('object_groups'):
+            for g in f['object_groups']:
+                parts.append(
+                    f"<div class='objs-caption'><strong>{esc(g['label'])}</strong>"
+                    f" &middot; {len(g['rows'])} row(s)</div>"
+                    + object_table(g['rows'], g['columns'], limit=10)
+                )
+        elif f.get('objects') and f.get('object_columns'):
+            parts.append(
+                f"<div class='objs-caption'><strong>"
+                f"{esc(f['object_label'] or 'Concrete objects')}</strong></div>"
+                + object_table(f['objects'], f['object_columns'], limit=10)
+            )
+        parts.append("</div>")
+    return ''.join(parts)
 
 
-def build_html(report: list[dict], server: str, report_dir: Path) -> str:
-    now = _dt.datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+def build_html(report: list, server_label: str, report_dir: Path,
+               fingerprint: dict, target: dict) -> str:
     total_pass = sum(r['passed']  for r in report)
     total_fail = sum(r['failed']  for r in report)
     total_crit = sum(r['critical'] for r in report)
     total_warn = sum(r['warning']  for r in report)
     total_info = sum(r['info']     for r in report)
 
+    server = (server_label or fingerprint.get('cluster_name')
+              or target.get('host') or '(unspecified)')
+
     parts = [f"""<!DOCTYPE html>
 <html lang='en'><head><meta charset='UTF-8'>
 <title>PostgreSQL Security Audit Report</title>
-{CSS}
-</head><body>
+{SHARED_CSS}
+</head><body id='top'>
 <header>
   <h1>PostgreSQL Security Audit Report</h1>
-  <p><strong>Server:</strong> {html.escape(server or '(unspecified)')}</p>
-  <p><strong>Report folder:</strong> {html.escape(str(report_dir))}</p>
-  <p><strong>Generated:</strong> {now}</p>
-</header>
-<div class='summary'>
-<h2 style='margin-top:0;border:none;'>Executive Summary</h2>
-<table class='exec-summary'>
-<thead><tr><th>Database / Context</th><th>Scripts OK</th><th>Failed</th><th>Critical</th><th>Warning</th><th>Info</th></tr></thead>
-<tbody>"""]
-    for r in report:
-        anchor = re.sub(r'[^A-Za-z0-9]', '_', r['name'])
-        parts.append(
-            f"<tr><td><a href='#db_{anchor}'>{html.escape(r['name'])}</a></td>"
-            f"<td class='num'>{r['passed']}</td>"
-            f"<td class='num fail'>{r['failed']}</td>"
-            f"<td class='num crit'>{r['critical']}</td>"
-            f"<td class='num warn'>{r['warning']}</td>"
-            f"<td class='num'>{r['info']}</td></tr>"
-        )
+  <p><strong>Server:</strong> {esc(server)}</p>
+  <p><strong>Report folder:</strong> {esc(str(report_dir))}</p>
+  <p><strong>Generated:</strong> {now_str()}</p>
+</header>"""]
+
     parts.append(
-        f"<tr style='font-weight:bold;background:#eef3f7;'><td>TOTAL</td>"
-        f"<td class='num'>{total_pass}</td>"
-        f"<td class='num fail'>{total_fail}</td>"
-        f"<td class='num crit'>{total_crit}</td>"
-        f"<td class='num warn'>{total_warn}</td>"
-        f"<td class='num'>{total_info}</td></tr>"
-        f"</tbody></table></div>"
+        "<nav class='quick-nav'>"
+        "<a href='#env-fingerprint'>Environment</a>"
+        "<a href='#exec-summary'>Executive Summary</a>"
+        "<a href='#findings'>Findings</a>"
+        "</nav>"
     )
 
+    parts.append("<a id='env-fingerprint'></a>")
+    parts.append(render_fingerprint_card(fingerprint, target, report_dir))
+
+    parts.append("<a id='exec-summary'></a>")
+    parts.append("<div class='card'><h2 style='margin-top:0;border:none;'>"
+                 "Executive Summary<a class='back-top' href='#top'>top &uarr;</a></h2>")
+    parts.append("<div class='kpi-row'>")
+    parts.append(
+        f"<div class='kpi'><div class='lbl'>Databases analysed</div><div class='num'>{len(report)}</div></div>"
+        f"<div class='kpi'><div class='lbl'>Scripts OK</div><div class='num'>{total_pass}</div></div>"
+        f"<div class='kpi {'fail' if total_fail else ''}'><div class='lbl'>Failed scripts</div><div class='num fail'>{total_fail}</div></div>"
+        f"<div class='kpi {'crit' if total_crit else ''}'><div class='lbl'>Critical findings</div><div class='num crit'>{total_crit}</div></div>"
+        f"<div class='kpi {'warn' if total_warn else ''}'><div class='lbl'>Warnings</div><div class='num warn'>{total_warn}</div></div>"
+    )
+    parts.append("</div>")
+    all_findings = []
+    for r in report:
+        all_findings.extend(r['findings'])
+    parts.append("<h3>Top issues -- what to fix</h3>")
+    parts.append(render_top_issues(all_findings))
+    # Context rollup only when multi-context (single-DB run duplicates KPI cards)
     if len(report) > 1:
-        parts.append("<div class='toc'><h2 style='margin-top:0;border:none;'>Sections</h2><ul>")
+        parts.append(
+            "<h3>Context rollup</h3>"
+            "<table class='exec-summary'><thead><tr>"
+            "<th>Database / Context</th><th>Scripts OK</th><th>Failed</th>"
+            "<th>Critical</th><th>Warning</th><th>Info</th></tr></thead><tbody>"
+        )
         for r in report:
             anchor = re.sub(r'[^A-Za-z0-9]', '_', r['name'])
-            parts.append(f"<li><a href='#db_{anchor}'>{html.escape(r['name'])}</a></li>")
-        parts.append("</ul></div>")
+            parts.append(
+                f"<tr><td><a href='#db_{anchor}'>{esc(r['name'])}</a></td>"
+                f"<td class='num'>{r['passed']}</td>"
+                f"<td class='num fail'>{r['failed']}</td>"
+                f"<td class='num crit'>{r['critical']}</td>"
+                f"<td class='num warn'>{r['warning']}</td>"
+                f"<td class='num'>{r['info']}</td></tr>"
+            )
+        parts.append(
+            f"<tr style='font-weight:bold;background:#eef3f7;'><td>TOTAL</td>"
+            f"<td class='num'>{total_pass}</td>"
+            f"<td class='num fail'>{total_fail}</td>"
+            f"<td class='num crit'>{total_crit}</td>"
+            f"<td class='num warn'>{total_warn}</td>"
+            f"<td class='num'>{total_info}</td></tr>"
+            f"</tbody></table>"
+        )
+    parts.append("</div>")
 
+    parts.append("<a id='findings'></a>")
+    multi = len(report) > 1
+    parts.append("<div class='card'><h2 style='margin-top:0;border:none;'>"
+                 "Findings<a class='back-top' href='#top'>top &uarr;</a></h2>")
     for r in report:
         anchor = re.sub(r'[^A-Za-z0-9]', '_', r['name'])
-        parts.append(f"<section class='db' id='db_{anchor}'>")
-        parts.append(f"<h3>{html.escape(r['name'])}</h3>")
-        parts.append(f"<div class='meta'>Logs: <code>{html.escape(str(r['log_dir']))}</code></div>")
+        if multi:
+            parts.append(f"<section class='db' id='db_{anchor}'>")
+            parts.append(f"<h3>{esc(r['name'])}</h3>")
         parts.append(
-            f"<div class='meta'>Scripts run: {r['passed'] + r['failed']} | "
-            f"OK: {r['passed']} | Failed: {r['failed']}</div>"
+            f"<div class='meta'>Logs: <code>{esc(str(r['log_dir']))}</code> "
+            f"&middot; Scripts run: {r['passed'] + r['failed']} "
+            f"(OK: {r['passed']}, Failed: {r['failed']})</div>"
         )
         parts.append(render_findings(r['findings']))
-        parts.append("</section>")
+        if multi:
+            parts.append("</section>")
+    parts.append("</div>")  # close findings card
     parts.append("</body></html>")
     return ''.join(parts)
 
 
+# ---------------------------------------------------------------------------
+# Main
+# ---------------------------------------------------------------------------
 def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__.split('\n\n')[0])
     ap.add_argument('report_dir')
@@ -343,26 +528,34 @@ def main() -> int:
         print(f'ERROR: no log folders found under {report_dir}', file=sys.stderr)
         return 3
 
+    target = read_target(report_dir)
+
     report = []
+    fingerprint = {}
     for ctx in contexts:
         findings = find_findings(ctx['log_dir'])
         passed = failed = 0
         for status, _ in read_summary(ctx['log_dir'] / '_summary.txt'):
             if status == 'OK':   passed += 1
             elif status == 'FAIL': failed += 1
+        ctx_fp = read_fingerprint(ctx['log_dir'], ('sec_21_patch_and_cve_level',))
+        if not fingerprint and ctx_fp:
+            fingerprint = ctx_fp
+        ctx_name = context_label(ctx_fp, target, ctx['name'])
         report.append(dict(
-            name=ctx['name'], log_dir=ctx['log_dir'], findings=findings,
+            name=ctx_name, log_dir=ctx['log_dir'], findings=findings,
             passed=passed, failed=failed,
             critical=sum(1 for f in findings if f['severity']=='Critical'),
             warning =sum(1 for f in findings if f['severity']=='Warning'),
             info    =sum(1 for f in findings if f['severity']=='Info'),
         ))
 
-    out.write_text(build_html(report, args.server, report_dir), encoding='utf-8')
+    out.write_text(build_html(report, args.server, report_dir, fingerprint, target),
+                   encoding='utf-8')
 
     print('=' * 80)
     print('Security audit analysis complete.')
-    print(f'  Databases analyzed : {len(report)}')
+    print(f'  Databases analysed : {len(report)}')
     print(f'  Critical findings  : {sum(r["critical"] for r in report)}')
     print(f'  Warnings           : {sum(r["warning"]  for r in report)}')
     print(f'  Failed scripts     : {sum(r["failed"]   for r in report)}')

@@ -8,6 +8,30 @@
 -- =============================================================================
 
 -- ---------------------------------------------------------------------------
+-- Fingerprint header -- single-row context the report analyzer reads to
+-- populate the Environment Fingerprint card. Keep as the FIRST query so
+-- the analyzer can find it deterministically.
+-- ---------------------------------------------------------------------------
+SELECT
+    current_setting('server_version')                     AS server_version,
+    current_setting('server_version_num')::int            AS server_version_num,
+    current_database()                                    AS database_name,
+    current_user                                          AS connection_user,
+    inet_server_addr()                                    AS server_ip,
+    inet_server_port()                                    AS server_port,
+    pg_is_in_recovery()                                   AS is_in_recovery,
+    pg_postmaster_start_time()                            AS postmaster_start_time,
+    now() - pg_postmaster_start_time()                    AS uptime,
+    current_setting('cluster_name', true)                 AS cluster_name,
+    EXISTS (SELECT 1 FROM pg_roles WHERE rolname='rdsadmin') AS is_aws_rds,
+    (SELECT count(*) FROM pg_database WHERE datistemplate=false) AS user_databases,
+    (SELECT pg_size_pretty(pg_database_size(current_database()))) AS this_db_size,
+    current_setting('shared_buffers')                     AS shared_buffers,
+    current_setting('max_connections')                    AS max_connections,
+    current_setting('wal_level')                          AS wal_level,
+    version()                                             AS version_full;
+
+-- ---------------------------------------------------------------------------
 -- Memory parameters
 -- ---------------------------------------------------------------------------
 SELECT name, setting, unit, source, boot_val

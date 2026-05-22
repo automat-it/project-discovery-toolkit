@@ -32,7 +32,7 @@ reports/postgres_perf_YYYYMMDD_HHMMSS/
 ## Report analyzer (`analyze_report.py`)
 
 After a run completes, parse the report folder into a customer-friendly
-HTML summary highlighting potential issues across all databases:
+HTML report:
 
 ```bash
 # Single-database run output (the folder run_audit.sh wrote into)
@@ -40,13 +40,80 @@ HTML summary highlighting potential issues across all databases:
 
 # Multi-database run (parent folder containing per-DB sub-folders)
 ./analyze_report.py /path/to/parent_report_dir --server prod-postgres-01
+
+# Render to PDF (optional -- HTML is always produced)
+google-chrome --headless --disable-gpu --no-pdf-header-footer \
+    --print-to-pdf=perf_analysis.pdf \
+    "file://$(pwd)/reports/postgres_perf_YYYYMMDD_HHMMSS/perf_analysis.html"
 ```
 
-The analyzer writes `perf_analysis.html` into the report folder. The HTML
-contains an executive-summary table (counts of Critical / Warning / Info
-findings per database) plus a section per database with the matched
-findings, severity, and remediation hints. Standard library only --
-no Python packages to install.
+The analyzer is pure Python standard library (no `pip install` step).
+
+### What the HTML report contains
+
+* **Environment Fingerprint card** -- host, database, PostgreSQL
+  version, Aurora / RDS flag, primary / replica role, uptime, this
+  DB's size, shared_buffers, max_connections, wal_level. Populated
+  from a single-row fingerprint header that `perf_05` emits as its
+  first query specifically for the analyzer.
+
+* **Quick-nav strip** with anchor links: Environment, Executive
+  Summary, Findings, SQL Appendix. Hidden in print.
+
+* **Executive Summary**
+  - Five KPI cards (Databases analysed, Scripts OK, Failed scripts,
+    Critical findings, Warnings) -- crit / warn / fail cards turn red /
+    orange when non-zero so the at-a-glance status is unambiguous.
+  - **Top issues -- what to fix**: the highest-priority findings as an
+    ordered list with severity badge + action line + anchor link to
+    the detailed finding card. Capped at 10; the rest are still in the
+    Findings section below.
+  - **Context rollup** table (only when more than one database was
+    audited; redundant for single-DB runs).
+
+* **Findings** -- one card per finding (not a giant 4-column table any
+  more). Each card:
+  - severity colour bar (red / orange / blue)
+  - title + script reference
+  - boxed "Action:" recommendation
+  - one or more **concrete-objects** sub-tables (top 10 rows by default
+    with `... +N more rows -- consult the raw .log file` overflow note)
+
+  The concrete objects are extracted from the actual psql log so the
+  reader sees real names (e.g. `hist_hr_emp_leave_balance_i1`, 414 MB,
+  0 scans) instead of "review the log". Coverage:
+
+  | Finding                              | Concrete objects shown                   |
+  |--------------------------------------|------------------------------------------|
+  | `perf_01` Top SQL                    | queryid (linked to appendix), calls, total_min, mean_ms, pct_total |
+  | `perf_02` Blocking / long-running    | blocker_pid + blocked_pid + blocked_query, long-running tx, idle-in-tx |
+  | `perf_04` Wait events                | wait_event_type, wait_event, sessions, pct |
+  | `perf_06` Index hygiene              | 5 sub-tables: unused, duplicates, narrow-vs-wide, FK without index, etc. -- with `index_name` column |
+  | `perf_07` Stale autovacuum targets   | schema, table, live rows, dead %, last_analyze |
+  | `perf_09` Temp files spilled         | per-database + per-statement temp counters |
+  | `perf_11` Bloated objects            | schema, table, bloat_pct, est_bytes      |
+  | `perf_14` Forced checkpoints         | num_timed vs num_requested, write/sync time |
+  | `perf_15` Capacity headroom          | sequences / storage > 50% consumed       |
+
+* **SQL Appendix** -- one entry per unique pg_stat_statements queryid
+  surfaced in Top SQL, with the **full** untruncated query text in a
+  `<pre>` block. A collapsible jump-to index at the top lists every
+  queryid with a one-line preview. queryid cells in the Top SQL
+  tables link straight to the matching appendix entry; each appendix
+  entry has a `top ↑` link back.
+
+### Finding triggers
+
+Each rule has a `mode`:
+* `has_data` -- fire when the log has any data rows.
+* `pattern`  -- fire when a regex matches (used for off-by-default
+  GUCs like `wal_level=trust`, forced checkpoints, replay lag in
+  `HH:MM:SS` format).
+* `check`    -- fire when a custom predicate returns True. Used by
+  `perf_02` to avoid false-positive "blocking" findings: the rule
+  fires only when actionable sub-tables (blocking pairs, long-running
+  active tx, idle-in-tx) have rows, not when the always-non-empty
+  lock-summary / deadlock-stats tables do.
 
 
 ## Read-only guarantee
@@ -62,21 +129,32 @@ PostgreSQL 13+. A few queries reference catalogs added in newer versions
 (`pg_stat_wal` in 14+); those blocks are guarded by a server-version
 check and degrade to a `skipped` note instead of erroring out.
 
-### PG17 column moves (documented inside the scripts)
+### PG17 schema renames (handled automatically by version branches)
 
-- `pg_stat_statements.blk_read_time` / `blk_write_time` were split in
-  PG17 into `shared_blk_read_time` / `shared_blk_write_time` (and
-  `local_blk_*`). `perf_01` and `perf_04` use the pre-17 names; the
-  adjacent comment in each file lists the rename.
+The scripts detect the server version at runtime and branch between
+the pre-17 and PG17+ shapes, so the same file runs unchanged on
+PG13–17:
+
+- `pg_stat_statements.blk_read_time` / `blk_write_time` were removed
+  in PG17 and split into `shared_blk_read_time` / `shared_blk_write_time`
+  / `local_blk_*` / `temp_blk_*`. `perf_04` branches on
+  `server_version_num >= 170000` and uses the right column set.
 - `pg_stat_bgwriter` checkpoint counters (`checkpoints_timed`,
   `checkpoints_req`, `checkpoint_write_time`, `checkpoint_sync_time`,
-  `buffers_checkpoint`, `buffers_backend`, `buffers_backend_fsync`)
-  moved to the new `pg_stat_checkpointer` view in PG17. `perf_14`
-  uses the pre-17 view; a comment next to the query explains the
-  PG17 substitution.
+  `buffers_checkpoint`) moved to the new `pg_stat_checkpointer` view
+  in PG17 with renamed columns (`num_timed`, `num_requested`,
+  `write_time`, `sync_time`, `buffers_written`). `buffers_backend` /
+  `buffers_backend_fsync` were removed -- backend writes now live in
+  `pg_stat_io`. `perf_14` renders the PG17 layout (incl. a
+  per-backend-type `pg_stat_io` summary) on PG17+ and the legacy
+  `pg_stat_bgwriter` layout on PG13–16.
+- `pg_stat_progress_vacuum.max_dead_tuples` / `num_dead_tuples` were
+  replaced in PG17 with byte-oriented `max_dead_tuple_bytes` /
+  `dead_tuple_bytes` / `num_dead_item_ids` plus
+  `indexes_total` / `indexes_processed`. `perf_20` branches on
+  version and uses the right column set.
 - `pg_stat_statements_info` was added in PG14; `perf_01` uses it at
-  the top, which will error on PG13 — skip that block or wrap it in
-  a `server_version_num` guard for PG13 compatibility.
+  the top, guarded by a server-version check.
 
 ## Required privileges
 
@@ -99,46 +177,67 @@ insight needed to identify performance problems.
 ## Aurora / RDS PostgreSQL caveats
 
 The scripts run on Amazon Aurora PostgreSQL and RDS for PostgreSQL
-clusters, with the following expectations:
+clusters. Aurora is **auto-detected at runtime** via presence of the
+`rdsadmin` role: every Aurora-incompatible block emits a `[note]`
+marker and the rest of the script continues normally. Standard
+PostgreSQL is unaffected -- the `\if :is_aws_rds` guards activate only
+on Aurora.
 
-* **Run against the writer endpoint.** `pg_stat_bgwriter`, write-related
-  IO counters, and log-flush stats are meaningful only on the primary.
-  Reader endpoints accept the connection but surface a subset of
-  metrics.
-* **No blocked server-side APIs are used.** The scripts do not call
+* **Run against the writer endpoint.** `pg_stat_bgwriter`,
+  write-related IO counters, and log-flush stats are meaningful only
+  on the primary. Reader endpoints accept the connection but surface
+  a subset of metrics.
+
+* **Aurora-blocked functions handled automatically.** Aurora rejects
+  these with `currently not supported for Aurora` regardless of
+  `wal_level` or role membership. Affected scripts now branch on the
+  Aurora flag and emit `[note]` rows in place of the call:
+  - `pg_current_wal_lsn`, `pg_walfile_name` -- `perf_10`, `perf_19`,
+    `perf_22`
+  - `pg_last_wal_receive_lsn`, `pg_last_wal_replay_lsn`,
+    `pg_last_xact_replay_timestamp` -- `perf_10`, `perf_22`
+  - `pg_stat_get_wal_receiver` (backs `pg_stat_wal_receiver`) --
+    `perf_10`, `perf_22`
+  - `pg_stat_get_wal` (backs `pg_stat_wal`) -- `perf_10`, `perf_14`
+
+* **`primary_conninfo` / `primary_slot_name` SUSET GUCs** are
+  hard-blocked on Aurora even when `pg_has_role(...)` claims
+  `pg_read_all_settings` membership. `perf_24` checks the Aurora flag
+  *before* the `pg_has_role` fallback and skips the read on Aurora.
+
+* **Aurora reader-lag is not in `pg_stat_replication`.** Aurora
+  replicates at the storage layer, not via WAL-shipping or replication
+  slots. The view is queryable but typically empty. For real reader-
+  lag data use CloudWatch (`AuroraReplicaLag`,
+  `AuroraReplicaLagMaximum`, `AuroraReplicaLagMinimum`).
+
+* **No blocked server-side APIs are used anywhere.** Nothing calls
   `pg_read_file`, `pg_ls_dir`, `pg_ls_waldir`, `pg_ls_logdir`,
   `pg_ls_tmpdir`, `pg_read_server_files`, `pg_rotate_logfile`,
-  `pg_reload_conf`, `pg_switch_wal`, or `ALTER SYSTEM` — all of which
-  are blocked or restricted on Aurora/RDS. Nothing hits the Aurora
-  blocklist.
-* **Replication views return empty on Aurora.** Aurora replicates at
-  the storage layer, not via WAL-shipping or replication slots.
-  `pg_replication_slots`, `pg_stat_wal_receiver`, and often
-  `pg_stat_replication` exist but are empty. The scripts affected
-  (`perf_10`, `perf_22`, `perf_24`) do not error — they simply return
-  zero rows. For real reader-lag data use CloudWatch
-  (`AuroraReplicaLag`, `AuroraReplicaLagMaximum`,
-  `AuroraReplicaLagMinimum`).
+  `pg_reload_conf`, `pg_switch_wal`, or `ALTER SYSTEM`.
+
 * **`pg_stat_statements` must be enabled in the audited database.**
   Default Aurora parameter groups already load the library via
   `shared_preload_libraries`; you still need to run, once per database:
   `CREATE EXTENSION IF NOT EXISTS pg_stat_statements;`. Without it,
   `perf_01`, `perf_04`, `perf_13`, `perf_16`, `perf_23` raise `relation
   "pg_stat_statements" does not exist`.
+
 * **Recommended parameter-group tweaks** (take effect after reboot on
   cluster parameter group):
-  * `track_io_timing = on` — required for read/write timing columns in
+  * `track_io_timing = on` -- required for read/write timing columns in
     `pg_stat_statements` and `pg_statio_*`.
   * `track_activities = on` and `track_counts = on` (defaults; verify).
+
 * **Recommended auditor role:**
   ```sql
-  CREATE ROLE auditor LOGIN PASSWORD '…';
+  CREATE ROLE auditor LOGIN PASSWORD '...';
   GRANT pg_monitor, pg_read_all_stats, pg_read_all_settings TO auditor;
   GRANT rds_superuser TO auditor;  -- optional; unlocks pg_authid / pg_hba_file_rules
   ```
   Without `rds_superuser`, privileged-catalog blocks are guarded via
-  `has_table_privilege(...)` and degrade to a "Skipped: … not readable
-  by <current_user>" row rather than an error.
+  `has_table_privilege(...)` and degrade to a "Skipped: ... not
+  readable by <current_user>" row rather than an error.
 
 ## Critical priority
 
@@ -169,7 +268,10 @@ contention.
 
 Snapshot of memory, parallelism, WAL, autovacuum, planner, and bgwriter
 parameters — quickly spots gross misconfigurations and non-default
-overrides.
+overrides. **First query is a single-row "fingerprint header"** the
+report analyzer reads to populate the Environment Fingerprint card
+(version, current_database, host:port, uptime, Aurora flag, this DB
+size, shared_buffers, max_connections, wal_level).
 
 ## High priority
 

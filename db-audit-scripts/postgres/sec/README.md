@@ -32,7 +32,7 @@ reports/postgres_sec_YYYYMMDD_HHMMSS/
 ## Report analyzer (`analyze_report.py`)
 
 After a run completes, parse the report folder into a customer-friendly
-HTML summary highlighting potential issues across all databases:
+HTML report:
 
 ```bash
 # Single-database run output (the folder run_audit.sh wrote into)
@@ -40,13 +40,50 @@ HTML summary highlighting potential issues across all databases:
 
 # Multi-database run (parent folder containing per-DB sub-folders)
 ./analyze_report.py /path/to/parent_report_dir --server prod-postgres-01
+
+# Render to PDF (optional -- HTML is always produced)
+google-chrome --headless --disable-gpu --no-pdf-header-footer \
+    --print-to-pdf=sec_analysis.pdf \
+    "file://$(pwd)/reports/postgres_sec_YYYYMMDD_HHMMSS/sec_analysis.html"
 ```
 
-The analyzer writes `sec_analysis.html` into the report folder. The HTML
-contains an executive-summary table (counts of Critical / Warning / Info
-findings per database) plus a section per database with the matched
-findings, severity, and remediation hints. Standard library only --
-no Python packages to install.
+Standard Python library only -- no `pip install` step.
+
+### What the HTML report contains
+
+* **Environment Fingerprint card** -- host, database, PostgreSQL
+  version, Aurora / RDS flag, primary / replica role, uptime, SSL
+  enabled, password_encryption, user databases. Populated from a
+  single-row fingerprint header that `sec_21` emits as its first query.
+
+* **Quick-nav strip** with anchor links: Environment, Executive
+  Summary, Findings. Hidden in print.
+
+* **Executive Summary**
+  - Five KPI cards (Databases analysed, Scripts OK, Failed scripts,
+    Critical findings, Warnings) -- crit / warn / fail cards turn red /
+    orange when non-zero.
+  - **Top issues -- what to fix**: the highest-priority findings as an
+    ordered list with severity badge + action line + anchor link to
+    the detailed finding card. Capped at 10.
+  - **Context rollup** table (only when more than one database was
+    audited).
+
+* **Findings** -- one card per finding (not a giant 4-column table).
+  Each card carries severity colour bar, boxed "Action:"
+  recommendation, and curated **concrete-objects** sub-tables. Top 10
+  rows per group with `... +N more rows -- consult the raw .log file`
+  overflow note. Concrete objects shown:
+
+  | Finding                                | Concrete objects shown                |
+  |----------------------------------------|---------------------------------------|
+  | `sec_03` Privileged accounts           | rolname + attributes (sample)         |
+  | `sec_04` Public / excessive grants     | sub-tables per grantee scope          |
+  | `sec_09` PII columns                   | schema.table.column + reason          |
+  | `sec_10` Dangerous objects             | SECURITY DEFINER funcs, untrusted langs, event triggers, etc. -- one sub-table per type |
+  | `sec_12` Dormant users                 | rolname + last activity proxy         |
+  | `sec_20` Failed-login activity         | login_name, client_addr, reason       |
+  | `sec_22` Expiring credentials / certs  | rolname, expiry_state, days_until_expiry |
 
 
 ## Read-only guarantee
@@ -88,26 +125,43 @@ access and compromise paths.
 ## Aurora / RDS PostgreSQL caveats
 
 The scripts run on Amazon Aurora PostgreSQL and RDS for PostgreSQL
-clusters. Security-script specifics:
+clusters. Aurora is **auto-detected at runtime** via presence of the
+`rdsadmin` role; standard PostgreSQL is unaffected.
 
-* **`rds_superuser` unlocks everything.** Every access to
+* **`pg_user_mapping` is replaced by the `pg_user_mappings` view**
+  (`sec_10`, `sec_15`). The catalog table requires server ownership /
+  `pg_read_server_files` and is denied to `rds_superuser` on Aurora;
+  the view is granted to PUBLIC everywhere and automatically masks
+  `umoptions` to NULL where the caller lacks visibility.
+
+* **`rds_superuser` unlocks pg_authid / pg_hba.** Every access to
   `pg_authid`, `pg_hba_file_rules`, and `pg_ident_file_mappings` is
-  wrapped in `has_table_privilege(...)`. Without `rds_superuser`
-  (or a managed role granting equivalent privileges) these blocks
-  emit a `Skipped: … not readable by <current_user>` row and the
-  script continues. Scripts affected: `sec_01`, `sec_03`, `sec_05`,
+  wrapped in `has_table_privilege(...)`. Without `rds_superuser` (or
+  a managed role granting equivalent privileges) these blocks emit a
+  `Skipped: ... not readable by <current_user>` row and the script
+  continues. Scripts affected: `sec_01`, `sec_03`, `sec_05`,
   `sec_07`, `sec_08`, `sec_12`, `sec_17`, `sec_20`.
+
+* **`sec_22` handles `'infinity'` rolvaliduntil.** Aurora's default
+  managed accounts sometimes carry `rolvaliduntil = 'infinity'`, which
+  fails the naive `EXTRACT(day FROM rolvaliduntil - now())::int` cast.
+  The script treats infinity / -infinity as "no expiry" and emits NULL
+  for `days_until_expiry`.
+
 * **No blocked server-side APIs.** No `pg_read_file` / `pg_ls_*` /
-  `pg_read_server_files` / `ALTER SYSTEM` anywhere — nothing hits
+  `pg_read_server_files` / `ALTER SYSTEM` anywhere -- nothing hits
   the Aurora blocklist.
+
 * **`pg_stat_statements` must be enabled in the audited database.**
   `sec_20_failed_login_patterns.sql` references it. Run once per
   database: `CREATE EXTENSION IF NOT EXISTS pg_stat_statements;`.
+
 * **Run against the writer endpoint.** A few DMVs (e.g.
   `pg_stat_database` counters) are authoritative only on the primary.
+
 * **Recommended auditor role:**
   ```sql
-  CREATE ROLE auditor LOGIN PASSWORD '…';
+  CREATE ROLE auditor LOGIN PASSWORD '...';
   GRANT pg_monitor, pg_read_all_stats, pg_read_all_settings TO auditor;
   GRANT rds_superuser TO auditor;  -- for full sec_* coverage
   ```
@@ -178,7 +232,9 @@ limitations below.
 `SECURITY DEFINER` functions (especially superuser-owned), untrusted
 procedural languages (plperlu, plpythonu, pltclu, c — `internal` is
 tracked separately as informational), event triggers, foreign data
-wrappers and user mappings — privilege escalation paths.
+wrappers and **user mappings via `pg_user_mappings`** (the
+unprivileged view, not the privileged `pg_user_mapping` catalog) —
+privilege escalation paths.
 
 ### `sec_20_failed_login_patterns.sql`
 
@@ -193,16 +249,21 @@ visible and calls out the gap if `log_connections` is off.
 Server version, major-branch EOL matrix (10 → 17 + upcoming),
 installed extensions compared against `pg_available_extensions` for
 outdated-version detection, procedural languages. Cross-reference
-the banner with the PostgreSQL Security Information page.
+the banner with the PostgreSQL Security Information page. **First
+query is a single-row "fingerprint header"** the report analyzer
+reads to populate the Environment Fingerprint card (version,
+current_database, host, Aurora flag, SSL, password_encryption).
 
 ### `sec_22_cert_and_key_expiry.sql`
 
 Per-role `rolvaliduntil` with days-until-expiry bucketing (`EXPIRED`
-/ 30d / 90d / ok), TLS session inventory via `pg_stat_ssl`, TLS
-protocol / cipher distribution, foreign-server `srvoptions`
-containing `ssl*` / `cert*` / `key*`. TLS file expiry (`ssl_cert_file`)
-is not visible via SQL — operator_action calls for `openssl x509
--enddate`.
+/ 30d / 90d / ok / no expiry / **no expiry (infinity)**), TLS session
+inventory via `pg_stat_ssl`, TLS protocol / cipher distribution,
+foreign-server `srvoptions` containing `ssl*` / `cert*` / `key*`. TLS
+file expiry (`ssl_cert_file`) is not visible via SQL — operator_action
+calls for `openssl x509 -enddate`. Infinity-valued `rolvaliduntil`
+(common on Aurora managed accounts) is detected and rendered as
+"no expiry (infinity)" rather than failing the `::int` cast.
 
 ## Medium priority
 
@@ -238,8 +299,9 @@ successful WAL archive.
 
 ### `sec_15_external_integrations.sql`
 
-Foreign data wrappers, foreign servers, user mappings, foreign tables,
-dblink, logical replication subscriptions and publications. Connection
+Foreign data wrappers, foreign servers, **user mappings via
+`pg_user_mappings`** (the unprivileged view), foreign tables, dblink,
+logical replication subscriptions and publications. Connection
 strings and user mapping options are **masked by default** — pass
 `-v unmask_secrets=true` to `psql` to see unmasked values when
 authorized.

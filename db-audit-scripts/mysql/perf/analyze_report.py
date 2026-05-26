@@ -2,13 +2,18 @@
 """
 analyze_report.py -- MySQL performance audit report analyzer.
 
-Reads the report directory produced by run_audit.sh, applies a rule set
-that flags known performance issues, and writes one HTML file with an
-executive summary plus a dedicated section per database.
+Reads the report directory produced by mysql/perf/run_audit.sh and writes
+an HTML report with:
+
+  * Environment fingerprint card (host, version, role, Aurora/RDS flag, ...)
+  * Executive summary (KPI counts + Top issues with what-to-do)
+  * Per-finding concrete objects (table / index names, digest IDs, etc.)
+    pulled from the actual mysql(1) batch-mode logs so the reader has
+    actionable targets, not just "review the log".
 
 Usage:
     ./analyze_report.py <report_dir>
-    ./analyze_report.py <report_dir> --server prod-mysql-01 --out report.html
+    ./analyze_report.py <report_dir> --server prod-mysql-01
 
 Standard library only.
 """
@@ -16,124 +21,418 @@ Standard library only.
 from __future__ import annotations
 
 import argparse
-import datetime as _dt
-import html
 import re
 import sys
 from pathlib import Path
 
-RULES = [
-    dict(script='perf_02_blocking_and_locks',     mode='has_data', severity='Critical',
-         title='Active blocking sessions or long-running transactions',
-         recommendation='Investigate blocking pairs in performance_schema. Long transactions block undo purge.'),
-
-    dict(script='perf_04_wait_events_and_io',     mode='has_data', severity='Warning',
-         title='Wait events captured',
-         recommendation='Review the dominant wait events. innodb_log_waits and io waits indicate disk pressure.'),
-
-    dict(script='perf_06_index_audit',            mode='has_data', severity='Warning',
-         title='Index hygiene findings',
-         recommendation='Drop unused / duplicate indexes; add suggested missing indexes after evaluating impact.'),
-
-    dict(script='perf_07_table_stats_health',     mode='has_data', severity='Warning',
-         title='Stale table statistics',
-         recommendation='Run ANALYZE TABLE on the listed tables, or enable innodb_stats_auto_recalc.'),
-
-    dict(script='perf_09_temp_and_memory_pressure', mode='pattern', severity='Warning',
-         pattern=r'(?im)created_tmp_disk_tables\s*\|\s*[1-9]\d{3,}',
-         title='Temporary tables spilling to disk',
-         recommendation='Increase tmp_table_size / max_heap_table_size or rewrite spilling queries.'),
-
-    dict(script='perf_10_replication_and_backup_impact', mode='pattern', severity='Critical',
-         pattern=r'(?im)Seconds_Behind_(Source|Master)\s*[:|]\s*\d+',
-         title='Replica lag detected',
-         recommendation='Replica is behind. Check parallel-replication settings and replica I/O capacity.'),
-
-    dict(script='perf_14_checkpoint_bgwriter',    mode='pattern', severity='Warning',
-         pattern=r'(?im)innodb_log_waits\s*\|\s*[1-9]\d*',
-         title='InnoDB log waits accumulating',
-         recommendation='Increase innodb_log_file_size or improve disk throughput on the log device.'),
-
-    dict(script='perf_15_capacity_and_growth',    mode='pattern', severity='Critical',
-         pattern=r'(?im)\b(8[0-9]|9[0-9]|100)\.\d+\s*%',
-         title='AUTO_INCREMENT or storage above 80% consumed',
-         recommendation='Plan for AUTO_INCREMENT type widening (INT->BIGINT) or storage expansion.'),
-
-    dict(script='perf_19_storage_topology',       mode='has_data', severity='Info',
-         title='Storage topology inventory',
-         recommendation='Review file paths and per-tablespace size to identify hot devices.'),
-]
-
-# MySQL CLI uses `+---+---+` separators; psql uses `---+---`. Match both.
-SEPARATOR_RE = re.compile(r'^[\s+\-]+\-{3,}[\s+\-]*$')
-ROW_COUNT_RE = re.compile(r'^\(?\s*\d+\s+rows?(\s+in\s+set)?.*\)?\s*$', re.IGNORECASE)
-NOTE_RE      = re.compile(r'^(\+|\-\-|Empty set|Query OK|Database changed|\s*$)')
+# Import shared analyzer library (mysql/_analyze_lib.py)
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+from _analyze_lib import (  # noqa: E402
+    SHARED_CSS, context_label, esc, find_log, has_data_rows, kv_grid,
+    now_str, object_table, parse_result_sets, read_fingerprint,
+    read_log_text, read_summary, read_target, render_fingerprint_card,
+    severity_rank,
+)
 
 
-_BOM_UTF16_LE = b'\xff\xfe'
-_BOM_UTF16_BE = b'\xfe\xff'
-_BOM_UTF8     = b'\xef\xbb\xbf'
-
-
-def _detect_encoding(path: Path) -> str:
-    try:
-        with path.open('rb') as f:
-            head = f.read(4)
-    except OSError:
-        return 'utf-8'
-    if head[:2] == _BOM_UTF16_LE: return 'utf-16'
-    if head[:2] == _BOM_UTF16_BE: return 'utf-16'
-    if head[:3] == _BOM_UTF8:     return 'utf-8-sig'
-    if len(head) >= 2 and 0 < head[0] < 128 and head[1] == 0:
-        return 'utf-16-le'        # BOM-less UTF-16 LE
-    return 'utf-8'
-
-
-def _read_log(path: Path) -> str:
-    enc = _detect_encoding(path)
-    try:
-        return path.read_text(encoding=enc, errors='replace')
-    except OSError:
-        return ''
-
-
-def log_has_data_rows(log_path: Path) -> bool:
-    """Return True if a psql log has data rows beyond headers / notices."""
-    text = _read_log(log_path)
-    if not text:
-        return False
-    in_data = False
-    for line in text.splitlines():
-        if SEPARATOR_RE.match(line):
-            in_data = True
+# ---------------------------------------------------------------------------
+# Rules: how to recognise a finding in a given log file.
+# Each rule is processed in two stages:
+#   1. trigger -- 'has_data' (any rows present) or 'pattern' (regex match)
+#      or 'check' (custom predicate)
+#   2. extractor (optional) -- pull a structured list of "objects of
+#      concern" from the log to render under the finding row.
+# ---------------------------------------------------------------------------
+def _set_with(sets, *col_names):
+    """Return the first non-empty result set whose columns include ANY of
+    the given names (case-insensitive). Used by simple extractors that
+    just need to find 'the right' table among multiple in one log."""
+    wanted = {c.lower() for c in col_names}
+    for s in sets:
+        if not s['rows']:
             continue
-        if not in_data:
+        if {c.lower() for c in s['columns']} & wanted:
+            return s
+    return None
+
+
+def _ext_top_sql(text):
+    """perf_01 emits the consumer-status row plus several Top-N snapshots
+    over events_statements_summary_by_digest. The actionable rows always
+    have a `queryid` column. We curate to 5 columns + link queryid to
+    the SQL appendix at the end of the report."""
+    sets = parse_result_sets(text)
+    labels = [
+        'Top by total execution time',
+        'Top by mean execution time',
+        'Top by call count',
+        'Top by rows returned',
+        'Top by examined-row ratio',
+        'Top by temp tables',
+        'Top by lock time',
+    ]
+
+    def pick(row, *names, default=''):
+        for n in names:
+            if n in row and row[n] != '':
+                return row[n]
+        return default
+
+    groups = []
+    for s in sets:
+        if not s['rows']:
             continue
-        if ROW_COUNT_RE.match(line):
-            in_data = False
+        if 'queryid' not in [c.lower() for c in s['columns']]:
             continue
-        if not line.strip() or NOTE_RE.match(line):
-            continue
-        return True
+        new_rows = []
+        for r in s['rows'][:200]:
+            new_rows.append({
+                'queryid':   pick(r, 'queryid'),
+                'calls':     pick(r, 'calls'),
+                'total_min': pick(r, 'total_min', 'total_ms'),
+                'mean_ms':   pick(r, 'mean_ms', 'avg_ms'),
+                'pct_total': pick(r, 'pct_total', 'pct_calls'),
+                # 'query' kept in the source row so the SQL appendix can
+                # pull the digest text; it is NOT rendered inline.
+                'query':     pick(r, 'query'),
+            })
+        groups.append(dict(
+            label=labels[len(groups)] if len(groups) < len(labels)
+                  else f'Top SQL set #{len(groups)+1}',
+            columns=['queryid', 'calls', 'total_min', 'mean_ms', 'pct_total'],
+            rows=new_rows,
+        ))
+    return groups
+
+
+def _check_perf_02(text):
+    """True only when perf_02 returned actually-blocking sessions or
+    long-running transactions. The script also emits InnoDB lock
+    summary / event scheduler etc. that are always non-empty -- those
+    must NOT trigger the finding."""
+    for s in parse_result_sets(text):
+        lc = [c.lower() for c in s['columns']]
+        # Real blocking signal: data_locks_waits or innodb_trx with locks
+        if 'blocking_thread_id' in lc or 'blocked_thread_id' in lc:
+            if s['rows']:
+                return True
+        # Long-running active queries (excluding daemon rows we already
+        # see by default like 'event_scheduler')
+        if 'seconds' in lc and 'state' in lc and 'query' in lc:
+            for r in s['rows']:
+                try:
+                    if int(r.get('seconds') or '0') > 60 and (r.get('query') or '').strip() not in ('', 'NULL'):
+                        return True
+                except ValueError:
+                    pass
     return False
 
 
-def read_log_text(log_path: Path) -> str:
-    return _read_log(log_path)
+def _ext_blocking(text):
+    """Render blocking-pair / long-running tables as separate groups so
+    the reader sees them with their natural columns."""
+    sets = parse_result_sets(text)
+    groups = []
+    for s in sets:
+        lc = [c.lower() for c in s['columns']]
+        if not s['rows']:
+            continue
+        if 'blocking_thread_id' in lc or 'blocked_thread_id' in lc:
+            groups.append(dict(label='Blocking pairs (data_locks_waits)',
+                               columns=s['columns'], rows=s['rows'][:200]))
+        elif 'seconds' in lc and 'query' in lc:
+            # Drop event_scheduler daemon noise
+            kept = [r for r in s['rows']
+                    if (r.get('user') or '').strip() != 'event_scheduler']
+            if kept:
+                groups.append(dict(label='Active sessions (>0 s)',
+                                   columns=s['columns'], rows=kept[:200]))
+    return groups
 
 
+def _ext_index_findings(text):
+    """perf_06 emits multiple sub-tables. Surface each as its own group
+    with curated columns (drop raw byte counts, keep names + sizes)."""
+    sets = parse_result_sets(text)
 
-def read_summary(summary_path: Path):
-    if not summary_path.exists():
-        return
-    for raw in _read_log(summary_path).splitlines():
-        m = re.match(r'^(OK|FAIL)\s+(\S+)', raw)
-        if m:
-            yield m.group(1), m.group(2)
+    def reshape(set_idx, label, picks):
+        if not (0 <= set_idx < len(sets)) or not sets[set_idx]['rows']:
+            return None
+        new_rows = []
+        for r in sets[set_idx]['rows'][:200]:
+            row = {}
+            for p in picks:
+                src, disp = (p if isinstance(p, tuple) else (p, p))
+                row[disp] = r.get(src, '')
+            new_rows.append(row)
+        return dict(label=label, rows=new_rows,
+                    columns=[(p[1] if isinstance(p, tuple) else p) for p in picks])
+
+    groups = []
+    # Set 0: I/O activity per index (low reads -> candidate for unused)
+    g = reshape(0, 'Index I/O activity (low reads => candidates to drop)',
+                [('schema_name','schema'), 'table_name',
+                 ('index_name','index_name'),
+                 'reads', 'writes', 'fetches'])
+    if g: groups.append(g)
+    # Set 1: sys.schema_unused_indexes
+    g = reshape(1, 'Indexes never read (sys.schema_unused_indexes)',
+                [('object_schema','schema'), 'table_name',
+                 ('index_name','index_name')])
+    if g: groups.append(g)
+    # Sets 2..N: duplicates / redundant / FK without index -- discover
+    # remaining sets and emit each with its native columns.
+    for i, s in enumerate(sets[2:], start=2):
+        if not s['rows']:
+            continue
+        # Pick a useful label heuristically from column names.
+        lc = [c.lower() for c in s['columns']]
+        if 'duplicate_of' in lc:
+            label = f'Duplicate / redundant indexes (set #{i+1})'
+        elif 'fk_columns' in lc or any('fk' in c for c in lc):
+            label = 'Foreign keys without supporting index'
+        elif 'cardinality' in lc:
+            label = f'Index cardinality / selectivity (set #{i+1})'
+        else:
+            label = f'Index sub-table #{i+1}'
+        groups.append(dict(label=label, columns=s['columns'],
+                           rows=s['rows'][:200]))
+    return groups
 
 
-def find_findings(log_dir: Path) -> list[dict]:
-    findings: list[dict] = []
+def _ext_table_stats(text):
+    """perf_07: tables with stale stats / never-analyzed (last_modified
+    NULL means InnoDB hasn't run a write-triggered analyze)."""
+    s = _set_with(parse_result_sets(text),
+                  'table_name', 'TABLE_NAME', 'tablename')
+    return s['rows'][:200] if s else []
+
+
+def _ext_object_sizes(text):
+    """perf_08: render the per-table size table (skip the per-schema
+    rollup which has only one row)."""
+    sets = parse_result_sets(text)
+    groups = []
+    for s in sets:
+        if not s['rows']:
+            continue
+        lc = [c.lower() for c in s['columns']]
+        if 'table_name' in lc and 'total_mb' in lc:
+            groups.append(dict(label='Top tables by total size (MB)',
+                               columns=s['columns'], rows=s['rows'][:200]))
+            break
+    return groups
+
+
+def _ext_temp_pressure(text):
+    """perf_09: pull rows whose temp/disk-spill columns are > 0."""
+    sets = parse_result_sets(text)
+    out = []
+    for s in sets:
+        lc = [c.lower() for c in s['columns']]
+        keys = [c for c in s['columns']
+                if 'tmp_disk' in c.lower() or 'sort_merge' in c.lower()
+                or 'created_tmp' in c.lower() or 'temp' in c.lower()]
+        if not keys:
+            continue
+        for r in s['rows']:
+            for k in keys:
+                v = (r.get(k) or '').strip()
+                if v and v != '0' and v != 'NULL' and any(ch.isdigit() and ch != '0' for ch in v):
+                    out.append(r)
+                    break
+    return out[:200]
+
+
+def _ext_bloat(text):
+    """perf_11: tables with non-trivial data_free fraction."""
+    s = _set_with(parse_result_sets(text),
+                  'free_pct', 'bloat_pct', 'free_mb')
+    if not s:
+        return []
+    # Filter to rows where free_pct > 20% if column present
+    pct_col = None
+    for c in s['columns']:
+        if c.lower() in ('free_pct', 'bloat_pct'):
+            pct_col = c
+            break
+    if not pct_col:
+        return s['rows'][:200]
+    keep = []
+    for r in s['rows']:
+        try:
+            if float(r.get(pct_col) or 0) > 20:
+                keep.append(r)
+        except ValueError:
+            pass
+    return keep[:200] or s['rows'][:200]
+
+
+def _ext_seq_scans(text):
+    """perf_12: tables without useful indexes -- the no_index_table demo
+    is a classic case."""
+    s = _set_with(parse_result_sets(text),
+                  'table_name', 'TABLE_NAME')
+    return s['rows'][:200] if s else []
+
+
+def _ext_capacity(text):
+    """perf_15: AUTO_INCREMENT consumption, max_connections usage etc."""
+    sets = parse_result_sets(text)
+    out = []
+    for s in sets:
+        lc = [c.lower() for c in s['columns']]
+        if not any('pct' in c or 'percent' in c or 'consumed' in c or 'used' in c
+                   for c in lc):
+            continue
+        for r in s['rows']:
+            for col, val in r.items():
+                if 'pct' not in col.lower() and 'percent' not in col.lower():
+                    continue
+                try:
+                    if float(str(val).rstrip('%')) >= 50:
+                        out.append(r); break
+                except ValueError:
+                    pass
+    return out[:200]
+
+
+def _ext_partitions(text):
+    """perf_21: per-partition row counts / sizes."""
+    s = _set_with(parse_result_sets(text),
+                  'partition_name', 'PARTITION_NAME')
+    return s['rows'][:200] if s else []
+
+
+RULES = [
+    dict(
+        script='perf_01_top_sql',
+        mode='has_data', severity='Warning',
+        title='Top SQL by execution cost',
+        recommendation='Tune or rewrite the highest-cost statements. Add indexes '
+                       'where appropriate. Verify performance_schema digest '
+                       'instrumentation is enabled and recent.',
+        extractor=_ext_top_sql,
+        ext_label='Top statements (snapshot)',
+        ext_columns=None,
+    ),
+    dict(
+        script='perf_02_blocking_and_locks',
+        mode='check', check=_check_perf_02, severity='Critical',
+        title='Active blocking sessions or long-running transactions',
+        recommendation='Investigate blocking pairs and long-running open '
+                       'transactions. They hold InnoDB undo segments and prevent '
+                       'purge.',
+        extractor=_ext_blocking,
+        ext_label='Concrete blocking / long-running rows',
+        ext_columns=None,
+    ),
+    dict(
+        script='perf_06_index_audit',
+        mode='has_data', severity='Warning',
+        title='Index hygiene findings (unused / duplicate / missing)',
+        recommendation='Drop confirmed-unused indexes, consolidate duplicates, '
+                       'add high-value missing indexes after impact analysis.',
+        extractor=_ext_index_findings,
+        ext_label='Concrete index findings',
+        ext_columns=None,
+    ),
+    dict(
+        script='perf_07_table_stats_health',
+        mode='has_data', severity='Warning',
+        title='Stale or never-analyzed table statistics',
+        recommendation='Run ANALYZE TABLE on the listed tables or enable '
+                       'innodb_stats_auto_recalc. Stale stats produce bad plans.',
+        extractor=_ext_table_stats,
+        ext_label='Tables flagged',
+        ext_columns=None,
+    ),
+    dict(
+        script='perf_08_object_sizes',
+        mode='has_data', severity='Info',
+        title='Top tables by total size',
+        recommendation='Inventory of largest tables -- review for archive / '
+                       'partition / TTL opportunities.',
+        extractor=_ext_object_sizes,
+        ext_label='Top tables',
+        ext_columns=None,
+    ),
+    dict(
+        script='perf_09_temp_and_memory_pressure',
+        mode='pattern',
+        pattern=r'(?im)Created_tmp_disk_tables\s+[1-9]\d*|created_tmp_disk_tables\t[1-9]\d*',
+        severity='Warning',
+        title='Temporary tables spilling to disk',
+        recommendation='Increase tmp_table_size and max_heap_table_size, or '
+                       'rewrite spilling queries to avoid large in-memory '
+                       'sorts / joins.',
+        extractor=_ext_temp_pressure,
+        ext_label='Statements / status counters with non-zero spill',
+        ext_columns=None,
+    ),
+    dict(
+        script='perf_10_replication_and_backup_impact',
+        mode='pattern',
+        pattern=r'(?im)Seconds_Behind_(Source|Master)\s+[1-9]\d*',
+        severity='Critical',
+        title='Replica lag detected',
+        recommendation='Replica is behind primary. Check parallel-replication '
+                       'settings (replica_parallel_workers, replica_preserve_'
+                       'commit_order) and IO capacity.',
+    ),
+    dict(
+        script='perf_11_bloat_estimation',
+        mode='has_data', severity='Warning',
+        title='Table free-space (bloat) above threshold',
+        recommendation='Run OPTIMIZE TABLE (or ALTER TABLE ... ENGINE=InnoDB) '
+                       'on the listed tables to reclaim free space. Heavy '
+                       'free_pct indicates UPDATE/DELETE churn.',
+        extractor=_ext_bloat,
+        ext_label='Top bloated tables',
+        ext_columns=None,
+    ),
+    dict(
+        script='perf_12_sequential_scans',
+        mode='has_data', severity='Warning',
+        title='Tables candidate for sequential scans (missing indexes)',
+        recommendation='Add indexes covering common WHERE / JOIN columns. '
+                       'no_index_table-style cases are immediate.',
+        extractor=_ext_seq_scans,
+        ext_label='Tables without useful indexes',
+        ext_columns=None,
+    ),
+    dict(
+        script='perf_15_capacity_and_growth',
+        mode='pattern',
+        pattern=r'(?im)\b(5[0-9]|6[0-9]|7[0-9]|8[0-9]|9[0-9]|100)\.\d+\s*%?\s*$',
+        severity='Critical',
+        title='Capacity headroom under 50% (AUTO_INCREMENT / storage / conns)',
+        recommendation='Plan AUTO_INCREMENT widening (INT->BIGINT), storage '
+                       'expansion, or raise max_connections before exhaustion.',
+        extractor=_ext_capacity,
+        ext_label='Objects near capacity',
+        ext_columns=None,
+    ),
+    dict(
+        script='perf_21_partition_health',
+        mode='has_data', severity='Info',
+        title='Partition layout / size distribution',
+        recommendation='Review partition skew, empty future partitions, and '
+                       'oversized historical partitions.',
+        extractor=_ext_partitions,
+        ext_label='Partitions',
+        ext_columns=None,
+    ),
+]
+
+
+# ---------------------------------------------------------------------------
+# Analysis
+# ---------------------------------------------------------------------------
+def find_findings(log_dir: Path) -> list:
+    findings: list = []
+
+    # 1. Failed scripts -> Critical
     for status, script in read_summary(log_dir / '_summary.txt'):
         if status != 'FAIL':
             continue
@@ -145,40 +444,84 @@ def find_findings(log_dir: Path) -> list[dict]:
                 detail = '(empty log -- runner produced no output, likely killed mid-run)'
             else:
                 errs = [l for l in read_log_text(log_path).splitlines()
-                        if re.match(r'^ERROR\s+\d+', l)][:5]
+                        if re.match(r'(ERROR|FATAL|psql:)', l)][:5]
                 if errs:
                     detail = '\n'.join(errs)
-        findings.append(dict(severity='Critical', script=script,
-                             title='Script execution failed', detail=detail,
-                             recommendation='Check connection privileges and the script log.'))
+        findings.append(dict(
+            severity='Critical', script=script,
+            title='Script execution failed', detail=detail,
+            recommendation='Check connection privileges, psql version, and the script log file.',
+            objects=[], object_columns=[], object_label='',
+        ))
 
+    # 2. Apply content rules
     for log in sorted(log_dir.glob('*.log')):
         for rule in RULES:
             if rule['script'] not in log.stem:
                 continue
-            hit, detail = False, ''
+            text = read_log_text(log)
+            if not text:
+                continue
+            hit = False
+            detail = ''
             if rule['mode'] == 'has_data':
-                if log_has_data_rows(log):
+                if has_data_rows(text):
                     hit = True
-                    detail = 'Diagnostic script returned data rows -- review the full log.'
             elif rule['mode'] == 'pattern':
-                text = read_log_text(log)
-                m = re.search(rule['pattern'], text) if text else None
+                m = re.search(rule['pattern'], text)
                 if m:
                     hit = True
                     snip = m.group(0)
                     detail = 'Match: ' + (snip if len(snip) <= 200 else snip[:200] + '...')
-            if hit:
-                findings.append(dict(severity=rule['severity'], script=log.name,
-                                     title=rule['title'], detail=detail,
-                                     recommendation=rule['recommendation']))
+            elif rule['mode'] == 'check':
+                # Custom predicate -- used when has_data is too broad
+                # (e.g. perf_02 where lock/deadlock summary sets are
+                # always non-empty but not actionable).
+                try:
+                    if rule['check'](text):
+                        hit = True
+                except Exception:
+                    pass
+            if not hit:
+                continue
+            objs: list = []
+            ext_cols: list = []
+            object_groups: list = []
+            ext_label = rule.get('ext_label', '')
+            extractor = rule.get('extractor')
+            if extractor:
+                try:
+                    out = extractor(text)
+                except Exception:
+                    out = []
+                # Detect whether the extractor returned a list of groups
+                # ({label, columns, rows}, ...) or a flat list of rows.
+                if (out and isinstance(out[0], dict)
+                        and {'label', 'columns', 'rows'} <= set(out[0].keys())):
+                    object_groups = out
+                else:
+                    objs = out
+                    if objs and not rule.get('ext_columns'):
+                        ext_cols = list(objs[0].keys())
+                    elif objs:
+                        ext_cols = rule['ext_columns']
+            findings.append(dict(
+                severity=rule['severity'], script=log.name,
+                title=rule['title'], detail=detail,
+                recommendation=rule['recommendation'],
+                objects=objs, object_columns=ext_cols,
+                object_label=ext_label,
+                object_groups=object_groups,
+            ))
     return findings
 
 
-def discover_contexts(root: Path) -> list[dict]:
+def discover_contexts(root: Path) -> list:
+    """Return [{name, log_dir}, ...]. Prefer the actual DB name (set later
+    after fingerprint is read); fall back to '(single run)' here."""
     if (root / '_summary.txt').exists():
         return [dict(name='(single run)', log_dir=root)]
-    contexts: list[dict] = []
+    contexts: list = []
     for sub in sorted(p for p in root.iterdir() if p.is_dir()):
         runs = sorted(sub.glob('mysql_perf_*'), reverse=True)
         if runs:
@@ -186,139 +529,276 @@ def discover_contexts(root: Path) -> list[dict]:
     return contexts
 
 
-def severity_rank(s: str) -> int:
-    return {'Critical': 0, 'Warning': 1, 'Info': 2}.get(s, 3)
-
-
-def render_findings(findings: list[dict]) -> str:
-    if not findings:
-        return '<p class="ok">No problems detected by the rule set.</p>'
-    rows = []
-    for f in sorted(findings, key=lambda x: severity_rank(x['severity'])):
-        sev_class = f['severity'].lower()
-        detail_html = f'<br><span class="detail">{html.escape(f.get("detail",""))}</span>' if f.get('detail') else ''
-        rows.append(
-            f'<tr class="sev-{sev_class}">'
-            f'<td><span class="badge {sev_class}">{f["severity"]}</span></td>'
-            f'<td><code>{html.escape(f["script"])}</code></td>'
-            f'<td><strong>{html.escape(f["title"])}</strong>{detail_html}</td>'
-            f'<td>{html.escape(f["recommendation"])}</td>'
-            f'</tr>'
+# ---------------------------------------------------------------------------
+# HTML rendering
+# ---------------------------------------------------------------------------
+def render_top_issues(findings: list) -> str:
+    """Top critical+warning findings with anchor links to detail rows."""
+    top = [f for f in findings if f['severity'] in ('Critical', 'Warning')]
+    top = sorted(top, key=lambda f: (severity_rank(f['severity']), f['script']))[:10]
+    if not top:
+        return "<p class='ok'>No critical or warning issues detected.</p>"
+    parts = ["<p>Highest-priority findings. Click a title to jump to the detail "
+             "row and the list of concrete objects flagged.</p>"
+             "<ol class='issue-list'>"]
+    for f in top:
+        sev = f['severity'].lower()
+        cls = 'warn' if sev == 'warning' else ''
+        anchor = re.sub(r'[^A-Za-z0-9]', '-', f['script'] + '-' + f['title']).lower()
+        parts.append(
+            f"<li class='{cls}'><div class='it'>"
+            f"<span class='ti'><a class='jump' href='#f-{anchor}'>{esc(f['title'])}</a></span>"
+            f"<span class='sc'><span class='badge {sev}'>{f['severity']}</span> "
+            f"&middot; <code>{esc(f['script'])}</code></span></div>"
+            f"<div class='ac'><strong>Action:</strong> {esc(f['recommendation'])}</div>"
+            f"</li>"
         )
-    return ('<table class="findings"><thead><tr>'
-            '<th>Severity</th><th>Script</th><th>Finding</th><th>Recommendation</th>'
-            '</tr></thead><tbody>' + ''.join(rows) + '</tbody></table>')
+    parts.append("</ol>")
+    return ''.join(parts)
 
 
-CSS = """\
-<style>
-body{font-family:Segoe UI,Arial,sans-serif;margin:0;padding:20px;background:#f5f5f5;color:#222;}
-h1{margin:0 0 4px 0;}h2{border-bottom:2px solid #00758f;padding-bottom:4px;margin-top:32px;}
-header{background:#00758f;color:white;padding:24px;border-radius:6px;margin-bottom:20px;}
-header p{margin:4px 0;opacity:0.9;}
-.summary{background:white;padding:16px;border-radius:6px;margin-bottom:20px;box-shadow:0 1px 3px rgba(0,0,0,0.1);}
-table{border-collapse:collapse;width:100%;background:white;}
-th,td{padding:8px 12px;border-bottom:1px solid #e0e0e0;text-align:left;vertical-align:top;}
-th{background:#e6f0f3;font-weight:600;}
-.findings tr:hover{background:#fafbfc;}
-.badge{display:inline-block;padding:2px 8px;border-radius:3px;font-size:0.85em;font-weight:600;color:white;}
-.badge.critical{background:#c0392b;}.badge.warning{background:#e67e22;}.badge.info{background:#2980b9;}
-.sev-critical>td:first-child{border-left:4px solid #c0392b;}
-.sev-warning >td:first-child{border-left:4px solid #e67e22;}
-.sev-info    >td:first-child{border-left:4px solid #2980b9;}
-.detail{color:#666;font-size:0.9em;font-family:Consolas,monospace;white-space:pre-wrap;}
-.ok{color:#27ae60;font-weight:600;}
-.exec-summary td.num{text-align:right;font-variant-numeric:tabular-nums;}
-.exec-summary td.crit{color:#c0392b;font-weight:600;}
-.exec-summary td.warn{color:#e67e22;font-weight:600;}
-.exec-summary td.fail{color:#c0392b;font-weight:600;}
-.toc{background:white;padding:12px 20px;border-radius:6px;margin-bottom:20px;box-shadow:0 1px 3px rgba(0,0,0,0.1);}
-.toc ul{margin:0;padding-left:20px;columns:3;}
-.toc a{text-decoration:none;color:#00758f;}.toc a:hover{text-decoration:underline;}
-section.db{background:white;padding:16px 20px;border-radius:6px;margin-bottom:16px;box-shadow:0 1px 3px rgba(0,0,0,0.1);}
-section.db h3{margin-top:0;color:#00758f;}
-.meta{color:#666;font-size:0.9em;margin-bottom:12px;}
-code{background:#f0f0f0;padding:1px 6px;border-radius:3px;font-size:0.9em;}
-</style>"""
+def render_findings(findings: list) -> str:
+    """Card-based finding layout. Each finding is its own block with:
+      - severity badge + title + script reference (header bar)
+      - recommendation paragraph (the action item)
+      - 0..N concrete-objects sub-tables (each with its own caption)
+
+    Cards stack vertically, columns auto-size to their content -- so 5-
+    char-per-line wrapping of identifiers is impossible by construction."""
+    if not findings:
+        return "<p class='ok'>No problems detected by the rule set.</p>"
+
+    parts = []
+    for f in sorted(findings, key=lambda x: (severity_rank(x['severity']), x['script'])):
+        sev = f['severity'].lower()
+        anchor = re.sub(r'[^A-Za-z0-9]', '-', f['script'] + '-' + f['title']).lower()
+        parts.append(f"<div class='finding sev-{sev}' id='f-{anchor}'>")
+        # Header
+        parts.append(
+            f"<div class='finding-head'>"
+            f"<span class='badge {sev}'>{f['severity']}</span>"
+            f"<span class='finding-title'>{esc(f['title'])}</span>"
+            f"<span class='finding-script'><code>{esc(f['script'])}</code></span>"
+            f"</div>"
+        )
+        # Recommendation
+        parts.append(
+            f"<div class='finding-rec'><strong>Action:</strong> "
+            f"{esc(f['recommendation'])}</div>"
+        )
+        if f.get('detail'):
+            parts.append(f"<div class='finding-detail'>{esc(f['detail'])}</div>")
+
+        # Concrete objects
+        if f.get('object_groups'):
+            for g in f['object_groups']:
+                link_columns = None
+                if 'queryid' in g['columns']:
+                    link_columns = {'queryid': '#sql-{value}'}
+                parts.append(
+                    f"<div class='objs-caption'><strong>{esc(g['label'])}</strong>"
+                    f" &middot; {len(g['rows'])} row(s)</div>"
+                    + object_table(g['rows'], g['columns'], limit=10,
+                                   link_columns=link_columns)
+                )
+        elif f.get('objects') and f.get('object_columns'):
+            parts.append(
+                f"<div class='objs-caption'><strong>"
+                f"{esc(f['object_label'] or 'Concrete objects')}</strong></div>"
+                + object_table(f['objects'], f['object_columns'], limit=10)
+            )
+        parts.append("</div>")  # close .finding
+    return ''.join(parts)
 
 
-def build_html(report: list[dict], server: str, report_dir: Path) -> str:
-    now = _dt.datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+def build_html(report: list, server_label: str, report_dir: Path,
+               fingerprint: dict, target: dict) -> str:
     total_pass = sum(r['passed']  for r in report)
     total_fail = sum(r['failed']  for r in report)
     total_crit = sum(r['critical'] for r in report)
     total_warn = sum(r['warning']  for r in report)
     total_info = sum(r['info']     for r in report)
 
+    server = (server_label or fingerprint.get('cluster_name')
+              or target.get('host') or '(unspecified)')
+
     parts = [f"""<!DOCTYPE html>
 <html lang='en'><head><meta charset='UTF-8'>
 <title>MySQL Performance Audit Report</title>
-{CSS}
-</head><body>
+{SHARED_CSS}
+</head><body id='top'>
 <header>
   <h1>MySQL Performance Audit Report</h1>
-  <p><strong>Server:</strong> {html.escape(server or '(unspecified)')}</p>
-  <p><strong>Report folder:</strong> {html.escape(str(report_dir))}</p>
-  <p><strong>Generated:</strong> {now}</p>
-</header>
-<div class='summary'>
-<h2 style='margin-top:0;border:none;'>Executive Summary</h2>
-<table class='exec-summary'>
-<thead><tr><th>Database / Context</th><th>Scripts OK</th><th>Failed</th><th>Critical</th><th>Warning</th><th>Info</th></tr></thead>
-<tbody>"""]
-    for r in report:
-        anchor = re.sub(r'[^A-Za-z0-9]', '_', r['name'])
-        parts.append(
-            f"<tr><td><a href='#db_{anchor}'>{html.escape(r['name'])}</a></td>"
-            f"<td class='num'>{r['passed']}</td>"
-            f"<td class='num fail'>{r['failed']}</td>"
-            f"<td class='num crit'>{r['critical']}</td>"
-            f"<td class='num warn'>{r['warning']}</td>"
-            f"<td class='num'>{r['info']}</td></tr>"
-        )
+  <p><strong>Server:</strong> {esc(server)}</p>
+  <p><strong>Report folder:</strong> {esc(str(report_dir))}</p>
+  <p><strong>Generated:</strong> {now_str()}</p>
+</header>"""]
+
+    # Quick navigation (hidden in print)
     parts.append(
-        f"<tr style='font-weight:bold;background:#e9f0f3;'><td>TOTAL</td>"
-        f"<td class='num'>{total_pass}</td>"
-        f"<td class='num fail'>{total_fail}</td>"
-        f"<td class='num crit'>{total_crit}</td>"
-        f"<td class='num warn'>{total_warn}</td>"
-        f"<td class='num'>{total_info}</td></tr>"
-        f"</tbody></table></div>"
+        "<nav class='quick-nav'>"
+        "<a href='#env-fingerprint'>Environment</a>"
+        "<a href='#exec-summary'>Executive Summary</a>"
+        "<a href='#findings'>Findings</a>"
+        "<a href='#sql-appendix'>SQL Appendix</a>"
+        "</nav>"
     )
 
+    # Environment fingerprint
+    parts.append("<a id='env-fingerprint'></a>")
+    parts.append(render_fingerprint_card(fingerprint, target, report_dir))
+
+    # Executive summary -- KPIs + Top issues
+    parts.append("<a id='exec-summary'></a>")
+    parts.append("<div class='card'><h2 style='margin-top:0;border:none;'>"
+                 "Executive Summary<a class='back-top' href='#top'>top &uarr;</a></h2>")
+    parts.append("<div class='kpi-row'>")
+    parts.append(
+        f"<div class='kpi'><div class='lbl'>Databases analysed</div><div class='num'>{len(report)}</div></div>"
+        f"<div class='kpi'><div class='lbl'>Scripts OK</div><div class='num'>{total_pass}</div></div>"
+        f"<div class='kpi {'fail' if total_fail else ''}'><div class='lbl'>Failed scripts</div><div class='num fail'>{total_fail}</div></div>"
+        f"<div class='kpi {'crit' if total_crit else ''}'><div class='lbl'>Critical findings</div><div class='num crit'>{total_crit}</div></div>"
+        f"<div class='kpi {'warn' if total_warn else ''}'><div class='lbl'>Warnings</div><div class='num warn'>{total_warn}</div></div>"
+    )
+    parts.append("</div>")
+    # Aggregate findings across all contexts for the Top issues block
+    all_findings = []
+    for r in report:
+        all_findings.extend(r['findings'])
+    parts.append("<h3>Top issues -- what to fix</h3>")
+    parts.append(render_top_issues(all_findings))
+    # Per-context rollup table -- only shown for multi-database runs;
+    # for a single context the KPI cards above already cover the same
+    # numbers and the extra table is pure noise.
     if len(report) > 1:
-        parts.append("<div class='toc'><h2 style='margin-top:0;border:none;'>Sections</h2><ul>")
+        parts.append(
+            "<h3>Context rollup</h3>"
+            "<table class='exec-summary'><thead><tr>"
+            "<th>Database / Context</th><th>Scripts OK</th><th>Failed</th>"
+            "<th>Critical</th><th>Warning</th><th>Info</th></tr></thead><tbody>"
+        )
         for r in report:
             anchor = re.sub(r'[^A-Za-z0-9]', '_', r['name'])
-            parts.append(f"<li><a href='#db_{anchor}'>{html.escape(r['name'])}</a></li>")
-        parts.append("</ul></div>")
+            parts.append(
+                f"<tr><td><a href='#db_{anchor}'>{esc(r['name'])}</a></td>"
+                f"<td class='num'>{r['passed']}</td>"
+                f"<td class='num fail'>{r['failed']}</td>"
+                f"<td class='num crit'>{r['critical']}</td>"
+                f"<td class='num warn'>{r['warning']}</td>"
+                f"<td class='num'>{r['info']}</td></tr>"
+            )
+        parts.append(
+            f"<tr style='font-weight:bold;background:#eef3f7;'><td>TOTAL</td>"
+            f"<td class='num'>{total_pass}</td>"
+            f"<td class='num fail'>{total_fail}</td>"
+            f"<td class='num crit'>{total_crit}</td>"
+            f"<td class='num warn'>{total_warn}</td>"
+            f"<td class='num'>{total_info}</td></tr>"
+            f"</tbody></table>"
+        )
+    parts.append("</div>")  # close exec-summary card
 
+    # Findings -- one section, with a header so the reader knows what
+    # they're scrolling into.
+    parts.append("<a id='findings'></a>")
+    multi = len(report) > 1
+    parts.append("<div class='card'><h2 style='margin-top:0;border:none;'>"
+                 "Findings<a class='back-top' href='#top'>top &uarr;</a></h2>")
     for r in report:
         anchor = re.sub(r'[^A-Za-z0-9]', '_', r['name'])
-        parts.append(f"<section class='db' id='db_{anchor}'>")
-        parts.append(f"<h3>{html.escape(r['name'])}</h3>")
-        parts.append(f"<div class='meta'>Logs: <code>{html.escape(str(r['log_dir']))}</code></div>")
+        if multi:
+            parts.append(f"<section class='db' id='db_{anchor}'>")
+            parts.append(f"<h3>{esc(r['name'])}</h3>")
         parts.append(
-            f"<div class='meta'>Scripts run: {r['passed'] + r['failed']} | "
-            f"OK: {r['passed']} | Failed: {r['failed']}</div>"
+            f"<div class='meta'>Logs: <code>{esc(str(r['log_dir']))}</code> "
+            f"&middot; Scripts run: {r['passed'] + r['failed']} "
+            f"(OK: {r['passed']}, Failed: {r['failed']})</div>"
         )
         parts.append(render_findings(r['findings']))
-        parts.append("</section>")
+        if multi:
+            parts.append("</section>")
+    parts.append("</div>")  # close findings card
+
+    # SQL appendix -- full untruncated text per queryid, anchored so the
+    # queryid cells in the Top SQL tables link straight to it.
+    parts.append(render_sql_appendix(report))
+
     parts.append("</body></html>")
     return ''.join(parts)
 
 
+def render_sql_appendix(report: list) -> str:
+    """Build the appendix section listing full SQL text per queryid.
+    Pulls from perf_01_top_sql logs across all contexts, de-duplicating
+    by queryid so each statement appears exactly once."""
+    by_qid: dict = {}
+    for r in report:
+        log = find_log(r['log_dir'], 'perf_01_top_sql')
+        if not log:
+            continue
+        text = read_log_text(log)
+        for s in parse_result_sets(text):
+            cols = s['columns']
+            if 'queryid' not in cols or 'query' not in cols:
+                continue
+            for row in s['rows']:
+                qid = (row.get('queryid') or '').strip()
+                q   = (row.get('query')   or '').strip()
+                if qid and q and qid not in by_qid:
+                    by_qid[qid] = dict(query=q, context=r['name'])
+    if not by_qid:
+        return ''
+    parts = ["<section class='card' id='sql-appendix'>"
+             "<h2 style='margin-top:0;'>SQL Appendix -- full text by queryid"
+             "<a class='back-top' href='#top'>top &uarr;</a></h2>"
+             f"<div class='meta'>One entry per unique performance_schema digest surfaced in Top SQL "
+             f"({len(by_qid)} statements). queryid links in the Top SQL tables jump here.</div>"]
+
+    # Mini index at the top -- queryid -> one-line preview. Lets the
+    # reader scan all SQL labels without scrolling through every <pre>.
+    sorted_qids = sorted(by_qid, key=lambda k: int(k) if k.lstrip('-').isdigit() else 0)
+    parts.append("<details class='sql-index'><summary>"
+                 f"Jump-to index ({len(sorted_qids)} statements)</summary><ul>")
+    for qid in sorted_qids:
+        preview = by_qid[qid]['query'].strip().replace('\n', ' ')
+        if len(preview) > 100:
+            preview = preview[:100] + '...'
+        parts.append(
+            f"<li><a href='#sql-{esc(qid)}'><code>{esc(qid)}</code></a> "
+            f"&middot; {esc(preview)}</li>"
+        )
+    parts.append("</ul></details>")
+
+    for qid in sorted_qids:
+        entry = by_qid[qid]
+        q = entry['query']
+        if len(q) > 5000:
+            q = q[:5000] + '\n-- ... truncated; see raw .log file for the full text'
+        parts.append(
+            f"<h4 id='sql-{esc(qid)}'>queryid <code>{esc(qid)}</code> "
+            f"<span style='font-weight:normal;color:#888'>({esc(entry['context'])})</span>"
+            f"<a class='back-top' href='#top'>top &uarr;</a></h4>"
+            f"<pre class='sql-full'>{esc(q)}</pre>"
+        )
+    parts.append("</section>")
+    return ''.join(parts)
+
+
+# ---------------------------------------------------------------------------
+# Main
+# ---------------------------------------------------------------------------
 def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__.split('\n\n')[0])
-    ap.add_argument('report_dir')
-    ap.add_argument('--server', default='')
-    ap.add_argument('--out', default='')
+    ap.add_argument('report_dir', help='Folder produced by run_audit.sh / run_all_databases.sh')
+    ap.add_argument('--server', default='', help='Server label printed on the cover')
+    ap.add_argument('--out',    default='', help='Output HTML path (default: <report_dir>/perf_analysis.html)')
     args = ap.parse_args()
 
     report_dir = Path(args.report_dir).resolve()
     if not report_dir.is_dir():
         print(f'ERROR: report directory not found: {report_dir}', file=sys.stderr)
         return 2
+
     out = Path(args.out) if args.out else (report_dir / 'perf_analysis.html')
 
     contexts = discover_contexts(report_dir)
@@ -326,29 +806,41 @@ def main() -> int:
         print(f'ERROR: no log folders found under {report_dir}', file=sys.stderr)
         return 3
 
+    target = read_target(report_dir)
+
     report = []
+    fingerprint = {}
     for ctx in contexts:
         findings = find_findings(ctx['log_dir'])
         passed = failed = 0
         for status, _ in read_summary(ctx['log_dir'] / '_summary.txt'):
             if status == 'OK':   passed += 1
             elif status == 'FAIL': failed += 1
+        ctx_fp = read_fingerprint(ctx['log_dir'], ('perf_05_configuration_snapshot',))
+        if not fingerprint and ctx_fp:
+            fingerprint = ctx_fp
+        # Replace "(single run)" with actual DB name when available.
+        ctx_name = context_label(ctx_fp, target, ctx['name'])
         report.append(dict(
-            name=ctx['name'], log_dir=ctx['log_dir'], findings=findings,
+            name=ctx_name, log_dir=ctx['log_dir'], findings=findings,
             passed=passed, failed=failed,
             critical=sum(1 for f in findings if f['severity']=='Critical'),
             warning =sum(1 for f in findings if f['severity']=='Warning'),
             info    =sum(1 for f in findings if f['severity']=='Info'),
         ))
 
-    out.write_text(build_html(report, args.server, report_dir), encoding='utf-8')
+    out.write_text(build_html(report, args.server, report_dir, fingerprint, target),
+                   encoding='utf-8')
 
+    total_crit = sum(r['critical'] for r in report)
+    total_warn = sum(r['warning']  for r in report)
+    total_fail = sum(r['failed']   for r in report)
     print('=' * 80)
     print('Performance audit analysis complete.')
-    print(f'  Databases analyzed : {len(report)}')
-    print(f'  Critical findings  : {sum(r["critical"] for r in report)}')
-    print(f'  Warnings           : {sum(r["warning"]  for r in report)}')
-    print(f'  Failed scripts     : {sum(r["failed"]   for r in report)}')
+    print(f'  Databases analysed : {len(report)}')
+    print(f'  Critical findings  : {total_crit}')
+    print(f'  Warnings           : {total_warn}')
+    print(f'  Failed scripts     : {total_fail}')
     print(f'  Report             : {out}')
     print('=' * 80)
     return 0

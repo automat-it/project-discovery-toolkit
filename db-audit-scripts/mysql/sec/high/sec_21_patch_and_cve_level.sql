@@ -11,6 +11,29 @@
 -- =============================================================================
 
 -- ---------------------------------------------------------------------------
+-- Fingerprint header -- single-row context the report analyzer reads to
+-- populate the Environment Fingerprint card. Keep as the FIRST query so
+-- the analyzer can find it deterministically.
+-- ---------------------------------------------------------------------------
+SELECT
+    @@version                                            AS server_version,
+    @@version_comment                                    AS server_version_comment,
+    DATABASE()                                           AS database_name,
+    USER()                                               AS connection_user,
+    @@hostname                                           AS server_hostname,
+    @@max_connections                                    AS max_connections,
+    @@innodb_buffer_pool_size                            AS innodb_buffer_pool_size,
+    @@performance_schema                                 AS performance_schema,
+    @@log_bin                                            AS log_bin,
+    @@gtid_mode                                          AS gtid_mode,
+    @@read_only                                          AS read_only,
+    @@super_read_only                                    AS super_read_only,
+    (SELECT COUNT(*) FROM mysql.user WHERE user='rdsadmin') AS is_aws_rds,
+    @@time_zone                                          AS time_zone,
+    @@character_set_server                               AS character_set_server,
+    NOW()                                                AS server_time;
+
+-- ---------------------------------------------------------------------------
 -- Version / build / compile platform
 -- ---------------------------------------------------------------------------
 SELECT

@@ -45,6 +45,24 @@ TS=$(date +%Y%m%d_%H%M%S)
 OUT="$OUT_ROOT/mysql_perf_$TS"
 mkdir -p "$OUT"
 
+# Authentication: build a temporary option file and pass it via
+# --defaults-file (singular). MySQL client 9.x (Homebrew on macOS) silently
+# ignores the MYSQL_PWD env var on some builds. --defaults-extra-file is
+# also unreliable because mysql reads ~/.my.cnf AFTER it (last wins), so a
+# stale ~/.my.cnf would override our credentials.
+# --defaults-file=PATH replaces the entire option-file search with just
+# that one file -- guaranteed isolation.
+DEFAULTS_FILE=""
+if [ -n "${MYSQL_PWD:-}" ]; then
+    DEFAULTS_FILE=$(mktemp -t mysql_audit_defaults.XXXXXX)
+    chmod 600 "$DEFAULTS_FILE"
+    {
+        printf '[client]\n'
+        printf 'password=%s\n' "$MYSQL_PWD"
+    } > "$DEFAULTS_FILE"
+    trap 'rm -f "$DEFAULTS_FILE"' EXIT
+fi
+
 echo "================================================================================"
 echo "MySQL performance audit"
 echo "  host=$DB_HOST port=$DB_PORT user=$DB_USER db=$DB_NAME"
@@ -59,9 +77,17 @@ SUMMARY="$OUT/_summary.txt"
 # We detect statement-level errors by grepping the log for "^ERROR NNNN" after
 # each run, which is how the mysql client prefixes server errors to stderr.
 run_mysql() {
-    mysql --protocol=TCP -u "$DB_USER" -h "$DB_HOST" -P "$DB_PORT" \
-          --default-character-set=utf8mb4 \
-          "$DB_NAME" < "$1"
+    if [ -n "$DEFAULTS_FILE" ]; then
+        # --defaults-file MUST be the first option on the command line.
+        mysql --defaults-file="$DEFAULTS_FILE" \
+              --protocol=TCP -u "$DB_USER" -h "$DB_HOST" -P "$DB_PORT" \
+              --default-character-set=utf8mb4 \
+              "$DB_NAME" < "$1"
+    else
+        mysql --protocol=TCP -u "$DB_USER" -h "$DB_HOST" -P "$DB_PORT" \
+              --default-character-set=utf8mb4 \
+              "$DB_NAME" < "$1"
+    fi
 }
 
 for priority in critical high medium low; do

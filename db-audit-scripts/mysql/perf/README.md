@@ -10,15 +10,37 @@ Each script is independent and can be run standalone with `mysql < script.sql`.
 script into a timestamped report folder.
 
 ```bash
-# password comes from MYSQL_PWD (preferred over -p, stays out of `ps`)
+# Password supplied via MYSQL_PWD env var (kept out of `ps`)
 MYSQL_PWD=secret ./run_audit.sh -u auditor -h db.internal -P 3306 -d mysql
 ```
 
 Flags: `-u USER` (required) `-h HOST` `-P PORT` `-d DATABASE`
-`-o OUT_ROOT` (default `./reports`). Failure is detected by the mysql
-client's exit code plus a post-run grep for `^ERROR NNNN` in the log —
-`--abort-source-on-error` is not uniformly supported across mysql
-client builds, so the grep is the portable backstop.
+`-o OUT_ROOT` (default `./reports`).
+
+### Authentication mechanics
+
+When `MYSQL_PWD` is set, the runner writes it to a **temporary
+`--defaults-file`** (mode 0600, cleaned up on exit) and passes that
+as the FIRST argument to `mysql(1)`. This handles two real-world
+traps:
+
+1. **MySQL client 9.x** (Homebrew default on macOS) silently ignores
+   `MYSQL_PWD` on some builds.
+2. **`~/.my.cnf` overrides** — the mysql client reads `~/.my.cnf`
+   *after* any `--defaults-extra-file`, so a stale local
+   `[client] user=root password=...` block would override the audit
+   credentials. `--defaults-file` (singular) replaces the entire
+   option-file search, so isolation is guaranteed.
+
+If `MYSQL_PWD` is not set the runner falls back to mysql's default
+authentication path.
+
+### Failure detection
+
+Failure is detected by the mysql client's exit code plus a post-run
+grep for `^ERROR NNNN` in the log — `--abort-source-on-error` is not
+uniformly supported across mysql client builds, so the grep is the
+portable backstop.
 
 Output layout:
 
@@ -33,8 +55,7 @@ reports/mysql_perf_YYYYMMDD_HHMMSS/
 
 ## Report analyzer (`analyze_report.py`)
 
-After a run completes, parse the report folder into a customer-friendly
-HTML summary highlighting potential issues across all databases:
+After a run completes, parse the report folder into an HTML report:
 
 ```bash
 # Single-database run output (the folder run_audit.sh wrote into)
@@ -42,13 +63,75 @@ HTML summary highlighting potential issues across all databases:
 
 # Multi-database run (parent folder containing per-DB sub-folders)
 ./analyze_report.py /path/to/parent_report_dir --server prod-mysql-01
+
+# Render to PDF (optional -- HTML is always produced)
+google-chrome --headless --disable-gpu --no-pdf-header-footer \
+    --print-to-pdf=perf_analysis.pdf \
+    "file://$(pwd)/reports/mysql_perf_YYYYMMDD_HHMMSS/perf_analysis.html"
 ```
 
-The analyzer writes `perf_analysis.html` into the report folder. The HTML
-contains an executive-summary table (counts of Critical / Warning / Info
-findings per database) plus a section per database with the matched
-findings, severity, and remediation hints. Standard library only --
-no Python packages to install.
+The analyzer is pure Python standard library (no `pip install` step).
+
+### What the HTML report contains
+
+* **Environment Fingerprint card** -- host, database, MySQL version,
+  AWS-managed flag (RDS / Aurora), server role (primary writeable vs
+  replica), max_connections, innodb_buffer_pool, time zone, character
+  set, `performance_schema` / `log_bin` / `gtid_mode` state. Sourced
+  from a single-row fingerprint header that `perf_05` emits as its
+  first query specifically for the analyzer.
+
+* **Quick-nav strip** with anchor links: Environment, Executive
+  Summary, Findings, SQL Appendix. Hidden in print.
+
+* **Executive Summary**
+  - Five KPI cards (Databases analysed, Scripts OK, Failed scripts,
+    Critical findings, Warnings) -- crit / warn / fail cards turn red /
+    orange when non-zero.
+  - **Top issues -- what to fix**: highest-priority findings as an
+    ordered list with severity badge + action line + anchor link to
+    the detailed finding card. Capped at 10.
+
+* **Findings** -- one card per finding. Each card:
+  - severity colour bar (red / orange / blue)
+  - title + script reference
+  - boxed "Action:" recommendation
+  - one or more **concrete-objects** sub-tables (top 10 rows by default
+    with `... +N more rows -- consult the raw .log file` overflow note)
+
+  Coverage:
+
+  | Finding                                       | Concrete objects shown |
+  |-----------------------------------------------|------------------------|
+  | `perf_01` Top SQL                             | queryid (linked), calls, total_min, mean_ms, pct_total (5 sub-tables: by total/mean/calls/rows/examined ratio) |
+  | `perf_02` Blocking / long-running             | data_locks_waits rows + active sessions > 0 s |
+  | `perf_06` Index hygiene                       | Index I/O activity, sys.schema_unused_indexes, cardinality, duplicates, FK without index |
+  | `perf_07` Stale stats / never analyzed        | TABLE_SCHEMA, TABLE_NAME, approx_rows, last_modified |
+  | `perf_08` Top tables by size                  | schema, table, ENGINE, data_mb, index_mb |
+  | `perf_09` Temp tables to disk                 | per-digest temp counters |
+  | `perf_11` Free-space / bloat                  | TABLE_SCHEMA, TABLE_NAME, data_mb, free_mb, free_pct |
+  | `perf_12` Missing-index candidates            | tables without useful indexes |
+  | `perf_15` Capacity (AUTO_INCREMENT, conns)    | objects above 50% consumption |
+  | `perf_21` Partitions                          | per-partition row count and size |
+
+* **SQL Appendix** -- one entry per unique
+  `events_statements_summary_by_digest` queryid surfaced in Top SQL,
+  with the **full** digest text in a `<pre>` block. A collapsible
+  jump-to index at the top lists every queryid with a one-line
+  preview. queryid cells in the Top SQL tables link straight to the
+  matching appendix entry; each appendix entry has a `top ↑` link
+  back.
+
+### Finding triggers
+
+Each rule has a `mode`:
+* `has_data` -- fire when the log has any data rows.
+* `pattern`  -- fire when a regex matches (used for variables like
+  `Created_tmp_disk_tables`, `Seconds_Behind_Source`, capacity %).
+* `check`    -- custom predicate. Used by `perf_02` to fire only on
+  *actionable* sub-tables (real blocking, real long-running tx),
+  not on the always-populated InnoDB lock summary / event scheduler
+  daemon row.
 
 
 ## Read-only guarantee
@@ -145,7 +228,10 @@ I/O counters from `global_status`; per-table I/O from
 Snapshot of key `global_variables` covering memory (InnoDB buffer pool,
 sort/join buffers), connections, timeouts, replication, InnoDB I/O,
 query cache, and binary log settings. Non-default variables via
-`performance_schema.variables_info`.
+`performance_schema.variables_info`. **First query is a single-row
+"fingerprint header"** the report analyzer reads to populate the
+Environment Fingerprint card (`@@version`, current database, host,
+buffer pool, RDS/Aurora flag, performance_schema / log_bin state).
 
 ## High priority
 

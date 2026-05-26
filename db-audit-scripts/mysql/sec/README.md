@@ -10,15 +10,23 @@ Each script is independent and can be run standalone with `mysql < script.sql`.
 script into a timestamped report folder.
 
 ```bash
-# password comes from MYSQL_PWD (preferred over -p, stays out of `ps`)
 MYSQL_PWD=secret ./run_audit.sh -u auditor -h db.internal -P 3306 -d mysql
 ```
 
 Flags: `-u USER` (required) `-h HOST` `-P PORT` `-d DATABASE`
-`-o OUT_ROOT` (default `./reports`). Failure is detected by the mysql
-client's exit code plus a post-run grep for `^ERROR NNNN` in the log —
-`--abort-source-on-error` is not uniformly supported across mysql
-client builds, so the grep is the portable backstop.
+`-o OUT_ROOT` (default `./reports`).
+
+When `MYSQL_PWD` is set, the runner writes it to a temporary
+`--defaults-file` (mode 0600, cleaned up on exit) and passes that as
+the FIRST argument to `mysql(1)` -- see `mysql/perf/README.md`
+"Authentication mechanics" for why this is more reliable than
+`MYSQL_PWD` alone on MySQL client 9.x and in the presence of a stale
+`~/.my.cnf`.
+
+Failure is detected by the mysql client's exit code plus a post-run
+grep for `^ERROR NNNN` in the log -- `--abort-source-on-error` is not
+uniformly supported across mysql client builds, so the grep is the
+portable backstop.
 
 Output layout:
 
@@ -33,8 +41,7 @@ reports/mysql_sec_YYYYMMDD_HHMMSS/
 
 ## Report analyzer (`analyze_report.py`)
 
-After a run completes, parse the report folder into a customer-friendly
-HTML summary highlighting potential issues across all databases:
+After a run completes, parse the report folder into an HTML report:
 
 ```bash
 # Single-database run output (the folder run_audit.sh wrote into)
@@ -42,13 +49,58 @@ HTML summary highlighting potential issues across all databases:
 
 # Multi-database run (parent folder containing per-DB sub-folders)
 ./analyze_report.py /path/to/parent_report_dir --server prod-mysql-01
+
+# Render to PDF (optional -- HTML is always produced)
+google-chrome --headless --disable-gpu --no-pdf-header-footer \
+    --print-to-pdf=sec_analysis.pdf \
+    "file://$(pwd)/reports/mysql_sec_YYYYMMDD_HHMMSS/sec_analysis.html"
 ```
 
-The analyzer writes `sec_analysis.html` into the report folder. The HTML
-contains an executive-summary table (counts of Critical / Warning / Info
-findings per database) plus a section per database with the matched
-findings, severity, and remediation hints. Standard library only --
-no Python packages to install.
+Standard Python library only -- no `pip install` step.
+
+### What the HTML report contains
+
+* **Environment Fingerprint card** -- host, database, MySQL version,
+  AWS-managed flag (RDS / Aurora), server role, max_connections,
+  innodb_buffer_pool, `performance_schema` / `log_bin` / `gtid_mode`
+  state. Sourced from a single-row header that `sec_21` emits as its
+  first query specifically for the analyzer.
+
+* **Quick-nav strip** with anchor links: Environment, Executive
+  Summary, Findings. Hidden in print.
+
+* **Executive Summary**
+  - Five KPI cards -- crit / warn / fail cards turn red / orange when
+    non-zero.
+  - **Top issues -- what to fix**: highest-priority findings as an
+    ordered list with severity badge + action line + anchor link to
+    the detailed finding card. Capped at 10.
+
+* **Findings** -- one card per finding. Each card carries severity
+  colour bar, boxed "Action:" recommendation, and curated **concrete-
+  objects** sub-tables (deduplicated -- when one script emits the
+  same logical table several times with different filters, the
+  analyzer keeps the most-populated copy). Top 10 rows per group with
+  `... +N more rows -- consult the raw .log file` overflow note.
+
+  Concrete objects shown:
+
+  | Finding                                            | Concrete objects shown            |
+  |----------------------------------------------------|-----------------------------------|
+  | `sec_03` Admin / superusers                        | Users with admin attrs + grants + role chain |
+  | `sec_04` PUBLIC / excessive grants                 | sub-tables per grantee scope      |
+  | `sec_05` mysql_native_password / expired passwords | matched rows                      |
+  | `sec_06` general_log / audit logging               | matched rows                      |
+  | `sec_07` SSL disabled                              | matched rows                      |
+  | `sec_08` bind_address = * (all interfaces)         | matched rows                      |
+  | `sec_09` PII columns                               | schema.table.column + pii_category |
+  | `sec_10` Dangerous objects                         | SECURITY DEFINER routines, UDFs, triggers, events |
+  | `sec_12` Dormant users                             | user, host, last activity         |
+  | `sec_14` Backup configuration / repl accounts      | matched rows                      |
+  | `sec_15` External integrations                     | FEDERATED tables, UDFs, non-std SEs |
+  | `sec_18` Audit configuration gaps                  | matched rows                      |
+  | `sec_20` Failed login indicators                   | Connection_Errors_* status vars   |
+  | `sec_22` Cert / password expiry                    | TLS config + expiring credentials |
 
 
 ## Read-only guarantee
@@ -200,7 +252,11 @@ account lock / password-expiry state from `mysql.user`;
 (8.4 LTS / 8.0 / 5.7 / 5.6) and MariaDB (11.4 / 10.11 / 10.6 / 10.5 /
 10.4) as of Nov 2024, active plugin inventory with versions, components
 registered via the 8.0 `mysql.component` table (prepared-statement
-guarded for 5.7), SSL library version in use.
+guarded for 5.7), SSL library version in use. **First query is a
+single-row "fingerprint header"** the report analyzer reads to
+populate the Environment Fingerprint card (`@@version`, current
+database, host, max_connections, buffer pool, RDS/Aurora flag,
+performance_schema / log_bin state).
 
 ### `sec_22_cert_and_key_expiry.sql`
 

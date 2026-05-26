@@ -110,9 +110,18 @@ WHERE VARIABLE_NAME IN (
 ORDER BY VARIABLE_NAME;
 
 -- ---------------------------------------------------------------------------
--- Binary log files (equivalent to WAL segment list)
+-- Binary log files (equivalent to WAL segment list).
+-- SHOW BINARY LOGS raises ER 1381 (HY000) when @@log_bin = 0. Aurora
+-- MySQL Serverless v2 has log_bin OFF by default because Aurora
+-- replicates at the storage layer, not via binlog streaming. Gate on
+-- @@log_bin so the script does not abort.
 -- ---------------------------------------------------------------------------
-SHOW BINARY LOGS;
+SET @_stmt_binlog := IF(@@log_bin = 1,
+    'SHOW BINARY LOGS',
+    'SELECT ''binary logging disabled (Aurora / log_bin=OFF) -- SHOW BINARY LOGS skipped'' AS note');
+PREPARE _s_binlog FROM @_stmt_binlog;
+EXECUTE _s_binlog;
+DEALLOCATE PREPARE _s_binlog;
 
 -- ---------------------------------------------------------------------------
 -- Active replication channels (reading binary logs for replication/CDC)

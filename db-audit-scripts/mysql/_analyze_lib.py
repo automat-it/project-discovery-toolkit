@@ -396,6 +396,11 @@ details.sql-index a{color:#1F497D;text-decoration:none;}
 details.sql-index a:hover{text-decoration:underline;}
 @media print{details.sql-index[open]{display:block;}details.sql-index{padding:6px 10px;}}
 section#sql-appendix h4{font-family:Consolas,monospace;font-size:0.95em;margin:14px 0 4px;color:#1F497D;border-top:1px solid #e0e0e0;padding-top:10px;}
+pre.cmd{background:#1e1e1e;color:#d4d4d4;padding:10px 14px;border-radius:4px;font-family:Consolas,monospace;font-size:0.85em;white-space:pre-wrap;word-break:break-word;page-break-inside:avoid;margin:4px 0 10px;}
+ul.docs-list{margin:4px 0 8px;padding-left:18px;font-size:0.9em;}
+ul.docs-list li{margin:2px 0;}
+ul.docs-list a{color:#1F497D;text-decoration:none;border-bottom:1px dotted #1F497D;}
+ul.docs-list a:hover{text-decoration:underline;}
 </style>"""
 
 

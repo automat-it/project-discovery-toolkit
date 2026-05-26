@@ -98,6 +98,10 @@ The analyzer is pure Python standard library (no `pip install` step).
   - boxed "Action:" recommendation
   - one or more **concrete-objects** sub-tables (top 10 rows by default
     with `... +N more rows -- consult the raw .log file` overflow note)
+  - **"How to fix -- starter commands"** code block with copy-pastable
+    SQL / `aws rds` snippets
+  - **"Further reading"** list of links to dev.mysql.com / AWS docs
+    pages for that specific control
 
   Coverage:
 

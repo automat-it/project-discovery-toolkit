@@ -315,6 +315,22 @@ RULES = [
         extractor=_ext_top_sql,
         ext_label='Top statements (snapshot)',
         ext_columns=None,
+        commands=(
+            "-- Walk the live ranking yourself\n"
+            "SELECT DIGEST_TEXT, COUNT_STAR, SUM_TIMER_WAIT/1e12 AS total_sec,\n"
+            "       AVG_TIMER_WAIT/1e9 AS avg_ms, SUM_ROWS_EXAMINED\n"
+            "  FROM performance_schema.events_statements_summary_by_digest\n"
+            "  ORDER BY SUM_TIMER_WAIT DESC LIMIT 20;\n"
+            "\n"
+            "-- Get the EXPLAIN for a flagged digest\n"
+            "EXPLAIN ANALYZE <statement-from-digest>;"
+        ),
+        docs=[
+            ('performance_schema digest tables',
+             'https://dev.mysql.com/doc/refman/8.0/en/performance-schema-statement-digests.html'),
+            ('EXPLAIN ANALYZE',
+             'https://dev.mysql.com/doc/refman/8.0/en/explain.html#explain-analyze'),
+        ],
     ),
     dict(
         script='perf_02_blocking_and_locks',
@@ -326,6 +342,18 @@ RULES = [
         extractor=_ext_blocking,
         ext_label='Concrete blocking / long-running rows',
         ext_columns=None,
+        commands=(
+            "-- Inspect the blocker / waiter chain\n"
+            "SELECT * FROM performance_schema.data_lock_waits;\n"
+            "SELECT * FROM information_schema.innodb_trx WHERE trx_started < NOW() - INTERVAL 5 MINUTE;\n"
+            "\n"
+            "-- Kill the offending session (use with care)\n"
+            "KILL <thread_id>;"
+        ),
+        docs=[
+            ('InnoDB monitoring (data_locks / data_lock_waits)',
+             'https://dev.mysql.com/doc/refman/8.0/en/performance-schema-data-locks-table.html'),
+        ],
     ),
     dict(
         script='perf_06_index_audit',
@@ -336,6 +364,20 @@ RULES = [
         extractor=_ext_index_findings,
         ext_label='Concrete index findings',
         ext_columns=None,
+        commands=(
+            "-- Verify an index is truly unused (multiple days of stats)\n"
+            "SELECT * FROM sys.schema_unused_indexes;\n"
+            "\n"
+            "-- Make it invisible first (8.0+), drop after a soak period\n"
+            "ALTER TABLE audit_test.users ALTER INDEX idx_users_email_dup INVISIBLE;\n"
+            "ALTER TABLE audit_test.users DROP INDEX idx_users_email_dup;"
+        ),
+        docs=[
+            ('sys schema: schema_unused_indexes',
+             'https://dev.mysql.com/doc/refman/8.0/en/sys-schema-unused-indexes.html'),
+            ('Invisible indexes',
+             'https://dev.mysql.com/doc/refman/8.0/en/invisible-indexes.html'),
+        ],
     ),
     dict(
         script='perf_07_table_stats_health',
@@ -346,6 +388,18 @@ RULES = [
         extractor=_ext_table_stats,
         ext_label='Tables flagged',
         ext_columns=None,
+        commands=(
+            "-- Refresh stats for a flagged table\n"
+            "ANALYZE TABLE audit_test.orders;\n"
+            "\n"
+            "-- Enable auto-recalc cluster-wide (Aurora: via DB cluster param group)\n"
+            "SET PERSIST innodb_stats_auto_recalc = ON;\n"
+            "SET PERSIST innodb_stats_persistent  = ON;"
+        ),
+        docs=[
+            ('Optimizer statistics',
+             'https://dev.mysql.com/doc/refman/8.0/en/innodb-persistent-stats.html'),
+        ],
     ),
     dict(
         script='perf_08_object_sizes',
@@ -356,6 +410,10 @@ RULES = [
         extractor=_ext_object_sizes,
         ext_label='Top tables',
         ext_columns=None,
+        docs=[
+            ('information_schema.TABLES sizing',
+             'https://dev.mysql.com/doc/refman/8.0/en/information-schema-tables-table.html'),
+        ],
     ),
     dict(
         script='perf_09_temp_and_memory_pressure',
@@ -369,6 +427,21 @@ RULES = [
         extractor=_ext_temp_pressure,
         ext_label='Statements / status counters with non-zero spill',
         ext_columns=None,
+        commands=(
+            "-- Raise the in-memory temp ceiling (RDS / Aurora: via param group)\n"
+            "SET PERSIST tmp_table_size      = 268435456;  -- 256 MiB\n"
+            "SET PERSIST max_heap_table_size = 268435456;\n"
+            "\n"
+            "-- Find which digests are spilling\n"
+            "SELECT digest_text, SUM_CREATED_TMP_DISK_TABLES\n"
+            "  FROM performance_schema.events_statements_summary_by_digest\n"
+            "  WHERE SUM_CREATED_TMP_DISK_TABLES > 0\n"
+            "  ORDER BY SUM_CREATED_TMP_DISK_TABLES DESC LIMIT 20;"
+        ),
+        docs=[
+            ('Internal temporary tables',
+             'https://dev.mysql.com/doc/refman/8.0/en/internal-temporary-tables.html'),
+        ],
     ),
     dict(
         script='perf_10_replication_and_backup_impact',
@@ -379,6 +452,22 @@ RULES = [
         recommendation='Replica is behind primary. Check parallel-replication '
                        'settings (replica_parallel_workers, replica_preserve_'
                        'commit_order) and IO capacity.',
+        commands=(
+            "-- See per-worker apply progress\n"
+            "SELECT CHANNEL_NAME, WORKER_ID, SERVICE_STATE, LAST_APPLIED_TRANSACTION\n"
+            "  FROM performance_schema.replication_applier_status_by_worker;\n"
+            "\n"
+            "-- Raise parallel apply (requires restart; Aurora: cluster param group)\n"
+            "SET PERSIST replica_parallel_workers       = 8;\n"
+            "SET PERSIST replica_parallel_type          = 'LOGICAL_CLOCK';\n"
+            "SET PERSIST replica_preserve_commit_order  = ON;"
+        ),
+        docs=[
+            ('Replica lag troubleshooting',
+             'https://dev.mysql.com/doc/refman/8.0/en/replication-solutions-monitoring.html'),
+            ('Aurora MySQL replication',
+             'https://docs.aws.amazon.com/AmazonRDS/latest/AuroraUserGuide/AuroraMySQL.Replication.MySQL.html'),
+        ],
     ),
     dict(
         script='perf_11_bloat_estimation',
@@ -390,6 +479,15 @@ RULES = [
         extractor=_ext_bloat,
         ext_label='Top bloated tables',
         ext_columns=None,
+        commands=(
+            "-- Reclaim free space (rebuilds the table -- offline-ish on big tables)\n"
+            "ALTER TABLE audit_test.orders ENGINE=InnoDB,\n"
+            "  ALGORITHM=INPLACE, LOCK=NONE;"
+        ),
+        docs=[
+            ('Defragmenting a table',
+             'https://dev.mysql.com/doc/refman/8.0/en/innodb-file-defragmenting.html'),
+        ],
     ),
     dict(
         script='perf_12_sequential_scans',
@@ -400,6 +498,20 @@ RULES = [
         extractor=_ext_seq_scans,
         ext_label='Tables without useful indexes',
         ext_columns=None,
+        commands=(
+            "-- Find candidate columns from slow log / digest stats\n"
+            "SELECT digest_text FROM performance_schema.events_statements_summary_by_digest\n"
+            "  WHERE digest_text LIKE '%FROM audit_test.audit_log%' ORDER BY COUNT_STAR DESC;\n"
+            "\n"
+            "-- Add the index online\n"
+            "ALTER TABLE audit_test.audit_log\n"
+            "  ADD INDEX idx_audit_actor_ts (actor, ts),\n"
+            "  ALGORITHM=INPLACE, LOCK=NONE;"
+        ),
+        docs=[
+            ('Indexing strategy',
+             'https://dev.mysql.com/doc/refman/8.0/en/optimization-indexes.html'),
+        ],
     ),
     dict(
         script='perf_15_capacity_and_growth',
@@ -412,6 +524,22 @@ RULES = [
         extractor=_ext_capacity,
         ext_label='Objects near capacity',
         ext_columns=None,
+        commands=(
+            "-- Widen AUTO_INCREMENT to BIGINT (online on 8.0)\n"
+            "ALTER TABLE audit_test.orders\n"
+            "  MODIFY id BIGINT NOT NULL AUTO_INCREMENT,\n"
+            "  ALGORITHM=INPLACE, LOCK=NONE;\n"
+            "\n"
+            "-- RDS / Aurora: grow storage\n"
+            "aws rds modify-db-instance --db-instance-identifier <db> \\\n"
+            "  --allocated-storage 200 --apply-immediately"
+        ),
+        docs=[
+            ('Using AUTO_INCREMENT',
+             'https://dev.mysql.com/doc/refman/8.0/en/example-auto-increment.html'),
+            ('RDS storage scaling',
+             'https://docs.aws.amazon.com/AmazonRDS/latest/UserGuide/USER_PIOPS.StorageTypes.html'),
+        ],
     ),
     dict(
         script='perf_21_partition_health',
@@ -422,6 +550,21 @@ RULES = [
         extractor=_ext_partitions,
         ext_label='Partitions',
         ext_columns=None,
+        commands=(
+            "-- Add a future RANGE partition (typical retention pattern)\n"
+            "ALTER TABLE audit_test.events\n"
+            "  REORGANIZE PARTITION pmax INTO (\n"
+            "    PARTITION p202607 VALUES LESS THAN (TO_DAYS('2026-08-01')),\n"
+            "    PARTITION pmax    VALUES LESS THAN MAXVALUE\n"
+            "  );\n"
+            "\n"
+            "-- Drop the oldest partition (instant -- no row scan)\n"
+            "ALTER TABLE audit_test.events DROP PARTITION p202401;"
+        ),
+        docs=[
+            ('Partitioning',
+             'https://dev.mysql.com/doc/refman/8.0/en/partitioning.html'),
+        ],
     ),
 ]
 
@@ -512,6 +655,8 @@ def find_findings(log_dir: Path) -> list:
                 objects=objs, object_columns=ext_cols,
                 object_label=ext_label,
                 object_groups=object_groups,
+                commands=rule.get('commands', ''),
+                docs=rule.get('docs', []),
             ))
     return findings
 
@@ -606,6 +751,22 @@ def render_findings(findings: list) -> str:
                 f"<div class='objs-caption'><strong>"
                 f"{esc(f['object_label'] or 'Concrete objects')}</strong></div>"
                 + object_table(f['objects'], f['object_columns'], limit=10)
+            )
+        if f.get('commands'):
+            parts.append(
+                "<div class='objs-caption'><strong>How to fix &mdash; "
+                "starter commands</strong></div>"
+                f"<pre class='cmd'>{esc(f['commands'])}</pre>"
+            )
+        if f.get('docs'):
+            items = ''.join(
+                f"<li><a href='{esc(url)}' target='_blank' rel='noopener'>"
+                f"{esc(name)}</a></li>"
+                for name, url in f['docs']
+            )
+            parts.append(
+                "<div class='objs-caption'><strong>Further reading</strong></div>"
+                f"<ul class='docs-list'>{items}</ul>"
             )
         parts.append("</div>")  # close .finding
     return ''.join(parts)

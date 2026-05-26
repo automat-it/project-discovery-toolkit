@@ -192,6 +192,95 @@ def _ext_external_integrations(text):
     return out[:200]
 
 
+# ---------------------------------------------------------------------------
+# Extractors for pattern-mode rules. Pattern rules just say "this regex hit
+# in the log" -- without an extractor the reader sees a category but not
+# which user / which row triggered it. These return [dict(label,columns,rows)]
+# so the renderer treats them as object_groups.
+# ---------------------------------------------------------------------------
+def _filter_rows(text, required_cols, predicate):
+    """Find the first result set whose columns include ALL required_cols
+    (case-insensitive) and return rows that match `predicate(row)`.
+    Returns (columns, rows) or (None, [])."""
+    req = {c.lower() for c in required_cols}
+    for s in parse_result_sets(text):
+        cols_lc = {c.lower() for c in s['columns']}
+        if not req <= cols_lc:
+            continue
+        rows = [r for r in s['rows'] if predicate(r)]
+        if rows:
+            return s['columns'], rows
+    return None, []
+
+
+def _ext_native_password_users(text):
+    cols, rows = _filter_rows(
+        text, ('user', 'plugin'),
+        lambda r: any(v.strip().lower().startswith('mysql_native_password')
+                      for k, v in r.items() if k.lower() == 'plugin'))
+    if not rows:
+        return []
+    return [dict(label='Accounts still on mysql_native_password',
+                 columns=cols, rows=rows[:200])]
+
+
+def _ext_expired_password_users(text):
+    cols, rows = _filter_rows(
+        text, ('user', 'password_expired'),
+        lambda r: any(v.strip().upper() == 'Y'
+                      for k, v in r.items() if k.lower() == 'password_expired'))
+    if not rows:
+        return []
+    return [dict(label='Accounts with expired passwords',
+                 columns=cols, rows=rows[:200])]
+
+
+def _ext_audit_log_settings(text):
+    """sec_06: surface the audit-related variable rows so the reader sees
+    exactly which logs are OFF."""
+    targets = {'general_log', 'log_output', 'slow_query_log',
+               'audit_log_policy', 'audit_log_format', 'log_error_verbosity',
+               'binlog_format', 'log_bin'}
+    cols, rows = _filter_rows(
+        text, ('variable_name',),
+        lambda r: any(v.lower() in targets
+                      for k, v in r.items() if k.lower() == 'variable_name'))
+    if not rows:
+        return []
+    return [dict(label='Audit / logging variables', columns=cols, rows=rows)]
+
+
+def _ext_ssl_settings(text):
+    """sec_07: pull SSL-related variables and non-SSL accounts."""
+    out = []
+    targets = {'have_ssl', 'have_openssl', 'require_secure_transport',
+               'ssl_cipher', 'tls_version', 'ssl_ca', 'ssl_cert', 'ssl_key'}
+    cols, rows = _filter_rows(
+        text, ('variable_name',),
+        lambda r: any(v.lower() in targets
+                      for k, v in r.items() if k.lower() == 'variable_name'))
+    if rows:
+        out.append(dict(label='SSL/TLS server settings', columns=cols, rows=rows))
+    cols, rows = _filter_rows(
+        text, ('user', 'ssl_type'),
+        lambda r: any((v or '').strip() == ''
+                      for k, v in r.items() if k.lower() == 'ssl_type'))
+    if rows:
+        out.append(dict(label='Accounts without REQUIRE SSL', columns=cols, rows=rows[:200]))
+    return out
+
+
+def _ext_bind_address(text):
+    targets = {'bind_address', 'mysqlx_bind_address', 'skip_networking', 'port'}
+    cols, rows = _filter_rows(
+        text, ('variable_name',),
+        lambda r: any(v.lower() in targets
+                      for k, v in r.items() if k.lower() == 'variable_name'))
+    if not rows:
+        return []
+    return [dict(label='Network exposure variables', columns=cols, rows=rows)]
+
+
 RULES = [
     dict(
         script='sec_03_admin_and_superusers',
@@ -201,6 +290,21 @@ RULES = [
                        'memberships to the minimum required.',
         extractor=_ext_privileged_users,
         ext_label='Privileged accounts (sample)',
+        commands=(
+            "-- Inspect what each flagged account actually has\n"
+            "SHOW GRANTS FOR 'app_admin'@'%';\n"
+            "\n"
+            "-- Revoke unneeded global privileges\n"
+            "REVOKE SUPER, GRANT OPTION ON *.* FROM 'app_admin'@'%';\n"
+            "REVOKE 'rds_superuser_role' FROM 'app_admin'@'%';\n"
+            "FLUSH PRIVILEGES;"
+        ),
+        docs=[
+            ('MySQL: Privileges Provided by MySQL',
+             'https://dev.mysql.com/doc/refman/8.0/en/privileges-provided.html'),
+            ('RDS / Aurora: master user account',
+             'https://docs.aws.amazon.com/AmazonRDS/latest/UserGuide/UsingWithRDS.MasterAccounts.html'),
+        ],
     ),
     dict(
         script='sec_04_public_and_excessive_grants',
@@ -210,6 +314,18 @@ RULES = [
                        'specific schemas, or restrict host patterns.',
         extractor=_ext_public_grants,
         ext_label='Excessive grants (sample)',
+        commands=(
+            "-- Replace a wildcard grant with a schema-scoped one\n"
+            "REVOKE SELECT, INSERT, UPDATE, DELETE ON *.* FROM 'app_user'@'%';\n"
+            "GRANT  SELECT, INSERT, UPDATE, DELETE ON app_db.* TO 'app_user'@'%';\n"
+            "\n"
+            "-- Tighten the host pattern (e.g. only the app subnet)\n"
+            "RENAME USER 'app_user'@'%' TO 'app_user'@'10.20.%';"
+        ),
+        docs=[
+            ('GRANT statement',
+             'https://dev.mysql.com/doc/refman/8.0/en/grant.html'),
+        ],
     ),
     dict(
         script='sec_05_authentication_and_passwords',
@@ -219,6 +335,27 @@ RULES = [
         recommendation='Migrate accounts to caching_sha2_password (or '
                        'authentication_oci / IAM). mysql_native_password is '
                        'removed in MySQL 9.x.',
+        extractor=_ext_native_password_users,
+        commands=(
+            "-- List affected accounts\n"
+            "SELECT user, host, plugin FROM mysql.user\n"
+            " WHERE plugin = 'mysql_native_password';\n"
+            "\n"
+            "-- Migrate each account (issue a new strong password)\n"
+            "ALTER USER 'app_read'@'%' IDENTIFIED WITH caching_sha2_password\n"
+            "  BY '<new-strong-password>';\n"
+            "\n"
+            "-- Force migration on next login (8.0.18+)\n"
+            "ALTER USER 'app_read'@'%' PASSWORD EXPIRE;"
+        ),
+        docs=[
+            ('MySQL: Pluggable Authentication',
+             'https://dev.mysql.com/doc/refman/8.0/en/pluggable-authentication.html'),
+            ('caching_sha2_password plugin',
+             'https://dev.mysql.com/doc/refman/8.0/en/caching-sha2-pluggable-authentication.html'),
+            ('Deprecation & removal of mysql_native_password',
+             'https://dev.mysql.com/doc/refman/8.4/en/native-pluggable-authentication.html'),
+        ],
     ),
     dict(
         script='sec_05_authentication_and_passwords',
@@ -227,14 +364,51 @@ RULES = [
         title='Accounts with expired passwords',
         recommendation='Force password reset for expired accounts. Configure '
                        'default_password_lifetime to limit silent-expiry risk.',
+        extractor=_ext_expired_password_users,
+        commands=(
+            "-- Reset password for an expired account\n"
+            "ALTER USER 'old_dev'@'%' IDENTIFIED BY '<new-strong-password>';\n"
+            "\n"
+            "-- Set a global rotation policy (days)\n"
+            "SET PERSIST default_password_lifetime = 180;\n"
+            "SET PERSIST password_history          = 5;\n"
+            "SET PERSIST password_reuse_interval   = 365;"
+        ),
+        docs=[
+            ('MySQL: Password Management',
+             'https://dev.mysql.com/doc/refman/8.0/en/password-management.html'),
+        ],
     ),
     dict(
         script='sec_06_audit_logging',
         mode='pattern', severity='Warning',
         pattern=r'(?im)general_log\t(OFF|0)',
         title='general_log / audit logging not active',
-        recommendation='Enable audit logging (Audit Plugin for MySQL Enterprise, '
-                       'or server_audit for MariaDB / Percona).',
+        recommendation='Enable audit logging (MySQL Enterprise Audit, '
+                       'server_audit for MariaDB/Percona, or RDS / Aurora Audit).',
+        extractor=_ext_audit_log_settings,
+        commands=(
+            "-- Aurora / RDS: enable advanced audit via DB cluster parameter group\n"
+            "--   server_audit_logging          = 1\n"
+            "--   server_audit_events           = CONNECT,QUERY_DDL,QUERY_DCL\n"
+            "--   server_audit_incl_users / excl_users -- scope\n"
+            "\n"
+            "aws rds modify-db-cluster-parameter-group \\\n"
+            "  --db-cluster-parameter-group-name <pg-name> \\\n"
+            "  --parameters \"ParameterName=server_audit_logging,ParameterValue=1,ApplyMethod=immediate\"\n"
+            "\n"
+            "-- Self-managed MySQL: enable General Log + Audit Plugin\n"
+            "SET PERSIST general_log      = 'ON';\n"
+            "SET PERSIST log_output       = 'FILE';"
+        ),
+        docs=[
+            ('MySQL Enterprise Audit',
+             'https://dev.mysql.com/doc/refman/8.0/en/audit-log.html'),
+            ('Aurora MySQL advanced auditing',
+             'https://docs.aws.amazon.com/AmazonRDS/latest/AuroraUserGuide/AuroraMySQL.Auditing.html'),
+            ('MariaDB / Percona server_audit',
+             'https://mariadb.com/kb/en/mariadb-audit-plugin/'),
+        ],
     ),
     dict(
         script='sec_07_encryption_status',
@@ -243,6 +417,21 @@ RULES = [
         title='SSL is disabled on the server',
         recommendation='Enable SSL/TLS and require it for client connections '
                        '(REQUIRE SSL on user accounts).',
+        extractor=_ext_ssl_settings,
+        commands=(
+            "-- Require encrypted transport for every connection\n"
+            "SET PERSIST require_secure_transport = ON;\n"
+            "\n"
+            "-- Force a specific account to use TLS (or X.509)\n"
+            "ALTER USER 'app_read'@'%' REQUIRE SSL;\n"
+            "-- ALTER USER 'app_read'@'%' REQUIRE X509;"
+        ),
+        docs=[
+            ('Using Encrypted Connections',
+             'https://dev.mysql.com/doc/refman/8.0/en/encrypted-connections.html'),
+            ('RDS / Aurora: SSL/TLS to a MySQL DB',
+             'https://docs.aws.amazon.com/AmazonRDS/latest/UserGuide/UsingWithRDS.SSL.html'),
+        ],
     ),
     dict(
         script='sec_08_network_exposure',
@@ -251,6 +440,22 @@ RULES = [
         title='bind_address is wildcard (all interfaces)',
         recommendation='Bind to specific interfaces. Restrict access via '
                        'firewall or security group + user host patterns.',
+        extractor=_ext_bind_address,
+        commands=(
+            "# RDS / Aurora -- restrict via security group\n"
+            "aws ec2 revoke-security-group-ingress \\\n"
+            "  --group-id sg-xxxxxxxx --protocol tcp --port 3306 --cidr 0.0.0.0/0\n"
+            "aws ec2 authorize-security-group-ingress \\\n"
+            "  --group-id sg-xxxxxxxx --protocol tcp --port 3306 --cidr 10.0.0.0/8\n"
+            "\n"
+            "-- Self-managed: bind to a private interface in my.cnf\n"
+            "[mysqld]\n"
+            "bind-address = 10.0.1.50"
+        ),
+        docs=[
+            ('Server System Variable: bind_address',
+             'https://dev.mysql.com/doc/refman/8.0/en/server-system-variables.html#sysvar_bind_address'),
+        ],
     ),
     dict(
         script='sec_09_sensitive_data_discovery',
@@ -261,6 +466,21 @@ RULES = [
                        'or row-level access controls.',
         extractor=_ext_pii_columns,
         ext_label='Candidate PII columns (sample)',
+        commands=(
+            "-- Encrypt at write time using a KMS-managed key\n"
+            "UPDATE audit_test.users\n"
+            "   SET ssn = TO_BASE64(AES_ENCRYPT(ssn, @kms_key));\n"
+            "\n"
+            "-- Or restrict access to a dedicated role / view\n"
+            "CREATE ROLE pii_reader;\n"
+            "GRANT SELECT (id, full_name) ON audit_test.users TO 'reporter'@'%';"
+        ),
+        docs=[
+            ('MySQL Encryption Functions',
+             'https://dev.mysql.com/doc/refman/8.0/en/encryption-functions.html'),
+            ('Column-level GRANTs',
+             'https://dev.mysql.com/doc/refman/8.0/en/grant.html#grant-column-privileges'),
+        ],
     ),
     dict(
         script='sec_10_dangerous_objects',
@@ -271,6 +491,21 @@ RULES = [
                        'become a privilege escalation path.',
         extractor=_ext_dangerous,
         ext_label='Dangerous objects (sample)',
+        commands=(
+            "-- Inspect the body of a flagged routine\n"
+            "SHOW CREATE FUNCTION audit_test.get_user_email;\n"
+            "\n"
+            "-- Convert SQL SECURITY DEFINER to INVOKER where possible\n"
+            "ALTER FUNCTION audit_test.get_user_email SQL SECURITY INVOKER;\n"
+            "\n"
+            "-- Or recreate the routine under a least-privileged definer\n"
+            "DROP   FUNCTION audit_test.get_user_email;\n"
+            "CREATE DEFINER='svc_routine'@'%' FUNCTION ... SQL SECURITY DEFINER ...;"
+        ),
+        docs=[
+            ('Stored object access control (DEFINER vs INVOKER)',
+             'https://dev.mysql.com/doc/refman/8.0/en/stored-objects-security.html'),
+        ],
     ),
     dict(
         script='sec_12_dormant_users',
@@ -279,6 +514,17 @@ RULES = [
         recommendation='Review dormant accounts. Disable or remove unused logins.',
         extractor=_ext_dormant,
         ext_label='Dormant accounts (sample)',
+        commands=(
+            "-- Lock a dormant account (recommended before drop)\n"
+            "ALTER USER 'dormant_user'@'%' ACCOUNT LOCK;\n"
+            "\n"
+            "-- Drop after a grace period\n"
+            "DROP USER 'dormant_user'@'%';"
+        ),
+        docs=[
+            ('ALTER USER ... ACCOUNT LOCK',
+             'https://dev.mysql.com/doc/refman/8.0/en/alter-user.html#alter-user-account-lock'),
+        ],
     ),
     dict(
         script='sec_14_backup_security',
@@ -286,6 +532,21 @@ RULES = [
         title='Backup configuration / replication accounts',
         recommendation='Review who can read backup channels. RDS/Aurora users '
                        'with REPLICATION CLIENT can read binlog.',
+        commands=(
+            "-- See who has replication privileges\n"
+            "SELECT user, host\n"
+            "  FROM mysql.user\n"
+            " WHERE Repl_slave_priv = 'Y' OR Repl_client_priv = 'Y';\n"
+            "\n"
+            "-- Revoke if not needed\n"
+            "REVOKE REPLICATION SLAVE, REPLICATION CLIENT ON *.* FROM 'legacy_admin'@'%';"
+        ),
+        docs=[
+            ('Replication privileges',
+             'https://dev.mysql.com/doc/refman/8.0/en/privileges-provided.html#priv_replication-slave'),
+            ('Aurora MySQL: binlog access',
+             'https://docs.aws.amazon.com/AmazonRDS/latest/AuroraUserGuide/AuroraMySQL.Replication.MySQL.html'),
+        ],
     ),
     dict(
         script='sec_15_external_integrations',
@@ -295,6 +556,19 @@ RULES = [
                        'credentials for FEDERATED servers and review UDFs.',
         extractor=_ext_external_integrations,
         ext_label='External integration objects',
+        commands=(
+            "-- List FEDERATED servers and any non-InnoDB engines\n"
+            "SELECT * FROM mysql.servers;\n"
+            "SELECT table_schema, table_name, engine\n"
+            "  FROM information_schema.tables\n"
+            " WHERE engine NOT IN ('InnoDB','MEMORY','PERFORMANCE_SCHEMA','SYS');"
+        ),
+        docs=[
+            ('FEDERATED storage engine',
+             'https://dev.mysql.com/doc/refman/8.0/en/federated-storage-engine.html'),
+            ('User-Defined Functions',
+             'https://dev.mysql.com/doc/refman/8.0/en/adding-loadable-function.html'),
+        ],
     ),
     dict(
         script='sec_18_audit_gaps',
@@ -304,6 +578,10 @@ RULES = [
                        'baseline.',
         extractor=_ext_audit_gaps,
         ext_label='Audit settings of interest',
+        docs=[
+            ('Server logs',
+             'https://dev.mysql.com/doc/refman/8.0/en/server-logs.html'),
+        ],
     ),
     dict(
         script='sec_20_failed_login_patterns',
@@ -313,6 +591,20 @@ RULES = [
                        'status variables. Enable connection_control plugin.',
         extractor=_ext_failed_logins,
         ext_label='Failed-login signals',
+        commands=(
+            "-- Install + enable connection_control (self-managed)\n"
+            "INSTALL PLUGIN connection_control\n"
+            "  SONAME 'connection_control.so';\n"
+            "INSTALL PLUGIN connection_control_failed_login_attempts\n"
+            "  SONAME 'connection_control.so';\n"
+            "\n"
+            "SET PERSIST connection_control_failed_connections_threshold = 5;\n"
+            "SET PERSIST connection_control_min_connection_delay         = 1000;  -- ms"
+        ),
+        docs=[
+            ('The Connection-Control Plugins',
+             'https://dev.mysql.com/doc/refman/8.0/en/connection-control.html'),
+        ],
     ),
     dict(
         script='sec_22_cert_and_key_expiry',
@@ -322,6 +614,22 @@ RULES = [
                        'failures; expired TLS certs take SSL connections offline.',
         extractor=_ext_cert_expiry,
         ext_label='Expiry-related findings',
+        commands=(
+            "-- Rotate a user password (sets password_last_changed to NOW)\n"
+            "ALTER USER 'app_read'@'%' IDENTIFIED BY '<new-strong-password>';\n"
+            "\n"
+            "-- RDS / Aurora: rotate the cluster CA before 2024 cert expires\n"
+            "aws rds modify-db-cluster \\\n"
+            "  --db-cluster-identifier <cluster> --ca-certificate-identifier rds-ca-rsa2048-g1\n"
+            "aws rds modify-db-instance \\\n"
+            "  --db-instance-identifier <writer> --ca-certificate-identifier rds-ca-rsa2048-g1"
+        ),
+        docs=[
+            ('RDS: rotating the SSL/TLS certificate',
+             'https://docs.aws.amazon.com/AmazonRDS/latest/UserGuide/UsingWithRDS.SSL-certificate-rotation.html'),
+            ('MySQL password lifetime',
+             'https://dev.mysql.com/doc/refman/8.0/en/password-management.html#password-management-lifetime'),
+        ],
     ),
 ]
 
@@ -396,6 +704,8 @@ def find_findings(log_dir: Path) -> list:
                 objects=objs, object_columns=ext_cols,
                 object_label=rule.get('ext_label', ''),
                 object_groups=object_groups,
+                commands=rule.get('commands', ''),
+                docs=rule.get('docs', []),
             ))
     return findings
 
@@ -470,6 +780,22 @@ def render_findings(findings: list) -> str:
                 f"<div class='objs-caption'><strong>"
                 f"{esc(f['object_label'] or 'Concrete objects')}</strong></div>"
                 + object_table(f['objects'], f['object_columns'], limit=10)
+            )
+        if f.get('commands'):
+            parts.append(
+                "<div class='objs-caption'><strong>How to fix &mdash; "
+                "starter commands</strong></div>"
+                f"<pre class='cmd'>{esc(f['commands'])}</pre>"
+            )
+        if f.get('docs'):
+            items = ''.join(
+                f"<li><a href='{esc(url)}' target='_blank' rel='noopener'>"
+                f"{esc(name)}</a></li>"
+                for name, url in f['docs']
+            )
+            parts.append(
+                "<div class='objs-caption'><strong>Further reading</strong></div>"
+                f"<ul class='docs-list'>{items}</ul>"
             )
         parts.append("</div>")
     return ''.join(parts)

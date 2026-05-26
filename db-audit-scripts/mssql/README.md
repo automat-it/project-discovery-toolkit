@@ -1,7 +1,7 @@
 # SQL Server audit scripts
 
-Read-only diagnostic scripts for Microsoft SQL Server. **36 scripts**
-total — 18 performance + 18 security — plus PowerShell runners and a
+Read-only diagnostic scripts for Microsoft SQL Server. **48 scripts**
+total — 25 performance + 23 security — plus PowerShell runners and a
 PDF report generator.
 
 This README is written for **end users running the audit on their own

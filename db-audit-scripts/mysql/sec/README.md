@@ -77,10 +77,13 @@ Standard Python library only -- no `pip install` step.
     the detailed finding card. Capped at 10.
 
 * **Findings** -- one card per finding. Each card carries severity
-  colour bar, boxed "Action:" recommendation, and curated **concrete-
+  colour bar, boxed "Action:" recommendation, curated **concrete-
   objects** sub-tables (deduplicated -- when one script emits the
   same logical table several times with different filters, the
-  analyzer keeps the most-populated copy). Top 10 rows per group with
+  analyzer keeps the most-populated copy), a **"How to fix -- starter
+  commands"** code block with copy-pastable SQL / `aws rds` snippets,
+  and a **"Further reading"** list of links to dev.mysql.com / AWS
+  docs pages for that specific control. Top 10 rows per group with
   `... +N more rows -- consult the raw .log file` overflow note.
 
   Concrete objects shown:

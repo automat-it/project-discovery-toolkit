@@ -1,13 +1,13 @@
 # MySQL audit scripts
 
-Read-only diagnostic scripts for MySQL. **36 scripts** total —
-18 performance + 18 security — plus a Bash runner per category and a
+Read-only diagnostic scripts for MySQL. **47 scripts** total —
+24 performance + 23 security — plus a Bash runner per category and a
 Python report analyzer that produces an HTML report (with optional PDF).
 
 Works on **self-managed MySQL 8.0+**, **Amazon RDS MySQL**, and
-**Amazon Aurora MySQL**. Verified end-to-end on RDS MySQL 8.0.46
-(db.t4g.micro) and on the script catalogue against MySQL 8.0 and 8.3
-community builds.
+**Amazon Aurora MySQL Serverless v2**. Verified end-to-end on
+RDS MySQL 8.0.46 (db.t4g.micro) and Aurora MySQL 3.10.0 (db.serverless),
+and on the script catalogue against MySQL 8.0 and 8.3 community builds.
 
 ## Quick start (5 minutes)
 
@@ -51,11 +51,14 @@ The HTML report contains, top-to-bottom:
   a **Top issues — what to fix** block listing the highest-priority
   findings as anchor links straight to their detail cards.
 * **Findings** — one card per finding with severity colour bar,
-  recommendation, and a curated table of **concrete objects** flagged
-  (table / index / digest queryid / user / column / routine). Long
-  lists are capped at 10 rows with `... +N more rows -- consult the
-  raw .log file` so the reader gets the actionable set without being
-  drowned in noise.
+  recommendation, a curated table of **concrete objects** flagged
+  (table / index / digest queryid / user / column / routine), a
+  **"How to fix — starter commands"** code block with copy-pastable SQL
+  / `aws rds` snippets, and a **"Further reading"** list of links to
+  dev.mysql.com and AWS docs for that specific control. Long lists are
+  capped at 10 rows with `... +N more rows -- consult the raw .log
+  file` so the reader gets the actionable set without being drowned in
+  noise.
 * **SQL Appendix** (perf only) — full `performance_schema` digest text
   per unique queryid, indexed by a collapsible jump-to list. Top SQL
   queryid cells link straight to the corresponding appendix entry.
@@ -167,6 +170,9 @@ All scripts are read-only and do not create temporary tables.
 ```
 mysql/
   _analyze_lib.py            ← shared parser / fingerprint / HTML helpers
+  _sandbox_fixture.sql       ← reusable test fixture (users, PII, dup idx,
+                                SECURITY DEFINER routines, etc.) — useful
+                                to spin up a demo / sanity-check env
   perf/
     run_audit.sh             ← Bash runner for the perf category
     analyze_report.py        ← builds perf_analysis.html (+ PDF if Chrome)
@@ -176,6 +182,26 @@ mysql/
     analyze_report.py
     {critical,high,medium,low}/
 ```
+
+## Multi-database / multi-server reports
+
+The runner connects to **one MySQL endpoint** at a time and queries
+through `information_schema` / `mysql.user` / `performance_schema`,
+which already span every schema on that instance — so a single audit
+run covers **every schema** on that server.
+
+For multiple servers, run the audit once per endpoint into per-server
+subfolders, then point the analyzer at the parent directory:
+
+```bash
+bash sec/run_audit.sh -u admin -h srv-a.example.com -o ./reports/srv-a ...
+bash sec/run_audit.sh -u admin -h srv-b.example.com -o ./reports/srv-b ...
+python3 sec/analyze_report.py ./reports          # one combined report
+```
+
+The analyzer's `discover_contexts()` will pick up each subfolder and
+produce a single HTML report with a **Context rollup** table (one KPI
+row per server) plus per-server findings sections.
 
 See `perf/README.md` and `sec/README.md` for the full per-script
 catalog, runner flags, analyzer options, and `performance_schema`

@@ -11,36 +11,42 @@ and baseline assessments on existing deployments.
 
 ## What you get
 
-| Engine        | Scripts | Verified on                                           |
-|---------------|--------:|-------------------------------------------------------|
-| PostgreSQL    | 36      | 13, 14, 15 (notes for 17)                             |
-| MySQL         | 36      | 8.0, 8.3 community builds                             |
-| SQL Server    | 36      | 2019, 2022 Developer (Linux); Azure SQL DB / MI       |
+| Engine        | perf | sec | Verified on                                           |
+|---------------|-----:|----:|-------------------------------------------------------|
+| PostgreSQL    |   24 |  23 | 13, 14, 15, 16, 17; AWS RDS / Aurora PostgreSQL       |
+| MySQL         |   24 |  23 | 8.0 / 8.3 community; AWS RDS MySQL; Aurora MySQL v3   |
+| SQL Server    |   25 |  23 | 2019, 2022 Developer (Linux); Azure SQL DB / MI       |
 
-Each engine ships **18 performance + 18 security** scripts, organised
-into four priority tiers (`critical` → `high` → `medium` → `low`).
+Each engine ships ~24 performance + 23 security scripts, organised into
+four priority tiers (`critical` → `high` → `medium` → `low`). Numbering
+is shared across engines so finding-IDs (e.g. `sec_05`) refer to the
+same control regardless of engine.
 
 ## Layout
 
 ```
 db-audit-scripts/
 ├── postgres/
-│   ├── perf/{critical,high,medium,low}/
-│   └── sec/{critical,high,medium,low}/
+│   ├── perf/{run_audit.sh, analyze_report.py, critical/, high/, medium/, low/}
+│   └── sec/{run_audit.sh, analyze_report.py, critical/, high/, medium/, low/}
 ├── mysql/
-│   ├── perf/{critical,high,medium,low}/
-│   └── sec/{critical,high,medium,low}/
-└── mssql/
-    ├── run_audit.ps1            ← runs all scripts on a single database
-    ├── run_all_databases.ps1    ← runs across every user database
-    ├── perf/
-    │   ├── analyze_report.ps1   ← turns logs into a branded PDF report
-    │   └── {critical,high,medium,low}/
-    ├── sec/
-    │   ├── analyze_report.ps1
-    │   └── {critical,high,medium,low}/
-    └── assets/                  ← cover / watermark images for PDF reports
+│   ├── _sandbox_fixture.sql     ← seed a test fixture for the audit sandbox
+│   ├── perf/{run_audit.sh, analyze_report.py, critical/, high/, medium/, low/}
+│   └── sec/{run_audit.sh, analyze_report.py, critical/, high/, medium/, low/}
+├── mssql/
+│   ├── run_audit.ps1            ← runs all scripts on a single database
+│   ├── run_all_databases.ps1    ← runs across every user database
+│   ├── perf/{analyze_report.ps1, critical/, high/, medium/, low/}
+│   ├── sec/{analyze_report.ps1,  critical/, high/, medium/, low/}
+│   └── assets/                  ← cover / watermark images for PDF reports
+└── tools/
+    └── aggregate_report.py      ← roll multiple engine runs into one report
 ```
+
+Every engine has a runner + analyzer pair. Runners produce one `.log` per
+script in a timestamped `reports/<engine>_<cat>_<TS>/` folder; analyzers
+turn that folder into an HTML report (and optionally PDF via headless
+Chrome).
 
 ## Quick start
 
@@ -57,46 +63,64 @@ mssql/      →  SQL Server 2019+ / Azure SQL DB / Managed Instance
 #### PostgreSQL
 
 ```bash
-psql -h <host> -U <user> -d <database> \
-     -v ON_ERROR_STOP=0 --pset=pager=off \
-     -f postgres/perf/critical/perf_01_top_sql.sql > perf_01.log
+cd db-audit-scripts/postgres
+
+# Run all perf + all sec scripts in priority order
+export PGPASSWORD='<your-password>'
+bash perf/run_audit.sh -u <user> -h <host> -p 5432 -d <database> -o ./reports
+bash sec/run_audit.sh  -u <user> -h <host> -p 5432 -d <database> -o ./reports
+
+# Build the HTML report
+python3 perf/analyze_report.py ./reports/postgres_perf_<TS> --server <label>
+python3 sec/analyze_report.py  ./reports/postgres_sec_<TS>  --server <label>
 ```
 
 #### MySQL
 
 ```bash
-mysql -h <host> -u <user> -p <database> --batch --table \
-      < mysql/perf/critical/perf_01_top_sql.sql > perf_01.log
+cd db-audit-scripts/mysql
+
+export MYSQL_PWD='<your-password>'
+bash perf/run_audit.sh -u <user> -h <host> -P 3306 -d <database> -o ./reports
+bash sec/run_audit.sh  -u <user> -h <host> -P 3306 -d <database> -o ./reports
+
+python3 perf/analyze_report.py ./reports/mysql_perf_<TS> --server <label>
+python3 sec/analyze_report.py  ./reports/mysql_sec_<TS>  --server <label>
 ```
 
-#### SQL Server (recommended — uses the bundled runner)
+#### SQL Server
 
 ```powershell
 cd db-audit-scripts\mssql
 
 # Audit all user databases, performance + security, Windows auth
 .\run_all_databases.ps1 -Server "sql-server.internal"
+
+# Build branded PDFs (cover + watermark from assets/)
+.\perf\analyze_report.ps1 -ReportDir ".\reports\mssql_audit_all_<TS>" `
+                          -ServerName "sql-server.internal" -Customer "ACME Corp"
+.\sec\analyze_report.ps1  -ReportDir ".\reports\mssql_audit_all_<TS>" `
+                          -ServerName "sql-server.internal" -Customer "ACME Corp"
 ```
 
-The runner produces a timestamped folder under `reports\` containing one
-`.log` per script. See `mssql/README.md` for SQL auth, filtering, and
-PDF report generation.
+The runner produces a timestamped folder under `reports/` containing one
+`.log` per script. See each engine's `README.md` for auth options,
+multi-database runs, and PDF generation details.
 
-### Step 3 — (SQL Server only) Build the PDF report
+### Step 3 — Render to PDF (optional)
 
-```powershell
-.\perf\analyze_report.ps1 -ReportDir ".\reports\mssql_audit_all_<TIMESTAMP>" `
-                          -ServerName "sql-server.internal" `
-                          -Customer   "ACME Corp"
-.\sec\analyze_report.ps1  -ReportDir ".\reports\mssql_audit_all_<TIMESTAMP>" `
-                          -ServerName "sql-server.internal" `
-                          -Customer   "ACME Corp"
+The Python analyzers emit a self-contained HTML report. To produce a
+PDF, pipe it through headless Chrome:
+
+```bash
+"/Applications/Google Chrome.app/Contents/MacOS/Google Chrome" \
+  --headless --disable-gpu --no-pdf-header-footer \
+  --print-to-pdf="./reports/<run>/perf_analysis.pdf" \
+  "file://$(pwd)/reports/<run>/perf_analysis.html"
 ```
 
-You get two branded PDFs (`perf_analysis.pdf`, `sec_analysis.pdf`) with
-cover page, executive summary, severity breakdown, compliance mapping
-(CIS / GDPR / SOC2 / HIPAA / PCI), remediation roadmap, and per-database
-appendix.
+The SQL Server analyzer renders PDF natively (uses Edge WebView2 +
+branded assets).
 
 ## Conventions
 

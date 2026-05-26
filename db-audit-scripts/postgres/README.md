@@ -1,7 +1,7 @@
 # PostgreSQL audit scripts
 
-Read-only diagnostic scripts for PostgreSQL. **36 scripts** total —
-18 performance + 18 security — plus a Bash runner per category and a
+Read-only diagnostic scripts for PostgreSQL. **47 scripts** total —
+24 performance + 23 security — plus a Bash runner per category and a
 Python report analyzer that produces HTML (with optional PDF).
 
 Works on **self-managed PostgreSQL 13 – 17** *and* **Amazon Aurora

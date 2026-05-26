@@ -329,6 +329,7 @@ function Get-FindingsFromRules {
                         Detail     = if ($rule.Detail) { "$($rule.Detail) Context: $context" } else { "Context: $context" }
                         Recommendation = $rule.Recommendation
                         Remediation    = $rule.Remediation
+                        Docs           = if ($rule.Docs) { $rule.Docs } else { @() }
                         CIS   = if ($rule.CIS)   { $rule.CIS }   else { '-' }
                         GDPR  = if ($rule.GDPR)  { $rule.GDPR }  else { '-' }
                         SOC2  = if ($rule.SOC2)  { $rule.SOC2 }  else { '-' }

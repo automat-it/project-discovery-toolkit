@@ -71,9 +71,12 @@ Standard Python library only -- no `pip install` step.
 
 * **Findings** -- one card per finding (not a giant 4-column table).
   Each card carries severity colour bar, boxed "Action:"
-  recommendation, and curated **concrete-objects** sub-tables. Top 10
-  rows per group with `... +N more rows -- consult the raw .log file`
-  overflow note. Concrete objects shown:
+  recommendation, curated **concrete-objects** sub-tables, a
+  **"How to fix -- starter commands"** code block with copy-pastable
+  SQL / `aws rds` snippets, and a **"Further reading"** list of links
+  to postgresql.org and AWS docs pages for that specific control. Top
+  10 rows per group with `... +N more rows -- consult the raw .log
+  file` overflow note. Concrete objects shown:
 
   | Finding                                | Concrete objects shown                |
   |----------------------------------------|---------------------------------------|

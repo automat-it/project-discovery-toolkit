@@ -78,6 +78,10 @@ The analyzer is pure Python standard library (no `pip install` step).
   - boxed "Action:" recommendation
   - one or more **concrete-objects** sub-tables (top 10 rows by default
     with `... +N more rows -- consult the raw .log file` overflow note)
+  - **"How to fix -- starter commands"** code block with copy-pastable
+    SQL / `aws rds` snippets
+  - **"Further reading"** list of links to postgresql.org / AWS docs
+    pages for that specific control
 
   The concrete objects are extracted from the actual psql log so the
   reader sees real names (e.g. `hist_hr_emp_leave_balance_i1`, 414 MB,

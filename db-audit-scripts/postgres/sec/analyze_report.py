@@ -137,6 +137,75 @@ def _ext_audit_gaps(text):
     return out[:200]
 
 
+# ---------------------------------------------------------------------------
+# Extractors for pattern-mode rules. They look up the actual psql result-
+# set (pg_settings / pg_hba_file_rules) and pull the rows that triggered
+# the regex match -- so the report shows e.g. the trust-auth pg_hba lines
+# rather than just "pattern matched".
+# ---------------------------------------------------------------------------
+def _filter_rows(text, required_cols, predicate):
+    req = {c.lower() for c in required_cols}
+    for s in parse_result_sets(text):
+        cols_lc = {c.lower() for c in s['columns']}
+        if not req <= cols_lc:
+            continue
+        rows = [r for r in s['rows'] if predicate(r)]
+        if rows:
+            return s['columns'], rows
+    return None, []
+
+
+def _ext_settings_named(text, names, label):
+    target = {n.lower() for n in names}
+    cols, rows = _filter_rows(
+        text, ('name',),
+        lambda r: any(v.strip().lower() in target
+                      for k, v in r.items() if k.lower() == 'name'))
+    if not rows:
+        return []
+    return [dict(label=label, columns=cols, rows=rows)]
+
+
+def _ext_trust_auth(text):
+    """sec_05: rows in pg_hba_file_rules where auth_method='trust'."""
+    cols, rows = _filter_rows(
+        text, ('auth_method',),
+        lambda r: any(v.strip().lower() == 'trust'
+                      for k, v in r.items() if k.lower() == 'auth_method'))
+    if not rows:
+        return []
+    return [dict(label='pg_hba.conf rules using "trust"',
+                 columns=cols, rows=rows)]
+
+
+def _ext_md5_password(text):
+    return _ext_settings_named(text, ['password_encryption'],
+                               'password_encryption setting')
+
+
+def _ext_log_statement(text):
+    return _ext_settings_named(text, ['log_statement', 'log_min_duration_statement',
+                                      'log_connections', 'log_disconnections'],
+                               'Logging-related settings')
+
+
+def _ext_ssl_setting(text):
+    return _ext_settings_named(text, ['ssl', 'ssl_cert_file', 'ssl_key_file',
+                                      'ssl_ca_file'],
+                               'SSL settings')
+
+
+def _ext_listen_addresses(text):
+    return _ext_settings_named(text, ['listen_addresses', 'port'],
+                               'Network-exposure settings')
+
+
+def _ext_archive_mode(text):
+    return _ext_settings_named(text, ['archive_mode', 'archive_command',
+                                      'archive_timeout', 'wal_level'],
+                               'WAL archiving settings')
+
+
 RULES = [
     dict(
         script='sec_03_admin_and_superusers',
@@ -146,6 +215,23 @@ RULES = [
                        'memberships to the minimum required.',
         extractor=_ext_superusers,
         ext_label='Privileged accounts (sample)',
+        commands=(
+            "-- Inspect what a flagged role inherits\n"
+            "\\du+ app_admin\n"
+            "SELECT rolname FROM pg_auth_members m\n"
+            "  JOIN pg_roles r ON r.oid = m.roleid\n"
+            " WHERE m.member = 'app_admin'::regrole;\n"
+            "\n"
+            "-- Drop SUPERUSER / unneeded membership\n"
+            "ALTER ROLE app_admin NOSUPERUSER NOCREATEROLE NOREPLICATION;\n"
+            "REVOKE pg_read_all_data, pg_write_all_data FROM app_admin;"
+        ),
+        docs=[
+            ('PostgreSQL: Predefined roles',
+             'https://www.postgresql.org/docs/current/predefined-roles.html'),
+            ('Aurora PostgreSQL: rds_superuser',
+             'https://docs.aws.amazon.com/AmazonRDS/latest/AuroraUserGuide/Appendix.PostgreSQL.CommonDBATasks.Roles.html'),
+        ],
     ),
     dict(
         script='sec_04_public_and_excessive_grants',
@@ -155,6 +241,23 @@ RULES = [
                        'roles or REVOKE.',
         extractor=_ext_public_grants,
         ext_label='Excessive grants (sample)',
+        commands=(
+            "-- Revoke wildcard PUBLIC grant\n"
+            "REVOKE ALL ON SCHEMA public FROM PUBLIC;\n"
+            "REVOKE ALL ON ALL TABLES IN SCHEMA public FROM PUBLIC;\n"
+            "\n"
+            "-- Re-grant only to the role(s) that actually need it\n"
+            "GRANT  USAGE  ON SCHEMA public TO app_read;\n"
+            "GRANT  SELECT ON ALL TABLES IN SCHEMA public TO app_read;\n"
+            "ALTER DEFAULT PRIVILEGES IN SCHEMA public\n"
+            "  GRANT SELECT ON TABLES TO app_read;"
+        ),
+        docs=[
+            ('GRANT',
+             'https://www.postgresql.org/docs/current/sql-grant.html'),
+            ('ALTER DEFAULT PRIVILEGES',
+             'https://www.postgresql.org/docs/current/sql-alterdefaultprivileges.html'),
+        ],
     ),
     dict(
         script='sec_05_authentication_and_passwords',
@@ -163,6 +266,27 @@ RULES = [
         title='pg_hba.conf uses "trust" authentication',
         recommendation='Trust auth allows password-less access. Replace with '
                        'scram-sha-256 or cert.',
+        extractor=_ext_trust_auth,
+        commands=(
+            "-- Inspect the rules in effect\n"
+            "SELECT line_number, type, database, user_name, address, auth_method\n"
+            "  FROM pg_hba_file_rules ORDER BY line_number;\n"
+            "\n"
+            "-- Edit pg_hba.conf -- replace trust rows with scram-sha-256\n"
+            "#   host all all 0.0.0.0/0 scram-sha-256\n"
+            "\n"
+            "-- Apply without restart\n"
+            "SELECT pg_reload_conf();\n"
+            "\n"
+            "-- RDS / Aurora: the equivalent is the parameter\n"
+            "--   rds.restrict_password_commands and per-role REQUIRES\n"
+        ),
+        docs=[
+            ('PostgreSQL: pg_hba.conf',
+             'https://www.postgresql.org/docs/current/auth-pg-hba-conf.html'),
+            ('Authentication methods',
+             'https://www.postgresql.org/docs/current/auth-methods.html'),
+        ],
     ),
     dict(
         script='sec_05_authentication_and_passwords',
@@ -171,6 +295,19 @@ RULES = [
         title='password_encryption is md5',
         recommendation='md5 password hashing is deprecated. Switch to scram-sha-256 '
                        'and re-set all passwords.',
+        extractor=_ext_md5_password,
+        commands=(
+            "-- Server-wide: switch hashing\n"
+            "ALTER SYSTEM SET password_encryption = 'scram-sha-256';\n"
+            "SELECT pg_reload_conf();\n"
+            "\n"
+            "-- Re-set each role (their md5 hash stays until they change it)\n"
+            "ALTER ROLE app_read WITH PASSWORD '<new-strong-password>';"
+        ),
+        docs=[
+            ('Password authentication',
+             'https://www.postgresql.org/docs/current/auth-password.html'),
+        ],
     ),
     dict(
         script='sec_06_audit_logging',
@@ -178,6 +315,26 @@ RULES = [
         pattern=r'(?im)log_statement\s*\|\s*none',
         title='log_statement is "none"',
         recommendation='No SQL is logged. Set log_statement to ddl or all for audit.',
+        extractor=_ext_log_statement,
+        commands=(
+            "ALTER SYSTEM SET log_statement              = 'ddl';\n"
+            "ALTER SYSTEM SET log_min_duration_statement = 1000;  -- ms\n"
+            "ALTER SYSTEM SET log_connections            = on;\n"
+            "ALTER SYSTEM SET log_disconnections         = on;\n"
+            "SELECT pg_reload_conf();\n"
+            "\n"
+            "-- Stronger: install pgaudit and route to CloudWatch / journald\n"
+            "CREATE EXTENSION IF NOT EXISTS pgaudit;\n"
+            "ALTER SYSTEM SET pgaudit.log = 'write, ddl, role';"
+        ),
+        docs=[
+            ('Error reporting and logging',
+             'https://www.postgresql.org/docs/current/runtime-config-logging.html'),
+            ('pgaudit',
+             'https://github.com/pgaudit/pgaudit'),
+            ('Aurora PostgreSQL: enabling pgaudit',
+             'https://docs.aws.amazon.com/AmazonRDS/latest/AuroraUserGuide/AuroraPostgreSQL.Reference.html#AuroraPostgreSQL.Reference.pgaudit'),
+        ],
     ),
     dict(
         script='sec_07_encryption_status',
@@ -185,6 +342,24 @@ RULES = [
         pattern=r'(?im)\bssl\s*\|\s*off\b',
         title='SSL is disabled on the server',
         recommendation='Enable SSL and require it via pg_hba (hostssl) for all clients.',
+        extractor=_ext_ssl_setting,
+        commands=(
+            "ALTER SYSTEM SET ssl = on;\n"
+            "-- Point ALTER SYSTEM SET ssl_cert_file / ssl_key_file at the cert pair,\n"
+            "-- then reload\n"
+            "SELECT pg_reload_conf();\n"
+            "\n"
+            "-- Require TLS for every client: edit pg_hba.conf\n"
+            "#   hostssl all all 0.0.0.0/0 scram-sha-256\n"
+            "\n"
+            "-- RDS / Aurora: set rds.force_ssl = 1 in the parameter group"
+        ),
+        docs=[
+            ('Secure TCP/IP connections with SSL',
+             'https://www.postgresql.org/docs/current/ssl-tcp.html'),
+            ('RDS PostgreSQL SSL',
+             'https://docs.aws.amazon.com/AmazonRDS/latest/UserGuide/PostgreSQL.Concepts.General.SSL.html'),
+        ],
     ),
     dict(
         script='sec_08_network_exposure',
@@ -193,6 +368,22 @@ RULES = [
         title='listen_addresses is "*" (all interfaces)',
         recommendation='Bind only to required interfaces. Restrict via firewall '
                        'or pg_hba host rules.',
+        extractor=_ext_listen_addresses,
+        commands=(
+            "-- Self-managed: pin to a private interface\n"
+            "ALTER SYSTEM SET listen_addresses = '10.0.1.50';\n"
+            "-- requires a server restart (NOT just pg_reload_conf())\n"
+            "\n"
+            "# RDS / Aurora: tighten via the security group\n"
+            "aws ec2 revoke-security-group-ingress    --group-id sg-... \\\n"
+            "  --protocol tcp --port 5432 --cidr 0.0.0.0/0\n"
+            "aws ec2 authorize-security-group-ingress --group-id sg-... \\\n"
+            "  --protocol tcp --port 5432 --cidr 10.0.0.0/8"
+        ),
+        docs=[
+            ('Connection settings: listen_addresses',
+             'https://www.postgresql.org/docs/current/runtime-config-connection.html#GUC-LISTEN-ADDRESSES'),
+        ],
     ),
     dict(
         script='sec_09_sensitive_data_discovery',
@@ -202,6 +393,26 @@ RULES = [
                        'pgcrypto column encryption or column-level access controls.',
         extractor=_ext_pii_columns,
         ext_label='Candidate PII columns (sample)',
+        commands=(
+            "-- Encrypt the column on write (server-side)\n"
+            "CREATE EXTENSION IF NOT EXISTS pgcrypto;\n"
+            "UPDATE app.users\n"
+            "   SET ssn = pgp_sym_encrypt(ssn, current_setting('app.kms_key'));\n"
+            "\n"
+            "-- Column-level grants -- give the reporter only non-sensitive columns\n"
+            "REVOKE SELECT ON app.users FROM reporter;\n"
+            "GRANT  SELECT (id, full_name) ON app.users TO reporter;\n"
+            "\n"
+            "-- Row-level security policy\n"
+            "ALTER TABLE app.users ENABLE ROW LEVEL SECURITY;\n"
+            "CREATE POLICY u_self ON app.users USING (id = current_setting('app.uid')::int);"
+        ),
+        docs=[
+            ('pgcrypto',
+             'https://www.postgresql.org/docs/current/pgcrypto.html'),
+            ('Row Security Policies',
+             'https://www.postgresql.org/docs/current/ddl-rowsecurity.html'),
+        ],
     ),
     dict(
         script='sec_10_dangerous_objects',
@@ -211,6 +422,21 @@ RULES = [
                        'set search_path explicitly; untrusted languages need review.',
         extractor=_ext_dangerous,
         ext_label='Dangerous objects (sample)',
+        commands=(
+            "-- Inspect a flagged function\n"
+            "\\sf+ schema.func_name\n"
+            "\n"
+            "-- Pin search_path so it cannot be hijacked by a malicious schema\n"
+            "ALTER FUNCTION schema.func_name() SET search_path = pg_catalog, public;\n"
+            "\n"
+            "-- Convert SECURITY DEFINER -> INVOKER where the elevated privilege\n"
+            "-- is not actually needed\n"
+            "ALTER FUNCTION schema.func_name() SECURITY INVOKER;"
+        ),
+        docs=[
+            ('Writing SECURITY DEFINER functions safely',
+             'https://www.postgresql.org/docs/current/sql-createfunction.html#SQL-CREATEFUNCTION-SECURITY'),
+        ],
     ),
     dict(
         script='sec_12_dormant_users',
@@ -219,6 +445,20 @@ RULES = [
         recommendation='Review dormant accounts. Disable or remove unused logins.',
         extractor=_ext_dormant,
         ext_label='Dormant accounts (sample)',
+        commands=(
+            "-- Disable login for a dormant role (recommended before drop)\n"
+            "ALTER ROLE dormant_user NOLOGIN;\n"
+            "ALTER ROLE dormant_user VALID UNTIL 'now';\n"
+            "\n"
+            "-- Drop after a grace period (must reassign or drop owned objects first)\n"
+            "REASSIGN OWNED BY dormant_user TO admin;\n"
+            "DROP    OWNED BY dormant_user;\n"
+            "DROP    ROLE     dormant_user;"
+        ),
+        docs=[
+            ('ALTER ROLE',
+             'https://www.postgresql.org/docs/current/sql-alterrole.html'),
+        ],
     ),
     dict(
         script='sec_17_recovery_and_backup_security',
@@ -226,6 +466,23 @@ RULES = [
         pattern=r'(?im)\barchive_mode\s*\|\s*off\b',
         title='archive_mode is off',
         recommendation='Without WAL archiving, point-in-time recovery is impossible.',
+        extractor=_ext_archive_mode,
+        commands=(
+            "-- Self-managed: turn on WAL archiving (requires restart)\n"
+            "ALTER SYSTEM SET wal_level      = replica;\n"
+            "ALTER SYSTEM SET archive_mode   = on;\n"
+            "ALTER SYSTEM SET archive_command = 'aws s3 cp %p s3://my-wal-bucket/%f';\n"
+            "\n"
+            "# RDS / Aurora: enable automated backups\n"
+            "aws rds modify-db-instance --db-instance-identifier <db> \\\n"
+            "  --backup-retention-period 7 --apply-immediately"
+        ),
+        docs=[
+            ('Continuous archiving and PITR',
+             'https://www.postgresql.org/docs/current/continuous-archiving.html'),
+            ('RDS backups and PITR',
+             'https://docs.aws.amazon.com/AmazonRDS/latest/UserGuide/USER_PIT.html'),
+        ],
     ),
     dict(
         script='sec_18_audit_gaps',
@@ -235,6 +492,10 @@ RULES = [
                        'baseline.',
         extractor=_ext_audit_gaps,
         ext_label='Audit settings of interest',
+        docs=[
+            ('Logging parameters reference',
+             'https://www.postgresql.org/docs/current/runtime-config-logging.html'),
+        ],
     ),
     dict(
         script='sec_20_failed_login_patterns',
@@ -243,6 +504,19 @@ RULES = [
         recommendation='Review failed login source IPs and roles. Tune brute-force defenses.',
         extractor=_ext_failed_logins,
         ext_label='Failed-login events (sample)',
+        commands=(
+            "-- Lock the targeted role until the IP is blocked at the network layer\n"
+            "ALTER ROLE \"<role>\" VALID UNTIL 'now';\n"
+            "\n"
+            "-- Self-managed: install auth_delay to slow down brute force\n"
+            "ALTER SYSTEM SET shared_preload_libraries = 'auth_delay';\n"
+            "ALTER SYSTEM SET auth_delay.milliseconds  = 500;\n"
+            "-- requires a restart"
+        ),
+        docs=[
+            ('auth_delay',
+             'https://www.postgresql.org/docs/current/auth-delay.html'),
+        ],
     ),
     dict(
         script='sec_22_cert_and_key_expiry',
@@ -252,6 +526,20 @@ RULES = [
                        'failures; expired certs take TLS offline.',
         extractor=_ext_cert_expiry,
         ext_label='Roles with non-trivial expiry state',
+        commands=(
+            "-- Rotate a role's password and extend its validity window\n"
+            "ALTER ROLE app_read WITH PASSWORD '<new-strong-password>'\n"
+            "                    VALID UNTIL  '2027-12-31';\n"
+            "\n"
+            "# RDS / Aurora: rotate the cluster CA cert\n"
+            "aws rds modify-db-instance --db-instance-identifier <db> \\\n"
+            "  --ca-certificate-identifier rds-ca-rsa2048-g1 \\\n"
+            "  --apply-immediately"
+        ),
+        docs=[
+            ('Updating SSL/TLS certificates on RDS',
+             'https://docs.aws.amazon.com/AmazonRDS/latest/UserGuide/UsingWithRDS.SSL-certificate-rotation.html'),
+        ],
     ),
 ]
 
@@ -326,6 +614,8 @@ def find_findings(log_dir: Path) -> list:
                 objects=objs, object_columns=ext_cols,
                 object_label=rule.get('ext_label', ''),
                 object_groups=object_groups,
+                commands=rule.get('commands', ''),
+                docs=rule.get('docs', []),
             ))
     return findings
 
@@ -400,6 +690,22 @@ def render_findings(findings: list) -> str:
                 f"<div class='objs-caption'><strong>"
                 f"{esc(f['object_label'] or 'Concrete objects')}</strong></div>"
                 + object_table(f['objects'], f['object_columns'], limit=10)
+            )
+        if f.get('commands'):
+            parts.append(
+                "<div class='objs-caption'><strong>How to fix &mdash; "
+                "starter commands</strong></div>"
+                f"<pre class='cmd'>{esc(f['commands'])}</pre>"
+            )
+        if f.get('docs'):
+            items = ''.join(
+                f"<li><a href='{esc(url)}' target='_blank' rel='noopener'>"
+                f"{esc(name)}</a></li>"
+                for name, url in f['docs']
+            )
+            parts.append(
+                "<div class='objs-caption'><strong>Further reading</strong></div>"
+                f"<ul class='docs-list'>{items}</ul>"
             )
         parts.append("</div>")
     return ''.join(parts)

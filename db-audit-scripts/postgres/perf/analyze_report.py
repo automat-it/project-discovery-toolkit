@@ -355,6 +355,22 @@ RULES = [
         extractor=_ext_blocking_pairs,
         ext_label='Top blocking / long-running sessions',
         ext_columns=None,
+        commands=(
+            "-- Inspect the blocking chain\n"
+            "SELECT pid, blocked_by, query_start, state, query\n"
+            "  FROM pg_stat_activity\n"
+            " WHERE pid = ANY(pg_blocking_pids(<waiter-pid>));\n"
+            "\n"
+            "-- Cancel the offending query (gentle) or terminate the backend (hard)\n"
+            "SELECT pg_cancel_backend(<blocker-pid>);\n"
+            "SELECT pg_terminate_backend(<blocker-pid>);"
+        ),
+        docs=[
+            ('pg_stat_activity',
+             'https://www.postgresql.org/docs/current/monitoring-stats.html#MONITORING-PG-STAT-ACTIVITY-VIEW'),
+            ('Lock monitoring',
+             'https://wiki.postgresql.org/wiki/Lock_Monitoring'),
+        ],
     ),
     dict(
         script='perf_01_top_sql',
@@ -366,6 +382,23 @@ RULES = [
         extractor=_ext_top_sql,
         ext_label='Top statements (snapshot)',
         ext_columns=None,
+        commands=(
+            "-- Walk the live ranking yourself\n"
+            "SELECT queryid, calls, total_exec_time, mean_exec_time, rows, query\n"
+            "  FROM pg_stat_statements ORDER BY total_exec_time DESC LIMIT 20;\n"
+            "\n"
+            "-- Reset the stats after a tuning iteration to confirm impact\n"
+            "SELECT pg_stat_statements_reset();\n"
+            "\n"
+            "-- Explain a flagged query\n"
+            "EXPLAIN (ANALYZE, BUFFERS, VERBOSE) <statement>;"
+        ),
+        docs=[
+            ('pg_stat_statements',
+             'https://www.postgresql.org/docs/current/pgstatstatements.html'),
+            ('EXPLAIN',
+             'https://www.postgresql.org/docs/current/sql-explain.html'),
+        ],
     ),
     dict(
         script='perf_04_wait_events_and_io',
@@ -378,6 +411,17 @@ RULES = [
         extractor=_ext_wait_events,
         ext_label='Wait event distribution',
         ext_columns=['wait_event_type', 'wait_event', 'sessions', 'pct'],
+        commands=(
+            "-- Sample live waits with names\n"
+            "SELECT wait_event_type, wait_event, COUNT(*) AS sessions\n"
+            "  FROM pg_stat_activity\n"
+            " WHERE wait_event IS NOT NULL\n"
+            " GROUP BY 1, 2 ORDER BY sessions DESC;"
+        ),
+        docs=[
+            ('Wait event types',
+             'https://www.postgresql.org/docs/current/monitoring-stats.html#WAIT-EVENT-TABLE'),
+        ],
     ),
     dict(
         script='perf_06_index_audit',
@@ -388,6 +432,24 @@ RULES = [
         extractor=_ext_index_findings,
         ext_label='Concrete index findings',
         ext_columns=None,
+        commands=(
+            "-- Verify an index is truly unused (multiple days of stats)\n"
+            "SELECT schemaname, relname, indexrelname, idx_scan, idx_tup_read\n"
+            "  FROM pg_stat_user_indexes ORDER BY idx_scan, pg_relation_size(indexrelid) DESC;\n"
+            "\n"
+            "-- Drop without blocking writers\n"
+            "DROP INDEX CONCURRENTLY app.idx_users_email_dup;\n"
+            "\n"
+            "-- Create a missing index online\n"
+            "CREATE INDEX CONCURRENTLY idx_orders_user_placed\n"
+            "  ON app.orders (user_id, placed_at);"
+        ),
+        docs=[
+            ('CREATE INDEX CONCURRENTLY',
+             'https://www.postgresql.org/docs/current/sql-createindex.html#SQL-CREATEINDEX-CONCURRENTLY'),
+            ('pg_stat_user_indexes',
+             'https://www.postgresql.org/docs/current/monitoring-stats.html#MONITORING-PG-STAT-ALL-INDEXES-VIEW'),
+        ],
     ),
     dict(
         script='perf_07_table_stats_health',
@@ -398,6 +460,19 @@ RULES = [
         extractor=_ext_table_stats,
         ext_label='Tables flagged',
         ext_columns=None,
+        commands=(
+            "-- Refresh stats on a flagged table immediately\n"
+            "VACUUM (ANALYZE, VERBOSE) app.orders;\n"
+            "\n"
+            "-- Lower the per-table threshold so autovacuum kicks in sooner\n"
+            "ALTER TABLE app.orders\n"
+            "  SET (autovacuum_vacuum_scale_factor = 0.05,\n"
+            "       autovacuum_analyze_scale_factor = 0.02);"
+        ),
+        docs=[
+            ('Autovacuum',
+             'https://www.postgresql.org/docs/current/routine-vacuuming.html#AUTOVACUUM'),
+        ],
     ),
     dict(
         script='perf_09_temp_and_memory_pressure',
@@ -409,11 +484,24 @@ RULES = [
                        '(globally or per-role/db) or rewrite the spilling queries.',
         extractor=_ext_temp_files,
         ext_label='Databases with temp file activity',
-        # ext_columns intentionally omitted -- auto-discover from extractor
-        # output so the column set tracks whatever perf_09 emits (per-db
-        # totals OR per-statement temp readers, depending on which set has
-        # non-zero rows).
         ext_columns=None,
+        commands=(
+            "-- Raise work_mem cautiously -- each parallel worker allocates this\n"
+            "ALTER SYSTEM SET work_mem = '64MB';\n"
+            "SELECT pg_reload_conf();\n"
+            "\n"
+            "-- Or per-role (better for OLTP-vs-analytics mix)\n"
+            "ALTER ROLE analytics_reader SET work_mem = '256MB';\n"
+            "\n"
+            "-- Find which queries spill (pg_stat_statements 1.10+)\n"
+            "SELECT query, temp_blks_written\n"
+            "  FROM pg_stat_statements WHERE temp_blks_written > 0\n"
+            "  ORDER BY temp_blks_written DESC LIMIT 20;"
+        ),
+        docs=[
+            ('Resource consumption: work_mem',
+             'https://www.postgresql.org/docs/current/runtime-config-resource.html#GUC-WORK-MEM'),
+        ],
     ),
     dict(
         script='perf_10_replication_and_backup_impact',
@@ -423,6 +511,22 @@ RULES = [
         title='Replication lag detected',
         recommendation='Replica is behind primary. Check network throughput and '
                        'replica I/O / replay capacity.',
+        commands=(
+            "-- Inspect replica state\n"
+            "SELECT client_addr, state, sent_lsn, write_lsn, flush_lsn, replay_lsn,\n"
+            "       write_lag, flush_lag, replay_lag\n"
+            "  FROM pg_stat_replication;\n"
+            "\n"
+            "-- On the replica: confirm it's catching up\n"
+            "SELECT pg_last_wal_receive_lsn(), pg_last_wal_replay_lsn(),\n"
+            "       now() - pg_last_xact_replay_timestamp() AS apply_lag;"
+        ),
+        docs=[
+            ('Streaming replication monitoring',
+             'https://www.postgresql.org/docs/current/monitoring-stats.html#MONITORING-PG-STAT-REPLICATION-VIEW'),
+            ('Aurora PostgreSQL replication',
+             'https://docs.aws.amazon.com/AmazonRDS/latest/AuroraUserGuide/AuroraPostgreSQL.Replication.Logical.html'),
+        ],
     ),
     dict(
         script='perf_11_bloat_estimation',
@@ -433,6 +537,22 @@ RULES = [
         extractor=_ext_bloat,
         ext_label='Top bloated objects',
         ext_columns=None,
+        commands=(
+            "-- Online rebuild via pg_repack (recommended -- minimal locking)\n"
+            "pg_repack -h <host> -d <db> -U <user> -t app.orders\n"
+            "\n"
+            "-- VACUUM FULL is offline (takes ACCESS EXCLUSIVE)\n"
+            "VACUUM (FULL, VERBOSE) app.orders;\n"
+            "\n"
+            "-- Rebuild a bloated index without blocking writes\n"
+            "REINDEX INDEX CONCURRENTLY app.idx_orders_user_placed;"
+        ),
+        docs=[
+            ('pg_repack',
+             'https://reorg.github.io/pg_repack/'),
+            ('REINDEX CONCURRENTLY',
+             'https://www.postgresql.org/docs/current/sql-reindex.html#SQL-REINDEX-CONCURRENTLY'),
+        ],
     ),
     dict(
         script='perf_14_checkpoint_bgwriter',
@@ -445,6 +565,16 @@ RULES = [
         extractor=_ext_checkpoint,
         ext_label='Checkpoint counters',
         ext_columns=None,
+        commands=(
+            "ALTER SYSTEM SET max_wal_size            = '4GB';\n"
+            "ALTER SYSTEM SET checkpoint_timeout      = '15min';\n"
+            "ALTER SYSTEM SET checkpoint_completion_target = 0.9;\n"
+            "SELECT pg_reload_conf();"
+        ),
+        docs=[
+            ('Write-Ahead Log: checkpoint tuning',
+             'https://www.postgresql.org/docs/current/wal-configuration.html'),
+        ],
     ),
     dict(
         script='perf_15_capacity_and_growth',
@@ -457,6 +587,24 @@ RULES = [
         extractor=_ext_capacity,
         ext_label='Objects near capacity',
         ext_columns=None,
+        commands=(
+            "-- Widen the column from INT to BIGINT\n"
+            "ALTER TABLE app.orders ALTER COLUMN id TYPE BIGINT;\n"
+            "ALTER SEQUENCE app.orders_id_seq AS BIGINT MAXVALUE 9223372036854775807;\n"
+            "\n"
+            "-- Raise max_connections (requires restart -- use pgbouncer first)\n"
+            "ALTER SYSTEM SET max_connections = 500;\n"
+            "\n"
+            "# RDS / Aurora storage scaling\n"
+            "aws rds modify-db-instance --db-instance-identifier <db> \\\n"
+            "  --allocated-storage 200 --apply-immediately"
+        ),
+        docs=[
+            ('Numeric types -- BIGINT range',
+             'https://www.postgresql.org/docs/current/datatype-numeric.html'),
+            ('Connection pooling with PgBouncer',
+             'https://www.pgbouncer.org/usage.html'),
+        ],
     ),
 ]
 
@@ -547,6 +695,8 @@ def find_findings(log_dir: Path) -> list:
                 objects=objs, object_columns=ext_cols,
                 object_label=ext_label,
                 object_groups=object_groups,
+                commands=rule.get('commands', ''),
+                docs=rule.get('docs', []),
             ))
     return findings
 
@@ -641,6 +791,22 @@ def render_findings(findings: list) -> str:
                 f"<div class='objs-caption'><strong>"
                 f"{esc(f['object_label'] or 'Concrete objects')}</strong></div>"
                 + object_table(f['objects'], f['object_columns'], limit=10)
+            )
+        if f.get('commands'):
+            parts.append(
+                "<div class='objs-caption'><strong>How to fix &mdash; "
+                "starter commands</strong></div>"
+                f"<pre class='cmd'>{esc(f['commands'])}</pre>"
+            )
+        if f.get('docs'):
+            items = ''.join(
+                f"<li><a href='{esc(url)}' target='_blank' rel='noopener'>"
+                f"{esc(name)}</a></li>"
+                for name, url in f['docs']
+            )
+            parts.append(
+                "<div class='objs-caption'><strong>Further reading</strong></div>"
+                f"<ul class='docs-list'>{items}</ul>"
             )
         parts.append("</div>")  # close .finding
     return ''.join(parts)

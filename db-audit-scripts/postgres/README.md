@@ -51,10 +51,14 @@ The HTML report contains, top-to-bottom:
   a **Top issues — what to fix** block listing the highest-priority
   findings as anchor links straight to their detail cards.
 * **Findings** — one card per finding with severity colour bar,
-  recommendation, and a curated table of **concrete objects** flagged
-  (table / index / queryid / role / cert / ...). Long lists are capped
-  at 10 rows with `... +N more rows -- consult the raw .log file` so
-  the reader gets the actionable set without being drowned in noise.
+  recommendation, a curated table of **concrete objects** flagged
+  (table / index / queryid / role / cert / ...), a **"How to fix —
+  starter commands"** code block with copy-pastable SQL / `aws rds`
+  snippets, and a **"Further reading"** list of links to
+  postgresql.org and AWS docs for that specific control. Long lists
+  are capped at 10 rows with `... +N more rows -- consult the raw
+  .log file` so the reader gets the actionable set without being
+  drowned in noise.
 * **SQL Appendix** (perf only) — full pg_stat_statements query text per
   unique queryid, indexed by a collapsible jump-to list. Top SQL
   queryid cells link straight to the corresponding appendix entry.

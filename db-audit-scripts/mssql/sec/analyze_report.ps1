@@ -329,6 +329,68 @@ EXEC xp_readerrorlog 0, 1, N''Login failed'', NULL, @s, NULL, N''DESC'';
     }
 )
 
+# ---------------------------------------------------------------------------
+# Per-rule documentation links keyed by Title. Rendered alongside the T-SQL
+# remediation in section 8 so the operator has the vendor doc one click away.
+# ---------------------------------------------------------------------------
+$DocsByTitle = @{
+    'Privileged accounts inventory' = @(
+        @{ Name = 'Microsoft: Server-Level Roles'; Url = 'https://learn.microsoft.com/sql/relational-databases/security/authentication-access/server-level-roles' }
+        @{ Name = 'Microsoft: Principle of Least Privilege guidance'; Url = 'https://learn.microsoft.com/sql/relational-databases/security/permissions-database-engine' }
+    )
+    'Permissions granted to public role or excessive scope' = @(
+        @{ Name = 'GRANT / REVOKE (Transact-SQL)'; Url = 'https://learn.microsoft.com/sql/t-sql/statements/grant-transact-sql' }
+    )
+    'Weak or trivially guessable passwords detected' = @(
+        @{ Name = 'ALTER LOGIN (Transact-SQL)'; Url = 'https://learn.microsoft.com/sql/t-sql/statements/alter-login-transact-sql' }
+        @{ Name = 'Password Policy'; Url = 'https://learn.microsoft.com/sql/relational-databases/security/password-policy' }
+    )
+    'SQL logins with CHECK_POLICY disabled' = @(
+        @{ Name = 'Password Policy: CHECK_POLICY'; Url = 'https://learn.microsoft.com/sql/relational-databases/security/password-policy' }
+    )
+    'No SQL Server Audit currently running' = @(
+        @{ Name = 'SQL Server Audit'; Url = 'https://learn.microsoft.com/sql/relational-databases/security/auditing/sql-server-audit-database-engine' }
+        @{ Name = 'CREATE SERVER AUDIT SPECIFICATION'; Url = 'https://learn.microsoft.com/sql/t-sql/statements/create-server-audit-specification-transact-sql' }
+    )
+    'Database not protected by TDE' = @(
+        @{ Name = 'Transparent Data Encryption (TDE)'; Url = 'https://learn.microsoft.com/sql/relational-databases/security/encryption/transparent-data-encryption' }
+    )
+    'Linked servers / remote endpoints inventory' = @(
+        @{ Name = 'sp_dropserver'; Url = 'https://learn.microsoft.com/sql/relational-databases/system-stored-procedures/sp-dropserver-transact-sql' }
+    )
+    'Columns with PII / sensitive name patterns' = @(
+        @{ Name = 'Always Encrypted'; Url = 'https://learn.microsoft.com/sql/relational-databases/security/encryption/always-encrypted-database-engine' }
+        @{ Name = 'Dynamic Data Masking'; Url = 'https://learn.microsoft.com/sql/relational-databases/security/dynamic-data-masking' }
+    )
+    'xp_cmdshell is enabled' = @(
+        @{ Name = 'xp_cmdshell (Transact-SQL)'; Url = 'https://learn.microsoft.com/sql/relational-databases/system-stored-procedures/xp-cmdshell-transact-sql' }
+        @{ Name = 'Server Configuration: xp_cmdshell'; Url = 'https://learn.microsoft.com/sql/database-engine/configure-windows/xp-cmdshell-server-configuration-option' }
+    )
+    'UNSAFE CLR assemblies present' = @(
+        @{ Name = 'CLR Integration Security'; Url = 'https://learn.microsoft.com/sql/relational-databases/clr-integration/security/clr-integration-security' }
+    )
+    'Risky surface-area features enabled' = @(
+        @{ Name = 'Ad Hoc Distributed Queries'; Url = 'https://learn.microsoft.com/sql/database-engine/configure-windows/ad-hoc-distributed-queries-server-configuration-option' }
+        @{ Name = 'OLE Automation Procedures'; Url = 'https://learn.microsoft.com/sql/database-engine/configure-windows/ole-automation-procedures-server-configuration-option' }
+    )
+    'db_owner / DBA role expansion review' = @(
+        @{ Name = 'Database-Level Roles'; Url = 'https://learn.microsoft.com/sql/relational-databases/security/authentication-access/database-level-roles' }
+    )
+    'Recent backups are not encrypted' = @(
+        @{ Name = 'Backup encryption'; Url = 'https://learn.microsoft.com/sql/relational-databases/backup-restore/backup-encryption' }
+    )
+    'Failed-login activity recorded' = @(
+        @{ Name = 'xp_readerrorlog'; Url = 'https://learn.microsoft.com/sql/relational-databases/system-stored-procedures/sp-readerrorlog-transact-sql' }
+    )
+    'Certificate or key expires within 180 days' = @(
+        @{ Name = 'Certificates and asymmetric keys'; Url = 'https://learn.microsoft.com/sql/relational-databases/security/encryption/sql-server-and-database-encryption-keys-database-engine' }
+    )
+}
+# Inject Docs into each rule by Title so the finding builder forwards them.
+foreach ($r in $Rules) {
+    if ($DocsByTitle.ContainsKey($r.Title)) { $r.Docs = $DocsByTitle[$r.Title] }
+}
+
 $DomainBuckets = [ordered]@{
     'Identity & access'         = @('sec_01','sec_02','sec_03','sec_11','sec_12')
     'Public / excessive grants' = @('sec_04')
@@ -390,6 +452,7 @@ foreach ($r in $report) {
                 _Rank = $f._Rank
                 Severity = $f.Severity; Scope = $f.Scope; Title = $f.Title
                 Recommendation = $f.Recommendation; Remediation = $f.Remediation
+                Docs = $f.Docs
                 CIS = $f.CIS; GDPR = $f.GDPR; SOC2 = $f.SOC2; HIPAA = $f.HIPAA; PCI = $f.PCI
                 Databases = New-Object System.Collections.Generic.List[string]
                 UniqueDbsCached = $null
@@ -475,6 +538,10 @@ tr.sev-warning >td:first-child{border-left:4px solid #e67e22}
 tr.sev-info    >td:first-child{border-left:4px solid #2980b9}
 .detail{color:#555;font-size:0.85em;font-family:Consolas,monospace;white-space:pre-wrap}
 .codeblk{background:#1e1e1e;color:#d4d4d4;font-family:Consolas,monospace;padding:10px 14px;border-radius:4px;font-size:9pt;white-space:pre-wrap;page-break-inside:avoid}
+ul.docs-list{margin:4px 0 12px;padding-left:18px;font-size:9pt}
+ul.docs-list li{margin:2px 0}
+ul.docs-list a{color:#1F497D;text-decoration:none;border-bottom:1px dotted #1F497D}
+ul.docs-list a:hover{text-decoration:underline}
 .compl{font-size:8.5pt;color:#666}
 .kbd{font-family:Consolas,monospace;background:#f0f0f0;padding:1px 5px;border-radius:3px;font-size:0.88em}
 .fp{display:grid;grid-template-columns:max-content 1fr;gap:4px 14px;font-size:10pt;background:rgba(255,255,255,0.92);padding:14px 18px;border-radius:6px}
@@ -675,13 +742,23 @@ foreach ($p in $phases) {
 Add-To $sb "</section>"
 
 # Snippets
-Add-To $sb "<section class='section'><h2>8. Remediation Snippets (T-SQL)</h2><p>Reference snippets. Replace placeholders before executing.</p>"
+Add-To $sb "<section class='section'><h2>8. Remediation Snippets (T-SQL) and Further Reading</h2><p>Reference snippets. Replace placeholders before executing. Each entry links to vendor / standards documentation for the relevant control.</p>"
 $emitted = @{}
 foreach ($a in $aggregated) {
-    if (-not $a.Remediation) { continue }
+    if (-not $a.Remediation -and (-not $a.Docs -or $a.Docs.Count -eq 0)) { continue }
     if ($emitted.ContainsKey($a.Title)) { continue }
     $emitted[$a.Title] = $true
-    Add-To $sb "<h4>$(Esc $a.Title)</h4><div class='codeblk'>$(Esc $a.Remediation)</div>"
+    Add-To $sb "<h4>$(Esc $a.Title)</h4>"
+    if ($a.Remediation) {
+        Add-To $sb "<div class='codeblk'>$(Esc $a.Remediation)</div>"
+    }
+    if ($a.Docs -and $a.Docs.Count -gt 0) {
+        Add-To $sb "<ul class='docs-list'>"
+        foreach ($d in $a.Docs) {
+            Add-To $sb "<li><a href='$(Esc $d.Url)' target='_blank' rel='noopener'>$(Esc $d.Name)</a></li>"
+        }
+        Add-To $sb "</ul>"
+    }
 }
 Add-To $sb "</section>"
 

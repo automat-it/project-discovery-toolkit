@@ -210,7 +210,9 @@ multi-page **PDF report** covering every database in the run:
   adds HIPAA Security Rule and PCI DSS v4)
 - **Phased remediation roadmap** — Phase 1 (Week 1-2, Critical),
   Phase 2 (Week 3-6, Warning), Phase 3 (Week 7-12, hardening)
-- **T-SQL remediation snippets** — executable templates per finding
+- **T-SQL remediation snippets + Further-reading links** — executable
+  templates per finding, each paired with vendor documentation URLs
+  (learn.microsoft.com) for the specific control
 - **Per-database appendix** — full per-DB finding list
 - **Glossary appendix** — wait types, DMV terms, encryption primitives
 

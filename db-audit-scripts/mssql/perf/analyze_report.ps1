@@ -259,6 +259,52 @@ ALTER DATABASE tempdb ADD FILE (NAME=tempdev2, FILENAME=''<path>\tempdb2.ndf'', 
     }
 )
 
+# ---------------------------------------------------------------------------
+# Per-rule documentation links keyed by Title. Rendered alongside the T-SQL
+# remediation in section 8 so the operator has the vendor doc one click away.
+# ---------------------------------------------------------------------------
+$DocsByTitle = @{
+    'Active blocking or long-running transactions detected' = @(
+        @{ Name = 'sys.dm_tran_locks'; Url = 'https://learn.microsoft.com/sql/relational-databases/system-dynamic-management-views/sys-dm-tran-locks-transact-sql' }
+        @{ Name = 'KILL (Transact-SQL)'; Url = 'https://learn.microsoft.com/sql/t-sql/language-elements/kill-transact-sql' }
+    )
+    'Storage I/O waits dominant' = @(
+        @{ Name = 'I/O wait types'; Url = 'https://learn.microsoft.com/sql/relational-databases/system-dynamic-management-views/sys-dm-os-wait-stats-transact-sql' }
+    )
+    'Memory grant queue waits' = @(
+        @{ Name = 'sys.dm_exec_query_resource_semaphores'; Url = 'https://learn.microsoft.com/sql/relational-databases/system-dynamic-management-views/sys-dm-exec-query-resource-semaphores-transact-sql' }
+    )
+    'Lock waits accumulating' = @(
+        @{ Name = 'Lock and waiting tasks'; Url = 'https://learn.microsoft.com/sql/relational-databases/system-dynamic-management-views/sys-dm-os-waiting-tasks-transact-sql' }
+    )
+    'Index hygiene findings (missing / unused / duplicate)' = @(
+        @{ Name = 'Missing-index DMVs'; Url = 'https://learn.microsoft.com/sql/relational-databases/system-dynamic-management-views/sys-dm-db-missing-index-details-transact-sql' }
+        @{ Name = 'CREATE INDEX (Transact-SQL)'; Url = 'https://learn.microsoft.com/sql/t-sql/statements/create-index-transact-sql' }
+    )
+    'Stale statistics or heavy index fragmentation' = @(
+        @{ Name = 'UPDATE STATISTICS'; Url = 'https://learn.microsoft.com/sql/t-sql/statements/update-statistics-transact-sql' }
+        @{ Name = 'ALTER INDEX (REORGANIZE/REBUILD)'; Url = 'https://learn.microsoft.com/sql/t-sql/statements/alter-index-transact-sql' }
+    )
+    'Pending memory grants -- memory pressure' = @(
+        @{ Name = 'Memory grant troubleshooting'; Url = 'https://learn.microsoft.com/sql/relational-databases/performance/memory-grants' }
+    )
+    'TempDB allocation contention' = @(
+        @{ Name = 'TempDB optimizations'; Url = 'https://learn.microsoft.com/sql/relational-databases/databases/tempdb-database' }
+    )
+    'Last full backup older than several days' = @(
+        @{ Name = 'BACKUP (Transact-SQL)'; Url = 'https://learn.microsoft.com/sql/t-sql/statements/backup-transact-sql' }
+    )
+    'Identity column or storage above 80% consumed' = @(
+        @{ Name = 'IDENTITY: avoiding overflow'; Url = 'https://learn.microsoft.com/sql/t-sql/statements/create-table-transact-sql-identity-property' }
+    )
+    'TempDB contention metrics returned data' = @(
+        @{ Name = 'TempDB performance best practices'; Url = 'https://learn.microsoft.com/sql/relational-databases/databases/tempdb-database#performance-improvements-in-tempdb' }
+    )
+}
+foreach ($r in $Rules) {
+    if ($DocsByTitle.ContainsKey($r.Title)) { $r.Docs = $DocsByTitle[$r.Title] }
+}
+
 # Domain breakdown
 $DomainBuckets = [ordered]@{
     'Top SQL & queries'      = @('perf_01','perf_16','perf_23')
@@ -309,6 +355,7 @@ foreach ($r in $report) {
                 _Rank = $f._Rank
                 Severity = $f.Severity; Scope = $f.Scope; Title = $f.Title
                 Recommendation = $f.Recommendation; Remediation = $f.Remediation
+                Docs = $f.Docs
                 CIS = $f.CIS; GDPR = $f.GDPR; SOC2 = $f.SOC2
                 Databases = New-Object System.Collections.Generic.List[string]
                 UniqueDbsCached = $null
@@ -397,6 +444,10 @@ tr.sev-warning >td:first-child{border-left:4px solid #e67e22}
 tr.sev-info    >td:first-child{border-left:4px solid #2980b9}
 .detail{color:#555;font-size:0.85em;font-family:Consolas,monospace;white-space:pre-wrap}
 .codeblk{background:#1e1e1e;color:#d4d4d4;font-family:Consolas,monospace;padding:10px 14px;border-radius:4px;font-size:9pt;white-space:pre-wrap;page-break-inside:avoid}
+ul.docs-list{margin:4px 0 12px;padding-left:18px;font-size:9pt}
+ul.docs-list li{margin:2px 0}
+ul.docs-list a{color:#1F497D;text-decoration:none;border-bottom:1px dotted #1F497D}
+ul.docs-list a:hover{text-decoration:underline}
 .compl{font-size:8.5pt;color:#666}
 .kbd{font-family:Consolas,monospace;background:#f0f0f0;padding:1px 5px;border-radius:3px;font-size:0.88em}
 .fp{display:grid;grid-template-columns:max-content 1fr;gap:4px 14px;font-size:10pt;background:rgba(255,255,255,0.92);padding:14px 18px;border-radius:6px}
@@ -584,14 +635,24 @@ foreach ($p in $phases) {
 }
 Add-To $sb "</section>"
 
-# T-SQL snippets
-Add-To $sb "<section class='section'><h2>8. Remediation Snippets (T-SQL)</h2><p>Reference snippets for the findings above. Replace placeholders before executing.</p>"
+# T-SQL snippets + doc links
+Add-To $sb "<section class='section'><h2>8. Remediation Snippets (T-SQL) and Further Reading</h2><p>Reference snippets for the findings above. Replace placeholders before executing. Each entry links to vendor documentation for that area.</p>"
 $emitted = @{}
 foreach ($a in $aggregated) {
-    if (-not $a.Remediation) { continue }
+    if (-not $a.Remediation -and (-not $a.Docs -or $a.Docs.Count -eq 0)) { continue }
     if ($emitted.ContainsKey($a.Title)) { continue }
     $emitted[$a.Title] = $true
-    Add-To $sb "<h4>$(Esc $a.Title)</h4><div class='codeblk'>$(Esc $a.Remediation)</div>"
+    Add-To $sb "<h4>$(Esc $a.Title)</h4>"
+    if ($a.Remediation) {
+        Add-To $sb "<div class='codeblk'>$(Esc $a.Remediation)</div>"
+    }
+    if ($a.Docs -and $a.Docs.Count -gt 0) {
+        Add-To $sb "<ul class='docs-list'>"
+        foreach ($d in $a.Docs) {
+            Add-To $sb "<li><a href='$(Esc $d.Url)' target='_blank' rel='noopener'>$(Esc $d.Name)</a></li>"
+        }
+        Add-To $sb "</ul>"
+    }
 }
 Add-To $sb "</section>"
 

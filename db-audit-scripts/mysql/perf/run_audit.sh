@@ -52,13 +52,19 @@ mkdir -p "$OUT"
 # stale ~/.my.cnf would override our credentials.
 # --defaults-file=PATH replaces the entire option-file search with just
 # that one file -- guaranteed isolation.
+#
+# IMPORTANT: in MySQL option-file syntax, `#` starts a comment to end of
+# line. A bare `password=ABC#DEF` would be parsed as password=ABC. We
+# wrap the password in double quotes and escape `\` and `"` so any
+# character (including `#`, `:`, `$`, `;`, `>`, etc.) survives intact.
 DEFAULTS_FILE=""
 if [ -n "${MYSQL_PWD:-}" ]; then
     DEFAULTS_FILE=$(mktemp -t mysql_audit_defaults.XXXXXX)
     chmod 600 "$DEFAULTS_FILE"
+    escaped_pwd=$(printf '%s' "$MYSQL_PWD" | sed -e 's/\\/\\\\/g' -e 's/"/\\"/g')
     {
         printf '[client]\n'
-        printf 'password=%s\n' "$MYSQL_PWD"
+        printf 'password="%s"\n' "$escaped_pwd"
     } > "$DEFAULTS_FILE"
     trap 'rm -f "$DEFAULTS_FILE"' EXIT
 fi

@@ -29,10 +29,11 @@ from pathlib import Path
 # Import shared analyzer library (postgres/_analyze_lib.py)
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from _analyze_lib import (  # noqa: E402
-    SHARED_CSS, context_label, esc, find_log, has_data_rows, kv_grid,
-    now_str, object_table, parse_result_sets, read_fingerprint,
-    read_log_text, read_summary, read_target, render_fingerprint_card,
-    script_matches_log, severity_rank,
+    DOMAIN_BUCKETS_PERF, SHARED_CSS, context_label, copy_brand_assets,
+    domain_counts, esc, find_log, has_data_rows, kv_grid, now_str,
+    object_table, parse_result_sets, read_fingerprint, read_log_text,
+    read_summary, read_target, render_cover, render_fingerprint_card,
+    script_matches_log, severity_rank, svg_bar, svg_donut,
 )
 
 
@@ -829,7 +830,7 @@ def render_findings(findings: list) -> str:
 
 
 def build_html(report: list, server_label: str, report_dir: Path,
-               fingerprint: dict, target: dict) -> str:
+               fingerprint: dict, target: dict, customer: str = '') -> str:
     total_pass = sum(r['passed']  for r in report)
     total_fail = sum(r['failed']  for r in report)
     total_crit = sum(r['critical'] for r in report)
@@ -843,13 +844,17 @@ def build_html(report: list, server_label: str, report_dir: Path,
 <html lang='en'><head><meta charset='UTF-8'>
 <title>PostgreSQL Performance Audit Report</title>
 {SHARED_CSS}
-</head><body id='top'>
-<header>
+</head><body id='top'>"""]
+
+    parts.append(render_cover('PostgreSQL Performance Audit Report',
+                              server, customer, len(report)))
+
+    parts.append(f"""<header>
   <h1>PostgreSQL Performance Audit Report</h1>
   <p><strong>Server:</strong> {esc(server)}</p>
   <p><strong>Report folder:</strong> {esc(str(report_dir))}</p>
   <p><strong>Generated:</strong> {now_str()}</p>
-</header>"""]
+</header>""")
 
     # Quick navigation (hidden in print)
     parts.append(
@@ -866,22 +871,33 @@ def build_html(report: list, server_label: str, report_dir: Path,
     parts.append(render_fingerprint_card(fingerprint, target, report_dir))
 
     # Executive summary -- KPIs + Top issues
-    parts.append("<a id='exec-summary'></a>")
-    parts.append("<div class='card'><h2 style='margin-top:0;border:none;'>"
-                 "Executive Summary<a class='back-top' href='#top'>top &uarr;</a></h2>")
-    parts.append("<div class='kpi-row'>")
-    parts.append(
-        f"<div class='kpi'><div class='lbl'>Databases analysed</div><div class='num'>{len(report)}</div></div>"
-        f"<div class='kpi'><div class='lbl'>Scripts OK</div><div class='num'>{total_pass}</div></div>"
-        f"<div class='kpi {'fail' if total_fail else ''}'><div class='lbl'>Failed scripts</div><div class='num fail'>{total_fail}</div></div>"
-        f"<div class='kpi {'crit' if total_crit else ''}'><div class='lbl'>Critical findings</div><div class='num crit'>{total_crit}</div></div>"
-        f"<div class='kpi {'warn' if total_warn else ''}'><div class='lbl'>Warnings</div><div class='num warn'>{total_warn}</div></div>"
-    )
-    parts.append("</div>")
-    # Aggregate findings across all contexts for the Top issues block
     all_findings = []
     for r in report:
         all_findings.extend(r['findings'])
+    parts.append("<a id='exec-summary'></a>")
+    parts.append("<section class='section card'><h2>1. Executive Summary</h2>")
+    parts.append("<p class='intro'>Snapshot of this audit: how many databases "
+                 "were analyzed, the severity mix of findings, and which "
+                 "functional areas drove the count.</p>")
+    parts.append("<div class='kpi-row'>"
+                 f"<div class='kpi'><span class='lbl'>Databases analyzed</span>"
+                 f"<span class='num'>{len(report)}</span></div>"
+                 f"<div class='kpi'><span class='lbl'>Critical findings</span>"
+                 f"<span class='num crit'>{total_crit}</span></div>"
+                 f"<div class='kpi'><span class='lbl'>Warning findings</span>"
+                 f"<span class='num warn'>{total_warn}</span></div>"
+                 f"<div class='kpi'><span class='lbl'>Info findings</span>"
+                 f"<span class='num'>{total_info}</span></div>"
+                 f"<div class='kpi'><span class='lbl'>Failed scripts</span>"
+                 f"<span class='num fail'>{total_fail}</span></div>"
+                 "</div>")
+    domain_data = domain_counts(all_findings, DOMAIN_BUCKETS_PERF)
+    parts.append("<div class='charts-row'>")
+    parts.append(f"<div>{svg_donut(total_crit, total_warn, total_info)}</div>")
+    if domain_data:
+        parts.append("<div><h3>Findings by Domain</h3>"
+                     f"{svg_bar(domain_data)}</div>")
+    parts.append("</div>")
     parts.append("<h3>Top issues -- what to fix</h3>")
     parts.append(render_top_issues(all_findings))
     # Per-context rollup table -- only shown for multi-database runs;
@@ -913,14 +929,14 @@ def build_html(report: list, server_label: str, report_dir: Path,
             f"<td class='num'>{total_info}</td></tr>"
             f"</tbody></table>"
         )
-    parts.append("</div>")  # close exec-summary card
+    parts.append("</section>")  # close 1. Executive Summary
 
     # Findings -- one section, with a header so the reader knows what
     # they're scrolling into.
     parts.append("<a id='findings'></a>")
     multi = len(report) > 1
-    parts.append("<div class='card'><h2 style='margin-top:0;border:none;'>"
-                 "Findings<a class='back-top' href='#top'>top &uarr;</a></h2>")
+    parts.append("<section class='section card'><h2>2. Findings"
+                 "<a class='back-top' href='#top'>top &uarr;</a></h2>")
     for r in report:
         anchor = re.sub(r'[^A-Za-z0-9]', '_', r['name'])
         if multi:
@@ -934,7 +950,7 @@ def build_html(report: list, server_label: str, report_dir: Path,
         parts.append(render_findings(r['findings']))
         if multi:
             parts.append("</section>")
-    parts.append("</div>")  # close findings card
+    parts.append("</section>")  # close 2. Findings
 
     # SQL appendix -- full untruncated text per queryid, anchored so the
     # queryid cells in the Top SQL tables link straight to it.
@@ -965,8 +981,8 @@ def render_sql_appendix(report: list) -> str:
                     by_qid[qid] = dict(query=q, context=r['name'])
     if not by_qid:
         return ''
-    parts = ["<section class='card' id='sql-appendix'>"
-             "<h2 style='margin-top:0;'>SQL Appendix -- full text by queryid"
+    parts = ["<section class='section card' id='sql-appendix'>"
+             "<h2>3. SQL Appendix -- full text by queryid"
              "<a class='back-top' href='#top'>top &uarr;</a></h2>"
              f"<div class='meta'>One entry per unique pg_stat_statements queryid surfaced in Top SQL "
              f"({len(by_qid)} statements). queryid links in the Top SQL tables jump here.</div>"]
@@ -1007,8 +1023,9 @@ def render_sql_appendix(report: list) -> str:
 def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__.split('\n\n')[0])
     ap.add_argument('report_dir', help='Folder produced by run_audit.sh / run_all_databases.sh')
-    ap.add_argument('--server', default='', help='Server label printed on the cover')
-    ap.add_argument('--out',    default='', help='Output HTML path (default: <report_dir>/perf_analysis.html)')
+    ap.add_argument('--server',   default='', help='Server label printed on the cover')
+    ap.add_argument('--customer', default='', help='Customer / project name printed on the cover (optional)')
+    ap.add_argument('--out',      default='', help='Output HTML path (default: <report_dir>/perf_analysis.html)')
     args = ap.parse_args()
 
     report_dir = Path(args.report_dir).resolve()
@@ -1051,8 +1068,11 @@ def main() -> int:
             info    =sum(1 for f in findings if f['severity']=='Info'),
         ))
 
-    out.write_text(build_html(report, args.server, report_dir, fingerprint, target),
-                   encoding='utf-8')
+    out.write_text(
+        build_html(report, args.server, report_dir, fingerprint, target,
+                   customer=args.customer),
+        encoding='utf-8')
+    copy_brand_assets(out.parent)
 
     total_crit = sum(r['critical'] for r in report)
     total_warn = sum(r['warning']  for r in report)

@@ -211,7 +211,11 @@ function Invoke-AuditForDb {
     if ($User)     { $runArgs += @("-User",     $User) }
     if ($Password) { $runArgs += @("-Password", $Password) }
 
-    & powershell.exe -ExecutionPolicy Bypass -File $Runner @runArgs | Out-Null
+    # Use Windows PowerShell on Windows, pwsh on macOS / Linux. Without
+    # this branch the script tried to invoke powershell.exe everywhere and
+    # failed on non-Windows hosts.
+    $shell = if ($IsWindows -or ($PSVersionTable.PSEdition -eq 'Desktop')) { 'powershell.exe' } else { 'pwsh' }
+    & $shell -ExecutionPolicy Bypass -File $Runner @runArgs | Out-Null
     return $LASTEXITCODE
 }
 

@@ -343,6 +343,145 @@ def object_table(rows: List[Dict[str, str]], columns: List[str],
 
 
 # ---------------------------------------------------------------------------
+# Brand assets: cover image + watermark. Shared by all engine analyzers
+# (PostgreSQL / MySQL Python; MSSQL PowerShell). Files live at
+# db-audit-scripts/assets/ -- we copy them next to the rendered HTML so
+# Chromium picks them up via relative URLs.
+# ---------------------------------------------------------------------------
+def copy_brand_assets(out_dir: Path) -> None:
+    import shutil
+    src_dir = Path(__file__).resolve().parent.parent / 'assets'
+    if not src_dir.is_dir():
+        return
+    for name in ('ait_bg_cover.png', 'ait_bg_page.png'):
+        src = src_dir / name
+        if src.exists():
+            try:
+                shutil.copy2(src, out_dir / name)
+            except OSError as e:
+                print(f'[warn] could not copy {name}: {e}', file=sys.stderr)
+
+
+def svg_donut(critical: int, warning: int, info: int) -> str:
+    import math
+    total = critical + warning + info
+    if total <= 0:
+        return "<p class='ok'>No findings recorded.</p>"
+    rad, cx, cy, stroke = 80, 110, 110, 30
+    vals = [
+        ('Critical', critical, '#c0392b'),
+        ('Warning',  warning,  '#e67e22'),
+        ('Info',     info,     '#2980b9'),
+    ]
+    out, offset = [], 0
+    for _, n, c in vals:
+        if n <= 0:
+            continue
+        angle = 360.0 * n / total
+        a1 = (offset - 90) * math.pi / 180.0
+        a2 = (offset + angle - 90) * math.pi / 180.0
+        x1, y1 = cx + rad * math.cos(a1), cy + rad * math.sin(a1)
+        x2, y2 = cx + rad * math.cos(a2), cy + rad * math.sin(a2)
+        large = 1 if angle > 180 else 0
+        out.append(
+            f"<path d='M {cx} {cy} L {x1:.2f} {y1:.2f} "
+            f"A {rad} {rad} 0 {large} 1 {x2:.2f} {y2:.2f} Z' fill='{c}'/>"
+        )
+        offset += angle
+    out.append(f"<circle cx='{cx}' cy='{cy}' r='{rad - stroke}' fill='white'/>")
+    out.append(f"<text x='{cx}' y='{cy - 3}' text-anchor='middle' "
+               f"font-size='22' font-weight='600' fill='#222'>{total}</text>")
+    out.append(f"<text x='{cx}' y='{cy + 18}' text-anchor='middle' "
+               f"font-size='10' fill='#777'>findings</text>")
+    out.append("<g font-family='Segoe UI,Arial' font-size='12'>")
+    ly = 30
+    for label, n, c in vals:
+        out.append(f"<rect x='240' y='{ly}' width='14' height='14' fill='{c}'/>")
+        out.append(f"<text x='262' y='{ly + 12}' fill='#222'>{label}: {n}</text>")
+        ly += 22
+    out.append('</g>')
+    return ("<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 380 220' "
+            f"width='380' height='220'>{''.join(out)}</svg>")
+
+
+def svg_bar(items: list, color: str = '#1F497D') -> str:
+    items = [(l, v) for l, v in items if v > 0]
+    if not items:
+        return ''
+    max_n = max(v for _, v in items) or 1
+    row_h, pad_top, pad_left, width = 22, 10, 200, 600
+    h = pad_top + row_h * len(items) + 10
+    out = [f"<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 {width} {h}' "
+           f"width='{width}' height='{h}' font-family='Segoe UI,Arial' font-size='12'>"]
+    y = pad_top
+    for label, n in items:
+        w = int((width - pad_left - 50) * n / max_n)
+        out.append(f"<text x='{pad_left - 8}' y='{y + 14}' text-anchor='end' "
+                   f"fill='#333'>{esc(label)}</text>")
+        out.append(f"<rect x='{pad_left}' y='{y}' width='{w}' height='16' fill='{color}'/>")
+        out.append(f"<text x='{pad_left + w + 6}' y='{y + 14}' fill='#333'>{n}</text>")
+        y += row_h
+    out.append('</svg>')
+    return ''.join(out)
+
+
+DOMAIN_BUCKETS_SEC: dict = {
+    'Identity & access':         ('sec_01', 'sec_02', 'sec_03', 'sec_11', 'sec_12'),
+    'Public / excessive grants': ('sec_04',),
+    'Authentication':            ('sec_05',),
+    'Audit & logging':           ('sec_06', 'sec_18', 'sec_19', 'sec_20'),
+    'Encryption':                ('sec_07', 'sec_22'),
+    'Network exposure':          ('sec_08',),
+    'Sensitive data (PII)':      ('sec_09', 'sec_16'),
+    'Dangerous objects':         ('sec_10', 'sec_15'),
+    'Backup security':           ('sec_14', 'sec_17'),
+    'Patch / CVE level':         ('sec_21',),
+}
+
+DOMAIN_BUCKETS_PERF: dict = {
+    'Top SQL & queries':         ('perf_01', 'perf_16', 'perf_23'),
+    'Blocking & locking':        ('perf_02', 'perf_13'),
+    'Sessions & connections':    ('perf_03',),
+    'Waits & I/O':               ('perf_04', 'perf_14'),
+    'Indexes':                   ('perf_06', 'perf_12'),
+    'Statistics & bloat':        ('perf_07', 'perf_11', 'perf_17'),
+    'Storage & sizing':          ('perf_08', 'perf_15', 'perf_19'),
+    'Memory & temp':             ('perf_09',),
+    'Backup / replication':      ('perf_10', 'perf_22'),
+    'HA / cluster':              ('perf_24',),
+    'Workload & partitions':     ('perf_18', 'perf_20', 'perf_21'),
+}
+
+
+def domain_counts(findings: list, buckets: dict) -> list:
+    counts = {k: 0 for k in buckets}
+    for f in findings:
+        script = f.get('script', '')
+        for domain, prefixes in buckets.items():
+            if any(p in script for p in prefixes):
+                counts[domain] += 1
+                break
+    return [(d, c) for d, c in counts.items() if c > 0]
+
+
+def render_cover(title: str, server: str, customer: str,
+                 databases_analysed: int) -> str:
+    """Branded cover page matching the MSSQL analyzer."""
+    cust = (esc(customer) if customer else '&nbsp;')
+    return (
+        "<section class='cover'><div class='cover-content'>"
+        f"<h1>{esc(title)}</h1>"
+        f"<div class='sub'>{cust}</div>"
+        f"<div class='meta'><strong>Server:</strong> {esc(server or '(unspecified)')} "
+        f"&nbsp;&middot;&nbsp; <strong>{databases_analysed}</strong> "
+        f"{'database' if databases_analysed == 1 else 'databases'} analyzed</div>"
+        f"<div class='date'>{now_str()}</div>"
+        "</div></section>"
+        "<div class='page-bg'></div>"
+    )
+
+
+# ---------------------------------------------------------------------------
 # Severity ranking + common CSS shared by both analyzers
 # ---------------------------------------------------------------------------
 _SEVERITY_RANK = {'Critical': 0, 'Warning': 1, 'Info': 2}
@@ -361,8 +500,17 @@ def severity_rank(s: str) -> int:
 
 SHARED_CSS = """\
 <style>
-@page{size:A4 portrait;margin:12mm;}
+@page{size:A4 portrait;margin:18mm 14mm;@bottom-center{content:counter(page) ' / ' counter(pages);font-size:8pt;color:#777;}}
 @media print{body{background:white !important;padding:0;}.card,section.db{box-shadow:none !important;background:white !important;}}
+/* Branded cover page + watermark on inner pages (Chromium --print-to-pdf). */
+.page-bg{position:fixed;top:0;left:0;right:0;bottom:0;z-index:-1;background-image:url('ait_bg_page.png');background-size:100% 100%;background-repeat:no-repeat;background-position:center;opacity:0.5;}
+.cover{position:relative;width:100%;height:calc(297mm - 36mm);page-break-after:always;break-after:page;background-image:url('ait_bg_cover.png');background-size:100% 100%;background-repeat:no-repeat;background-position:center;color:#000;text-align:center;}
+.cover-content{position:absolute;left:0;right:0;top:55%;padding:0 16mm;}
+.cover h1{font-size:24pt;font-weight:800;color:#000;margin:0 0 10px;}
+.cover .sub{font-size:13pt;color:#333;margin:0 0 4px;font-weight:500;}
+.cover .meta{font-size:11pt;color:#444;margin:0 0 6px;}
+.cover .date{font-size:11pt;color:#666;margin-top:8px;}
+@media screen{.cover{background-color:#f5f5f5;}}
 body{font-family:Segoe UI,Arial,sans-serif;margin:0;padding:20px;background:#f5f5f5;color:#222;line-height:1.4;font-size:9.5pt;}
 h1{margin:0 0 4px 0;}
 h2{border-bottom:2px solid #336791;padding-bottom:4px;margin-top:28px;color:#336791;}
@@ -385,14 +533,17 @@ th{background:#eaf0f6;font-weight:600;color:#1F497D;}
 .exec-summary td.crit{color:#c0392b;font-weight:600;}
 .exec-summary td.warn{color:#e67e22;font-weight:600;}
 .exec-summary td.fail{color:#c0392b;font-weight:600;}
-.kpi-row{display:flex;gap:10px;flex-wrap:wrap;margin:4px 0 10px;}
-.kpi{flex:1;min-width:115px;background:white;padding:8px 12px;border-radius:6px;border:1px solid #d6e6f0;box-shadow:0 1px 3px rgba(0,0,0,0.04);text-align:center;}
-.kpi .num{font-size:1.7em;font-weight:700;color:#1F497D;line-height:1.1;}
+.kpi-row{display:flex;gap:12px;flex-wrap:wrap;margin:6px 0 16px;}
+.kpi{flex:1;min-width:160px;background:rgba(255,255,255,0.92);border:1px solid #d6e6b9;border-radius:6px;padding:14px 16px;}
+.kpi .num{font-size:22pt;font-weight:700;color:#1F497D;line-height:1.1;display:block;margin-top:4px;}
 .kpi .num.crit{color:#c0392b;}.kpi .num.warn{color:#e67e22;}.kpi .num.fail{color:#c0392b;}
-.kpi .lbl{font-size:0.72em;color:#666;text-transform:uppercase;letter-spacing:0.5px;}
-.kpi.crit{background:#fdecea;border-color:#f1c0bb;}
-.kpi.warn{background:#fff3e0;border-color:#f0d6ab;}
-.kpi.fail{background:#fdecea;border-color:#f1c0bb;}
+.kpi .lbl{font-size:9pt;color:#666;text-transform:uppercase;letter-spacing:0.5px;}
+.section{margin:18px 0 10px;}
+.section h2{margin:0 0 6px;font-size:17pt;color:#1F497D;border-bottom:1px solid #d6e6f0;padding-bottom:4px;}
+.section .intro{color:#444;font-size:10pt;margin:0 0 12px;}
+.charts-row{display:flex;flex-wrap:wrap;gap:24px;align-items:flex-start;margin:14px 0 8px;}
+.charts-row > div{flex:1;min-width:320px;}
+.charts-row h3{margin-top:0;color:#1F497D;font-size:11pt;}
 .quick-nav{display:flex;gap:8px;flex-wrap:wrap;margin:0 0 14px;padding:8px 12px;background:white;border-radius:6px;border:1px solid #e3e8ed;}
 .quick-nav a{color:#1F497D;text-decoration:none;font-size:0.88em;padding:4px 10px;border-radius:3px;border:1px solid #d6e6f0;background:#f6f8fb;}
 .quick-nav a:hover{background:#eaf0f6;}

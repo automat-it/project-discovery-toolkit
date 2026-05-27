@@ -532,7 +532,13 @@ function Convert-HtmlToPdf {
 # -----------------------------------------------------------------------------
 function Copy-BrandAssets {
     param([string]$ScriptDir, [string]$HtmlDir)
-    $assetsDir = Join-Path (Split-Path -Parent $ScriptDir) 'assets'
+    # Brand assets live at db-audit-scripts/assets/ (shared across all
+    # engine analyzers). Walk up from the engine dir to find them.
+    $assetsDir = Join-Path (Split-Path -Parent (Split-Path -Parent $ScriptDir)) 'assets'
+    if (-not (Test-Path $assetsDir)) {
+        # Fallback for the historical layout (db-audit-scripts/mssql/assets/)
+        $assetsDir = Join-Path (Split-Path -Parent $ScriptDir) 'assets'
+    }
     foreach ($asset in 'ait_bg_cover.png','ait_bg_page.png') {
         $src = Join-Path $assetsDir $asset
         $dst = Join-Path $HtmlDir   $asset

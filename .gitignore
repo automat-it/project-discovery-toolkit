@@ -27,6 +27,15 @@ reports/
 *.dump
 dms/*/0*.sql
 
+# Local sandbox / test scaffolding — never commit. The audit toolkit
+# itself is the deliverable; one-off compose stacks, seed scripts,
+# and personal fixtures stay on the developer's machine.
+docker/
+docker-compose*.yml
+docker-compose*.yaml
+**/fixture*.sql
+**/_sandbox*.sql
+
 # Credentials
 .env
 *.pem

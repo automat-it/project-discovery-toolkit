@@ -27,8 +27,10 @@ from __future__ import annotations
 import datetime as _dt
 import html as _html
 import re
+import sys
+import urllib.parse
 from pathlib import Path
-from typing import Any, Dict, Iterable, List, Optional
+from typing import Dict, Iterable, List, Optional
 
 # ---------------------------------------------------------------------------
 # File encoding detection + reading
@@ -59,7 +61,11 @@ def read_log_text(path: Path) -> str:
     enc = detect_encoding(path)
     try:
         return path.read_text(encoding=enc, errors='replace')
-    except OSError:
+    except OSError as e:
+        # A silent empty string would make the analyzer behave as if the
+        # script had no findings. Make the failure visible so the user can
+        # distinguish "clean" from "couldn't read".
+        print(f'[warn] cannot read {path}: {e}', file=sys.stderr)
         return ''
 
 
@@ -73,14 +79,10 @@ def read_log_text(path: Path) -> str:
 # Multiple SELECTs in one script are concatenated WITHOUT a blank-line
 # separator -- the next result set just starts with its own header line.
 #
-# We detect a header by checking that EVERY value on the line matches a
-# column-name pattern: starts with a letter/underscore, followed by
-# letters/digits/underscore/@/$/dot. Data rows almost never satisfy this
-# because they contain digits, spaces, NULL markers, decimal points,
-# punctuation, etc.
-_ERROR_RE         = re.compile(r'^(ERROR|mysql:|\[note\]|\[ERROR\])')
-_COL_NAME_RE      = re.compile(r'^[A-Za-z_@][A-Za-z0-9_@$.]*$')
-_ALL_NUMERIC_RE   = re.compile(r'^-?\d+(\.\d+)?$')
+# Header detection: see parse_result_sets() docstring. We use tab-count
+# change as the boundary heuristic; an identifier-pattern check on the
+# header would drop data rows like ``shop_demo\tcustomers\temail``.
+_ERROR_RE = re.compile(r'^(ERROR|mysql:|\[note\]|\[ERROR\])')
 
 
 def parse_result_sets(text: str) -> List[Dict]:
@@ -145,11 +147,39 @@ def has_data_rows(text: str) -> bool:
 # Log discovery
 # ---------------------------------------------------------------------------
 def find_log(log_dir: Path, name_substring: str) -> Optional[Path]:
-    """Return the first .log file whose name contains <substring>."""
-    for p in sorted(log_dir.glob('*.log')):
+    """Return the .log file whose name matches <substring> best.
+
+    Preference order:
+      1. exact stem match
+      2. stem starts with the substring (after the priority prefix)
+      3. substring appears anywhere in the name
+    The runner prefixes logs with ``<priority>_`` (e.g. ``critical_``),
+    so we strip that before the prefix check."""
+    candidates = sorted(log_dir.glob('*.log'))
+    exact = [p for p in candidates if p.stem == name_substring]
+    if exact:
+        return exact[0]
+    prefix = [p for p in candidates
+              if re.sub(r'^(critical|high|medium|low)_', '', p.stem)
+                  .startswith(name_substring)]
+    if prefix:
+        return prefix[0]
+    for p in candidates:
         if name_substring in p.name:
             return p
     return None
+
+
+def script_matches_log(rule_script: str, log_stem: str) -> bool:
+    """Return True iff ``log_stem`` corresponds to ``rule_script``.
+
+    ``log_stem`` has the form ``<priority>_<script>`` (e.g.
+    ``critical_sec_05_authentication_and_passwords``). We strip the
+    priority prefix and require an exact match, so a rule for
+    ``perf_02_blocking_and_locks`` will NOT also fire on a future
+    ``perf_02_blocking_and_locks_extended`` log."""
+    stem = re.sub(r'^(critical|high|medium|low)_', '', log_stem)
+    return stem == rule_script
 
 
 def read_summary(summary_path: Path) -> Iterable:
@@ -272,7 +302,11 @@ def object_table(rows: List[Dict[str, str]], columns: List[str],
                 val = val[:200].rstrip() + ' ...'
             cls = " class='wrap'" if c in wrap_cols else ''
             if c in link_columns and val:
-                href = link_columns[c].format(value=str(r.get(c, '')))
+                # urllib.quote both protects against odd queryid contents
+                # AND keeps the anchor target consistent with the appendix
+                # (which also URL-encodes the id).
+                qv = urllib.parse.quote(str(r.get(c, '')), safe='')
+                href = link_columns[c].replace('{value}', qv)
                 parts.append(f"<td{cls}><a class='qid-link' href='{esc(href)}'>{esc(val)}</a></td>")
             else:
                 parts.append(f"<td{cls}>{esc(val)}</td>")
@@ -286,8 +320,20 @@ def object_table(rows: List[Dict[str, str]], columns: List[str],
 # ---------------------------------------------------------------------------
 # Severity ranking + common CSS shared by both analyzers
 # ---------------------------------------------------------------------------
+_SEVERITY_RANK = {'Critical': 0, 'Warning': 1, 'Info': 2}
+_UNKNOWN_SEVERITY_SEEN: set = set()
+
+
 def severity_rank(s: str) -> int:
-    return {'Critical': 0, 'Warning': 1, 'Info': 2}.get(s, 3)
+    if s in _SEVERITY_RANK:
+        return _SEVERITY_RANK[s]
+    # Warn ONCE per unknown severity so a typo in a rule doesn't silently
+    # disappear from KPI counters.
+    if s not in _UNKNOWN_SEVERITY_SEEN:
+        _UNKNOWN_SEVERITY_SEEN.add(s)
+        print(f'[warn] unknown severity {s!r} -- treating as Warning',
+              file=sys.stderr)
+    return _SEVERITY_RANK['Warning']
 
 
 SHARED_CSS = """\

@@ -32,7 +32,7 @@ from _analyze_lib import (  # noqa: E402
     SHARED_CSS, context_label, esc, find_log, has_data_rows, kv_grid,
     now_str, object_table, parse_result_sets, read_fingerprint,
     read_log_text, read_summary, read_target, render_fingerprint_card,
-    severity_rank,
+    script_matches_log, severity_rank,
 )
 
 
@@ -311,22 +311,32 @@ def _ext_temp_files(text):
 
 
 def _ext_capacity(text):
-    # perf_15 has identity / sequence consumption + storage usage
+    """perf_15: identity / sequence consumption + storage usage.
+
+    Only keep rows whose pct/percent column reads >= 50. The value must
+    be a plain number (optionally with a trailing %) -- we explicitly
+    reject things like ``50 GB`` to avoid wrongly flagging sizes.
+    """
     out = []
+    pct_re = re.compile(r'^\s*([0-9]+(?:\.[0-9]+)?)\s*%?\s*$')
     for s in parse_result_sets(text):
-        lc = [c.lower() for c in s['columns']]
-        if any('pct' in c or 'percent' in c or 'consumed' in c for c in lc):
-            for r in s['rows']:
-                # keep rows with >= 50% in any percent column
-                for col, val in r.items():
-                    m = re.search(r'([0-9]+(?:\.[0-9]+)?)\s*%?', str(val))
-                    if m:
-                        try:
-                            n = float(m.group(1))
-                            if n >= 50 and 'pct' in col.lower():
-                                out.append(r); break
-                        except ValueError:
-                            pass
+        pct_cols = [c for c in s['columns']
+                    if 'pct' in c.lower() or 'percent' in c.lower()
+                       or 'consumed' in c.lower()]
+        if not pct_cols:
+            continue
+        for r in s['rows']:
+            for col in pct_cols:
+                m = pct_re.match(str(r.get(col, '')))
+                if not m:
+                    continue
+                try:
+                    n = float(m.group(1))
+                except ValueError:
+                    continue
+                if 50 <= n <= 100:
+                    out.append(r)
+                    break
     return out[:200]
 
 
@@ -637,12 +647,15 @@ def find_findings(log_dir: Path) -> list:
             objects=[], object_columns=[], object_label='',
         ))
 
-    # 2. Apply content rules
+    # 2. Apply content rules. Read each .log at most once.
+    log_text_cache: dict = {}
     for log in sorted(log_dir.glob('*.log')):
         for rule in RULES:
-            if rule['script'] not in log.stem:
+            if not script_matches_log(rule['script'], log.stem):
                 continue
-            text = read_log_text(log)
+            if log not in log_text_cache:
+                log_text_cache[log] = read_log_text(log)
+            text = log_text_cache[log]
             if not text:
                 continue
             hit = False
@@ -663,8 +676,9 @@ def find_findings(log_dir: Path) -> list:
                 try:
                     if rule['check'](text):
                         hit = True
-                except Exception:
-                    pass
+                except Exception as e:
+                    print(f'[warn] check predicate failed on {log.name}: {e}',
+                          file=sys.stderr)
             if not hit:
                 continue
             objs: list = []
@@ -675,7 +689,9 @@ def find_findings(log_dir: Path) -> list:
             if extractor:
                 try:
                     out = extractor(text)
-                except Exception:
+                except Exception as e:
+                    print(f'[warn] extractor {extractor.__name__} failed on '
+                          f'{log.name}: {e}', file=sys.stderr)
                     out = []
                 # Detect whether the extractor returned a list of groups
                 # ({label, columns, rows}, ...) or a flat list of rows.
@@ -1008,6 +1024,11 @@ def main() -> int:
         return 3
 
     target = read_target(report_dir)
+    if not target:
+        for c in contexts:
+            target = read_target(c['log_dir'])
+            if target:
+                break
 
     report = []
     fingerprint = {}

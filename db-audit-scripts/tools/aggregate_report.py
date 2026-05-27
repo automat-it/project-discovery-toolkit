@@ -77,6 +77,8 @@ class ScriptResult:
     finished_at: str | None
     database: str | None
     error_hits: list[str] = field(default_factory=list)
+    # Cached body so render_details() doesn't re-read every file from disk.
+    body: str = ""
 
     @property
     def status(self) -> str:
@@ -124,7 +126,16 @@ def parse_result(path: Path) -> ScriptResult:
 
     error_hits: list[str] = []
     # Only scan the body (everything before the trailing metadata block).
-    body = text.split("-- Script:", 1)[0]
+    # Anchor on a newline so a stray ``-- Script: ...`` comment inside the
+    # script's SQL doesn't truncate the body.
+    if script_match:
+        body = text[:script_match.start()]
+        # If the match wasn't at line start, walk back to the previous newline.
+        nl = text.rfind("\n", 0, script_match.start())
+        if nl != -1:
+            body = text[:nl + 1]
+    else:
+        body = text
     for pat in ERROR_PATTERNS:
         for m in pat.finditer(body):
             # record the full matching line
@@ -146,6 +157,7 @@ def parse_result(path: Path) -> ScriptResult:
         finished_at=finished_match.group(1).strip() if finished_match else None,
         database=database_match.group(1).strip() if database_match else None,
         error_hits=error_hits,
+        body=text,
     )
 
 
@@ -256,7 +268,9 @@ def render_results_table(results: list[ScriptResult]) -> str:
 def render_details(results: list[ScriptResult]) -> str:
     chunks: list[str] = []
     for r in sorted(results, key=lambda r: (r.category, r.priority, r.name)):
-        body = r.path.read_text(errors="replace")
+        # Use the cached body from parse_result rather than re-reading the
+        # file from disk -- halves I/O on large multi-script audit runs.
+        body = r.body or r.path.read_text(errors="replace")
         err_block = ""
         if r.error_hits:
             err_block = "<div><strong>Errors detected:</strong><br>" + "".join(

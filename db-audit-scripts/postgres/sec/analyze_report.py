@@ -29,7 +29,8 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from _analyze_lib import (  # noqa: E402
     SHARED_CSS, context_label, esc, has_data_rows, kv_grid, now_str,
     object_table, parse_result_sets, read_fingerprint, read_log_text,
-    read_summary, read_target, render_fingerprint_card, severity_rank,
+    read_summary, read_target, render_fingerprint_card, script_matches_log,
+    severity_rank,
 )
 
 
@@ -571,11 +572,15 @@ def find_findings(log_dir: Path) -> list:
             objects=[], object_columns=[], object_label='',
         ))
 
+    # Read each .log at most once.
+    log_text_cache: dict = {}
     for log in sorted(log_dir.glob('*.log')):
         for rule in RULES:
-            if rule['script'] not in log.stem:
+            if not script_matches_log(rule['script'], log.stem):
                 continue
-            text = read_log_text(log)
+            if log not in log_text_cache:
+                log_text_cache[log] = read_log_text(log)
+            text = log_text_cache[log]
             if not text:
                 continue
             hit = False
@@ -598,7 +603,9 @@ def find_findings(log_dir: Path) -> list:
             if extractor:
                 try:
                     out = extractor(text)
-                except Exception:
+                except Exception as e:
+                    print(f'[warn] extractor {extractor.__name__} failed on '
+                          f'{log.name}: {e}', file=sys.stderr)
                     out = []
                 if (out and isinstance(out[0], dict)
                         and {'label', 'columns', 'rows'} <= set(out[0].keys())):
@@ -835,6 +842,11 @@ def main() -> int:
         return 3
 
     target = read_target(report_dir)
+    if not target:
+        for c in contexts:
+            target = read_target(c['log_dir'])
+            if target:
+                break
 
     report = []
     fingerprint = {}

@@ -31,7 +31,7 @@ from _analyze_lib import (  # noqa: E402
     SHARED_CSS, context_label, esc, find_log, has_data_rows, kv_grid,
     now_str, object_table, parse_result_sets, read_fingerprint,
     read_log_text, read_summary, read_target, render_fingerprint_card,
-    severity_rank,
+    script_matches_log, severity_rank,
 )
 
 
@@ -79,10 +79,17 @@ def _ext_top_sql(text):
         return default
 
     groups = []
+    metric_cols = {'total_min', 'total_ms', 'mean_ms', 'avg_ms', 'calls',
+                   'pct_total', 'pct_calls', 'rows', 'examined_ratio'}
     for s in sets:
         if not s['rows']:
             continue
-        if 'queryid' not in [c.lower() for c in s['columns']]:
+        cols_lc = [c.lower() for c in s['columns']]
+        if 'queryid' not in cols_lc:
+            continue
+        # Sub-tables in perf_01 that happen to expose queryid but no
+        # ranking metric are not actionable "top SQL" snapshots.
+        if not (metric_cols & set(cols_lc)):
             continue
         new_rows = []
         for r in s['rows'][:200]:
@@ -121,10 +128,13 @@ def _check_perf_02(text):
         if 'seconds' in lc and 'state' in lc and 'query' in lc:
             for r in s['rows']:
                 try:
-                    if int(r.get('seconds') or '0') > 60 and (r.get('query') or '').strip() not in ('', 'NULL'):
-                        return True
-                except ValueError:
-                    pass
+                    # float, not int -- some PERFORMANCE_SCHEMA views emit
+                    # fractional seconds (e.g. '61.500000').
+                    sec = float(r.get('seconds') or '0')
+                except (TypeError, ValueError):
+                    continue
+                if sec > 60 and (r.get('query') or '').strip() not in ('', 'NULL'):
+                    return True
     return False
 
 
@@ -516,7 +526,10 @@ RULES = [
     dict(
         script='perf_15_capacity_and_growth',
         mode='pattern',
-        pattern=r'(?im)\b(5[0-9]|6[0-9]|7[0-9]|8[0-9]|9[0-9]|100)\.\d+\s*%?\s*$',
+        # Require trailing `%` so the rule fires only on capacity-percent
+        # columns -- without it, ANY numeric column with a 50+ value
+        # (durations, sizes, row counts) wrongly produces a Critical.
+        pattern=r'(?im)\b(5[0-9]|6[0-9]|7[0-9]|8[0-9]|9[0-9]|100)\.\d+\s*%',
         severity='Critical',
         title='Capacity headroom under 50% (AUTO_INCREMENT / storage / conns)',
         recommendation='Plan AUTO_INCREMENT widening (INT->BIGINT), storage '
@@ -597,12 +610,15 @@ def find_findings(log_dir: Path) -> list:
             objects=[], object_columns=[], object_label='',
         ))
 
-    # 2. Apply content rules
+    # 2. Apply content rules. Read each .log at most once.
+    log_text_cache: dict = {}
     for log in sorted(log_dir.glob('*.log')):
         for rule in RULES:
-            if rule['script'] not in log.stem:
+            if not script_matches_log(rule['script'], log.stem):
                 continue
-            text = read_log_text(log)
+            if log not in log_text_cache:
+                log_text_cache[log] = read_log_text(log)
+            text = log_text_cache[log]
             if not text:
                 continue
             hit = False
@@ -623,8 +639,9 @@ def find_findings(log_dir: Path) -> list:
                 try:
                     if rule['check'](text):
                         hit = True
-                except Exception:
-                    pass
+                except Exception as e:
+                    print(f'[warn] check predicate failed on {log.name}: {e}',
+                          file=sys.stderr)
             if not hit:
                 continue
             objs: list = []
@@ -635,7 +652,9 @@ def find_findings(log_dir: Path) -> list:
             if extractor:
                 try:
                     out = extractor(text)
-                except Exception:
+                except Exception as e:
+                    print(f'[warn] extractor {extractor.__name__} failed on '
+                          f'{log.name}: {e}', file=sys.stderr)
                     out = []
                 # Detect whether the extractor returned a list of groups
                 # ({label, columns, rows}, ...) or a flat list of rows.
@@ -968,6 +987,13 @@ def main() -> int:
         return 3
 
     target = read_target(report_dir)
+    if not target:
+        # Multi-context aggregate runs have _summary.txt per sub-folder,
+        # not at the root. Use the first context's target as a header.
+        for c in contexts:
+            target = read_target(c['log_dir'])
+            if target:
+                break
 
     report = []
     fingerprint = {}

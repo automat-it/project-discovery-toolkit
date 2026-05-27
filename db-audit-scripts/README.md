@@ -30,7 +30,6 @@ db-audit-scripts/
 │   ├── perf/{run_audit.sh, analyze_report.py, critical/, high/, medium/, low/}
 │   └── sec/{run_audit.sh, analyze_report.py, critical/, high/, medium/, low/}
 ├── mysql/
-│   ├── _sandbox_fixture.sql     ← seed a test fixture for the audit sandbox
 │   ├── perf/{run_audit.sh, analyze_report.py, critical/, high/, medium/, low/}
 │   └── sec/{run_audit.sh, analyze_report.py, critical/, high/, medium/, low/}
 ├── mssql/

@@ -170,9 +170,6 @@ All scripts are read-only and do not create temporary tables.
 ```
 mysql/
   _analyze_lib.py            ← shared parser / fingerprint / HTML helpers
-  _sandbox_fixture.sql       ← reusable test fixture (users, PII, dup idx,
-                                SECURITY DEFINER routines, etc.) — useful
-                                to spin up a demo / sanity-check env
   perf/
     run_audit.sh             ← Bash runner for the perf category
     analyze_report.py        ← builds perf_analysis.html (+ PDF if Chrome)

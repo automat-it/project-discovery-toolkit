@@ -26,6 +26,8 @@ same control regardless of engine.
 
 ```
 db-audit-scripts/
+├── assets/                      ← brand assets (cover + watermark PNGs)
+│                                  shared by every engine analyzer
 ├── postgres/
 │   ├── perf/{run_audit.sh, analyze_report.py, critical/, high/, medium/, low/}
 │   └── sec/{run_audit.sh, analyze_report.py, critical/, high/, medium/, low/}
@@ -36,16 +38,15 @@ db-audit-scripts/
 │   ├── run_audit.ps1            ← runs all scripts on a single database
 │   ├── run_all_databases.ps1    ← runs across every user database
 │   ├── perf/{analyze_report.ps1, critical/, high/, medium/, low/}
-│   ├── sec/{analyze_report.ps1,  critical/, high/, medium/, low/}
-│   └── assets/                  ← cover / watermark images for PDF reports
+│   └── sec/{analyze_report.ps1,  critical/, high/, medium/, low/}
 └── tools/
     └── aggregate_report.py      ← roll multiple engine runs into one report
 ```
 
 Every engine has a runner + analyzer pair. Runners produce one `.log` per
 script in a timestamped `reports/<engine>_<cat>_<TS>/` folder; analyzers
-turn that folder into an HTML report (and optionally PDF via headless
-Chrome).
+turn that folder into a branded HTML report (and optionally PDF via
+headless Chrome).
 
 ## Quick start
 
@@ -69,9 +70,11 @@ export PGPASSWORD='<your-password>'
 bash perf/run_audit.sh -u <user> -h <host> -p 5432 -d <database> -o ./reports
 bash sec/run_audit.sh  -u <user> -h <host> -p 5432 -d <database> -o ./reports
 
-# Build the HTML report
-python3 perf/analyze_report.py ./reports/postgres_perf_<TS> --server <label>
-python3 sec/analyze_report.py  ./reports/postgres_sec_<TS>  --server <label>
+# Build the branded HTML report (cover + watermark from ../assets/)
+python3 perf/analyze_report.py ./reports/postgres_perf_<TS> \
+        --server <label> --customer "<Optional Customer>"
+python3 sec/analyze_report.py  ./reports/postgres_sec_<TS> \
+        --server <label> --customer "<Optional Customer>"
 ```
 
 #### MySQL
@@ -83,8 +86,10 @@ export MYSQL_PWD='<your-password>'
 bash perf/run_audit.sh -u <user> -h <host> -P 3306 -d <database> -o ./reports
 bash sec/run_audit.sh  -u <user> -h <host> -P 3306 -d <database> -o ./reports
 
-python3 perf/analyze_report.py ./reports/mysql_perf_<TS> --server <label>
-python3 sec/analyze_report.py  ./reports/mysql_sec_<TS>  --server <label>
+python3 perf/analyze_report.py ./reports/mysql_perf_<TS> \
+        --server <label> --customer "<Optional Customer>"
+python3 sec/analyze_report.py  ./reports/mysql_sec_<TS> \
+        --server <label> --customer "<Optional Customer>"
 ```
 
 #### SQL Server
@@ -108,8 +113,10 @@ multi-database runs, and PDF generation details.
 
 ### Step 3 — Render to PDF (optional)
 
-The Python analyzers emit a self-contained HTML report. To produce a
-PDF, pipe it through headless Chrome:
+The Python analyzers emit a self-contained HTML report **and copy the
+brand PNGs next to it** (`ait_bg_cover.png`, `ait_bg_page.png`). To
+produce a PDF, pipe the HTML through headless Chrome from the same
+folder so the relative image references resolve:
 
 ```bash
 "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome" \
@@ -118,8 +125,27 @@ PDF, pipe it through headless Chrome:
   "file://$(pwd)/reports/<run>/perf_analysis.html"
 ```
 
-The SQL Server analyzer renders PDF natively (uses Edge WebView2 +
-branded assets).
+The SQL Server analyzer renders PDF natively (Edge / Chromium head-
+less driven from PowerShell). Both engines share the same cover-page +
+watermark layout sourced from `db-audit-scripts/assets/`.
+
+## Report structure
+
+Every PDF/HTML report — regardless of engine — follows the same outline:
+
+1. **Cover page** — title, server label, optional customer, generation
+   timestamp; branded background.
+2. **Environment Fingerprint** — host, database, version, role, AWS-
+   managed flag, time zone, key tuning variables.
+3. **1. Executive Summary** — five KPI cards (databases analyzed /
+   critical / warning / info / failed), a severity-mix donut chart, a
+   "Findings by Domain" bar chart, and a "Top issues — what to fix"
+   block linking to the detailed finding rows.
+4. **2. Findings** — one card per finding with severity badge, "Action"
+   recommendation, concrete-objects sub-tables, "How to fix" code
+   snippets, and "Further reading" doc links.
+5. **3. SQL Appendix** (perf only) — full digest text per `queryid`,
+   anchored from the Top SQL tables.
 
 ## Conventions
 

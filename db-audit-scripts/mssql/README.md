@@ -110,17 +110,19 @@ just emit `[note] insufficient privilege` lines.
 ### Folder layout
 
 ```
-mssql\
-  run_audit.ps1              ← single database
-  run_all_databases.ps1      ← every user database
-  _analyze_lib.ps1           ← shared library for the PDF analyzers
-  assets\                    ← cover and watermark images
-  perf\
-    analyze_report.ps1       ← builds perf_analysis.pdf
-    critical\, high\, medium\, low\   ← the .sql scripts
-  sec\
-    analyze_report.ps1       ← builds sec_analysis.pdf
-    critical\, high\, medium\, low\   ← the .sql scripts
+db-audit-scripts\
+  assets\                      ← cover + watermark images shared by ALL
+                                 engine analyzers (postgres, mysql, mssql)
+  mssql\
+    run_audit.ps1              ← single database
+    run_all_databases.ps1      ← every user database
+    _analyze_lib.ps1           ← shared library for the PDF analyzers
+    perf\
+      analyze_report.ps1       ← builds perf_analysis.pdf
+      critical\, high\, medium\, low\   ← the .sql scripts
+    sec\
+      analyze_report.ps1       ← builds sec_analysis.pdf
+      critical\, high\, medium\, low\   ← the .sql scripts
 ```
 
 ### Common scenarios
@@ -265,11 +267,12 @@ prints non-fatal warnings to stderr.
 
 ### Brand assets
 
-`mssql\assets\ait_bg_cover.png` is the cover-page background and
-`mssql\assets\ait_bg_page.png` is the watermark on every content page.
-The analyzer copies both files next to the HTML before rendering so
-relative `url('ait_bg_*.png')` references in CSS resolve. **Replace
-these two PNGs in place to rebrand without editing PowerShell.**
+`db-audit-scripts\assets\ait_bg_cover.png` is the cover-page background
+and `db-audit-scripts\assets\ait_bg_page.png` is the watermark on every
+content page. The analyzer copies both files next to the HTML before
+rendering so relative `url('ait_bg_*.png')` references in CSS resolve.
+**Replace these two PNGs in place to rebrand all three engines at
+once (the postgres / mysql Python analyzers read from the same path).**
 
 ### Layout grouping
 

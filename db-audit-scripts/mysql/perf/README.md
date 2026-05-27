@@ -74,6 +74,11 @@ The analyzer is pure Python standard library (no `pip install` step).
 
 ### What the HTML report contains
 
+* **Branded cover page** -- Automat-IT background (`ait_bg_cover.png`),
+  report title, server label, optional customer subtitle, generation
+  timestamp. Same `ait_bg_page.png` watermark appears on every inner
+  page when rendered as PDF.
+
 * **Environment Fingerprint card** -- host, database, MySQL version,
   AWS-managed flag (RDS / Aurora), server role (primary writeable vs
   replica), max_connections, innodb_buffer_pool, time zone, character
@@ -84,15 +89,17 @@ The analyzer is pure Python standard library (no `pip install` step).
 * **Quick-nav strip** with anchor links: Environment, Executive
   Summary, Findings, SQL Appendix. Hidden in print.
 
-* **Executive Summary**
-  - Five KPI cards (Databases analysed, Scripts OK, Failed scripts,
-    Critical findings, Warnings) -- crit / warn / fail cards turn red /
-    orange when non-zero.
+* **1. Executive Summary**
+  - Five large KPI cards: Databases analyzed, Critical, Warning, Info,
+    Failed scripts.
+  - Severity-mix **donut chart** with legend (Critical / Warning / Info).
+  - **Findings by Domain** horizontal bar chart -- groups perf findings
+    by area (Top SQL, Blocking, Indexes, Waits & I/O, ...).
   - **Top issues -- what to fix**: highest-priority findings as an
     ordered list with severity badge + action line + anchor link to
     the detailed finding card. Capped at 10.
 
-* **Findings** -- one card per finding. Each card:
+* **2. Findings** -- one card per finding. Each card:
   - severity colour bar (red / orange / blue)
   - title + script reference
   - boxed "Action:" recommendation
@@ -118,7 +125,7 @@ The analyzer is pure Python standard library (no `pip install` step).
   | `perf_15` Capacity (AUTO_INCREMENT, conns)    | objects above 50% consumption |
   | `perf_21` Partitions                          | per-partition row count and size |
 
-* **SQL Appendix** -- one entry per unique
+* **3. SQL Appendix** -- one entry per unique
   `events_statements_summary_by_digest` queryid surfaced in Top SQL,
   with the **full** digest text in a `<pre>` block. A collapsible
   jump-to index at the top lists every queryid with a one-line

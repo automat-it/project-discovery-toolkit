@@ -22,11 +22,12 @@ MYSQL_PWD=secret ./perf/run_audit.sh \
 MYSQL_PWD=secret ./sec/run_audit.sh \
     -h db.internal -P 3306 -u auditor -d prod
 
-# 3. Build the HTML report (always produced; PDF if headless Chrome / Edge present)
+# 3. Build the branded HTML report. --customer is optional and just
+#    drives the subtitle on the cover page.
 python3 ./perf/analyze_report.py ./reports/mysql_perf_<TIMESTAMP> \
-        --server db.internal
+        --server db.internal --customer "Acme"
 python3 ./sec/analyze_report.py  ./reports/mysql_sec_<TIMESTAMP> \
-        --server db.internal
+        --server db.internal --customer "Acme"
 
 # 4. (Optional) render to PDF
 google-chrome --headless --disable-gpu --no-pdf-header-footer \
@@ -40,17 +41,22 @@ google-chrome --headless --disable-gpu --no-pdf-header-footer \
 
 The HTML report contains, top-to-bottom:
 
+* **Branded cover page** — the Automat-IT background (`ait_bg_cover.png`)
+  with title, server label, optional `--customer` subtitle, and
+  generation timestamp. The same `ait_bg_page.png` watermark renders on
+  every subsequent page in the PDF.
 * **Environment Fingerprint** — host, database, MySQL version,
   AWS-managed flag (RDS / Aurora), server role (primary writeable vs
   read-only replica), max_connections, innodb_buffer_pool, time zone,
   character set, `performance_schema` / `log_bin` / `gtid_mode` state.
   Populated from a single-row header that `perf_05` / `sec_21` emit
   specifically for the analyzer.
-* **Executive Summary** — KPI cards (databases analysed, scripts
-  OK/Failed, Critical / Warning counts) colour-tinted by severity, plus
-  a **Top issues — what to fix** block listing the highest-priority
-  findings as anchor links straight to their detail cards.
-* **Findings** — one card per finding with severity colour bar,
+* **1. Executive Summary** — five large KPI cards (Databases analyzed /
+  Critical / Warning / Info / Failed), a severity-mix **donut chart**,
+  a **"Findings by Domain"** horizontal bar chart, and a **Top issues —
+  what to fix** block listing the highest-priority findings as anchor
+  links straight to their detail cards.
+* **2. Findings** — one card per finding with severity colour bar,
   recommendation, a curated table of **concrete objects** flagged
   (table / index / digest queryid / user / column / routine), a
   **"How to fix — starter commands"** code block with copy-pastable SQL
@@ -59,13 +65,15 @@ The HTML report contains, top-to-bottom:
   capped at 10 rows with `... +N more rows -- consult the raw .log
   file` so the reader gets the actionable set without being drowned in
   noise.
-* **SQL Appendix** (perf only) — full `performance_schema` digest text
-  per unique queryid, indexed by a collapsible jump-to list. Top SQL
-  queryid cells link straight to the corresponding appendix entry.
+* **3. SQL Appendix** (perf only) — full `performance_schema` digest
+  text per unique queryid, indexed by a collapsible jump-to list. Top
+  SQL queryid cells link straight to the corresponding appendix entry.
 
 The analyzer is **standard library only** — no Python packages required.
 PDF rendering uses headless Chrome / Edge if available; HTML remains
-the primary, always-emitted output.
+the primary, always-emitted output. The two brand PNGs are copied next
+to the rendered HTML automatically (sourced from
+`db-audit-scripts/assets/`).
 
 ## Authentication notes
 

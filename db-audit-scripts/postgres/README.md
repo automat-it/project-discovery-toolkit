@@ -23,11 +23,12 @@ PGPASSWORD=secret ./perf/run_audit.sh \
 PGPASSWORD=secret ./sec/run_audit.sh \
     -h db.internal -P 5432 -U auditor -d prod
 
-# 3. Build the report (HTML; PDF if headless Chrome / Edge is installed)
+# 3. Build the branded HTML report. --customer is optional and just
+#    drives the subtitle on the cover page.
 python3 ./perf/analyze_report.py ./reports/postgres_perf_<TIMESTAMP> \
-        --server db.internal
+        --server db.internal --customer "Acme"
 python3 ./sec/analyze_report.py  ./reports/postgres_sec_<TIMESTAMP> \
-        --server db.internal
+        --server db.internal --customer "Acme"
 
 # 4. (Optional) render the HTML to PDF
 google-chrome --headless --disable-gpu --no-pdf-header-footer \
@@ -42,15 +43,20 @@ google-chrome --headless --disable-gpu --no-pdf-header-footer \
 
 The HTML report contains, top-to-bottom:
 
+* **Branded cover page** — the Automat-IT background (`ait_bg_cover.png`)
+  with title, server label, optional `--customer` subtitle, and
+  generation timestamp. The same `ait_bg_page.png` watermark renders on
+  every subsequent page in the PDF.
 * **Environment Fingerprint** — host, database, PostgreSQL version,
   Aurora / RDS flag, uptime, this DB size, shared_buffers,
   max_connections, wal_level. Populated from a single-row header that
   `perf_05` / `sec_21` emit specifically for the analyzer.
-* **Executive Summary** — KPI cards (databases analysed, scripts
-  OK/Failed, Critical / Warning counts) colour-tinted by severity, plus
-  a **Top issues — what to fix** block listing the highest-priority
-  findings as anchor links straight to their detail cards.
-* **Findings** — one card per finding with severity colour bar,
+* **1. Executive Summary** — five large KPI cards (Databases analyzed /
+  Critical / Warning / Info / Failed), a severity-mix **donut chart**,
+  a **"Findings by Domain"** horizontal bar chart, and a **Top issues —
+  what to fix** block listing the highest-priority findings as anchor
+  links straight to their detail cards.
+* **2. Findings** — one card per finding with severity colour bar,
   recommendation, a curated table of **concrete objects** flagged
   (table / index / queryid / role / cert / ...), a **"How to fix —
   starter commands"** code block with copy-pastable SQL / `aws rds`
@@ -59,13 +65,15 @@ The HTML report contains, top-to-bottom:
   are capped at 10 rows with `... +N more rows -- consult the raw
   .log file` so the reader gets the actionable set without being
   drowned in noise.
-* **SQL Appendix** (perf only) — full pg_stat_statements query text per
-  unique queryid, indexed by a collapsible jump-to list. Top SQL
+* **3. SQL Appendix** (perf only) — full pg_stat_statements query text
+  per unique queryid, indexed by a collapsible jump-to list. Top SQL
   queryid cells link straight to the corresponding appendix entry.
 
 The analyzer uses **standard library only** — no Python packages
 required. PDF rendering uses headless Chrome / Edge if available; HTML
-remains the primary, always-emitted output.
+remains the primary, always-emitted output. The two brand PNGs are
+copied next to the rendered HTML automatically (sourced from
+`db-audit-scripts/assets/`).
 
 ## Target version
 

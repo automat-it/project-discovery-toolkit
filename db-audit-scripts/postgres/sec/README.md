@@ -51,6 +51,11 @@ Standard Python library only -- no `pip install` step.
 
 ### What the HTML report contains
 
+* **Branded cover page** -- Automat-IT background (`ait_bg_cover.png`),
+  report title, server label, optional customer subtitle, generation
+  timestamp. Same `ait_bg_page.png` watermark appears on every inner
+  page when rendered as PDF.
+
 * **Environment Fingerprint card** -- host, database, PostgreSQL
   version, Aurora / RDS flag, primary / replica role, uptime, SSL
   enabled, password_encryption, user databases. Populated from a
@@ -59,17 +64,20 @@ Standard Python library only -- no `pip install` step.
 * **Quick-nav strip** with anchor links: Environment, Executive
   Summary, Findings. Hidden in print.
 
-* **Executive Summary**
-  - Five KPI cards (Databases analysed, Scripts OK, Failed scripts,
-    Critical findings, Warnings) -- crit / warn / fail cards turn red /
-    orange when non-zero.
+* **1. Executive Summary**
+  - Five large KPI cards: Databases analyzed, Critical, Warning, Info,
+    Failed scripts.
+  - Severity-mix **donut chart** with legend (Critical / Warning / Info).
+  - **Findings by Domain** horizontal bar chart -- groups security
+    findings by area (Identity & access, Authentication, Encryption,
+    Audit & logging, Sensitive data (PII), Dangerous objects, ...).
   - **Top issues -- what to fix**: the highest-priority findings as an
     ordered list with severity badge + action line + anchor link to
     the detailed finding card. Capped at 10.
   - **Context rollup** table (only when more than one database was
     audited).
 
-* **Findings** -- one card per finding (not a giant 4-column table).
+* **2. Findings** -- one card per finding (not a giant 4-column table).
   Each card carries severity colour bar, boxed "Action:"
   recommendation, curated **concrete-objects** sub-tables, a
   **"How to fix -- starter commands"** code block with copy-pastable

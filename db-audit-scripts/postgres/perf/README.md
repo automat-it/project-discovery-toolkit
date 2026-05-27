@@ -51,6 +51,11 @@ The analyzer is pure Python standard library (no `pip install` step).
 
 ### What the HTML report contains
 
+* **Branded cover page** -- Automat-IT background (`ait_bg_cover.png`),
+  report title, server label, optional customer subtitle, generation
+  timestamp. Same `ait_bg_page.png` watermark appears on every inner
+  page when rendered as PDF.
+
 * **Environment Fingerprint card** -- host, database, PostgreSQL
   version, Aurora / RDS flag, primary / replica role, uptime, this
   DB's size, shared_buffers, max_connections, wal_level. Populated
@@ -60,10 +65,12 @@ The analyzer is pure Python standard library (no `pip install` step).
 * **Quick-nav strip** with anchor links: Environment, Executive
   Summary, Findings, SQL Appendix. Hidden in print.
 
-* **Executive Summary**
-  - Five KPI cards (Databases analysed, Scripts OK, Failed scripts,
-    Critical findings, Warnings) -- crit / warn / fail cards turn red /
-    orange when non-zero so the at-a-glance status is unambiguous.
+* **1. Executive Summary**
+  - Five large KPI cards: Databases analyzed, Critical, Warning, Info,
+    Failed scripts.
+  - Severity-mix **donut chart** with legend (Critical / Warning / Info).
+  - **Findings by Domain** horizontal bar chart -- groups perf findings
+    by area (Top SQL, Blocking, Indexes, Waits & I/O, ...).
   - **Top issues -- what to fix**: the highest-priority findings as an
     ordered list with severity badge + action line + anchor link to
     the detailed finding card. Capped at 10; the rest are still in the
@@ -71,7 +78,7 @@ The analyzer is pure Python standard library (no `pip install` step).
   - **Context rollup** table (only when more than one database was
     audited; redundant for single-DB runs).
 
-* **Findings** -- one card per finding (not a giant 4-column table any
+* **2. Findings** -- one card per finding (not a giant 4-column table any
   more). Each card:
   - severity colour bar (red / orange / blue)
   - title + script reference
@@ -99,7 +106,7 @@ The analyzer is pure Python standard library (no `pip install` step).
   | `perf_14` Forced checkpoints         | num_timed vs num_requested, write/sync time |
   | `perf_15` Capacity headroom          | sequences / storage > 50% consumed       |
 
-* **SQL Appendix** -- one entry per unique pg_stat_statements queryid
+* **3. SQL Appendix** -- one entry per unique pg_stat_statements queryid
   surfaced in Top SQL, with the **full** untruncated query text in a
   `<pre>` block. A collapsible jump-to index at the top lists every
   queryid with a one-line preview. queryid cells in the Top SQL

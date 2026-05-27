@@ -91,10 +91,12 @@ is already running on the machine.
 
 ### Brand assets
 
-`..\assets\ait_bg_cover.png` is the cover-page background;
-`..\assets\ait_bg_page.png` is the per-page watermark. The analyzer
-copies both files next to the HTML before rendering. Replace these
-files in place to rebrand without editing PowerShell.
+`..\..\assets\ait_bg_cover.png` is the cover-page background;
+`..\..\assets\ait_bg_page.png` is the per-page watermark. Both files
+live at `db-audit-scripts\assets\` (shared with the postgres / mysql
+Python analyzers). The PowerShell analyzer copies them next to the
+HTML before rendering. Replace the two PNGs in place to rebrand all
+three engines at once without editing any code.
 
 Output layout:
 

@@ -544,7 +544,17 @@ th{background:#eaf0f6;font-weight:600;color:#1F497D;}
 @media print{
     .quick-nav, .back-top{display:none;}
     section#sql-appendix{page-break-before:always;}
-    .finding{page-break-inside:avoid;}
+    /* Do NOT avoid breaking inside a whole finding card: a tall card (big
+       result table) would otherwise jump entirely to the next page and
+       leave a large blank gap under the section header. Instead let the
+       card flow across pages and only keep small atomic pieces together. */
+    .section{page-break-inside:avoid;break-inside:avoid;}
+    .section h2{page-break-after:avoid;break-after:avoid;}
+    .finding-head{page-break-inside:avoid;break-inside:avoid;page-break-after:avoid;break-after:avoid;}
+    .finding-rec{page-break-inside:avoid;break-inside:avoid;}
+    .objs-caption{page-break-after:avoid;break-after:avoid;}
+    table.objs thead{display:table-header-group;}
+    table.objs tr{page-break-inside:avoid;break-inside:avoid;}
 }
 dl.fp{display:grid;grid-template-columns:max-content 1fr;gap:4px 14px;font-size:0.95em;margin:0;}
 dl.fp dt{font-weight:600;color:#444;}
@@ -573,7 +583,7 @@ table.objs td.wrap{overflow-wrap:anywhere;word-break:break-word;
 /* ===== Finding card (replaces the old 4-column findings table) ====== */
 .finding{background:white;border-radius:6px;padding:14px 18px;
     margin:14px 0;box-shadow:0 1px 3px rgba(0,0,0,0.07);
-    border-left:5px solid #999;page-break-inside:avoid;}
+    border-left:5px solid #999;}
 .finding.sev-critical{border-left-color:#c0392b;}
 .finding.sev-warning {border-left-color:#e67e22;}
 .finding.sev-info    {border-left-color:#2980b9;}

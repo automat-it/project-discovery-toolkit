@@ -426,8 +426,16 @@ h4{font-size:11pt;margin:10px 0 4px;color:#444}
 .cover .sub{font-size:13pt;color:#333;margin:0 0 4px;font-weight:500}
 .cover .meta{font-size:11pt;color:#444;margin:0 0 6px}
 .cover .date{font-size:11pt;color:#666;margin-top:8px}
-section{padding:20px 24px;page-break-inside:avoid;background:transparent}
+/* Do NOT avoid breaking inside a whole section: a tall section (long
+   findings table) would otherwise jump entirely to the next page and
+   leave a large blank gap under the heading. Let the section flow and
+   only keep small atomic pieces together (rows, headings, kpi cards). */
+section{padding:20px 24px;background:transparent}
 section.firstaftercov{page-break-before:always}
+h2,h3,h4{page-break-after:avoid;break-after:avoid}
+thead{display:table-header-group}
+tr{page-break-inside:avoid;break-inside:avoid}
+.exec,.kpi,.fp,.roadmap-phase,.glossary{page-break-inside:avoid;break-inside:avoid}
 table{border-collapse:collapse;width:100%;font-size:9.5pt;background:rgba(255,255,255,0.92)}
 th,td{padding:6px 8px;border-bottom:1px solid #e0e0e0;text-align:left;vertical-align:top}
 th{background:#eef5e3;font-weight:600;color:#1F497D}

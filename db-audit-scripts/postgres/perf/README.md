@@ -43,8 +43,8 @@ HTML report:
 
 # Render to PDF (optional -- HTML is always produced)
 google-chrome --headless --disable-gpu --no-pdf-header-footer \
-    --print-to-pdf=perf_analysis.pdf \
-    "file://$(pwd)/reports/postgres_perf_YYYYMMDD_HHMMSS/perf_analysis.html"
+    --print-to-pdf=postgres_perf_analysis.pdf \
+    "file://$(pwd)/reports/postgres_perf_YYYYMMDD_HHMMSS/postgres_perf_analysis.html"
 ```
 
 The analyzer is pure Python standard library (no `pip install` step).

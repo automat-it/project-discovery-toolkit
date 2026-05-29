@@ -51,7 +51,7 @@ single multi-page **PDF report** covering every database in the run:
 ```powershell
 cd db-audit-scripts\mssql
 
-# Default: produces perf_analysis.pdf inside the report folder
+# Default: produces mssql_perf_analysis.pdf inside the report folder
 .\perf\analyze_report.ps1 -ReportDir "C:\reports\mssql_audit_all_YYYYMMDD_HHMMSS" `
                           -ServerName "sql-server.internal" -Customer "ACME Corp"
 

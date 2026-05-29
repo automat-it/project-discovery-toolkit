@@ -121,8 +121,8 @@ folder so the relative image references resolve:
 ```bash
 "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome" \
   --headless --disable-gpu --no-pdf-header-footer \
-  --print-to-pdf="./reports/<run>/perf_analysis.pdf" \
-  "file://$(pwd)/reports/<run>/perf_analysis.html"
+  --print-to-pdf="./reports/<run>/<engine>_perf_analysis.pdf" \
+  "file://$(pwd)/reports/<run>/<engine>_perf_analysis.html"
 ```
 
 The SQL Server analyzer renders PDF natively (Edge / Chromium head-

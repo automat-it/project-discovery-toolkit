@@ -16,7 +16,7 @@
       - Per-database appendix
       - Glossary
 
-    Default output: <ReportDir>\sec_analysis.pdf (with .html intermediate).
+    Default output: <ReportDir>\mssql_sec_analysis.pdf (with .html intermediate).
 #>
 
 [CmdletBinding()]
@@ -50,7 +50,7 @@ if (-not (Test-Path $ReportDir)) { Write-Error "Report directory not found: $Rep
 $ReportDir = (Resolve-Path -LiteralPath $ReportDir).Path
 if (-not $OutFile) {
     $ext = if ($NoPdf) { 'html' } else { 'pdf' }
-    $OutFile = Join-Path $ReportDir "sec_analysis.$ext"
+    $OutFile = Join-Path $ReportDir "mssql_sec_analysis.$ext"
 }
 $HtmlPath = if ($OutFile -like '*.html') { $OutFile } else { [System.IO.Path]::ChangeExtension($OutFile, 'html') }
 

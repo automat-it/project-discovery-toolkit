@@ -53,7 +53,7 @@ single multi-page **PDF report** covering every database in the run:
 ```powershell
 cd db-audit-scripts\mssql
 
-# Default: produces sec_analysis.pdf inside the report folder
+# Default: produces mssql_sec_analysis.pdf inside the report folder
 .\sec\analyze_report.ps1 -ReportDir "C:\reports\mssql_audit_all_YYYYMMDD_HHMMSS" `
                          -ServerName "sql-server.internal" -Customer "ACME Corp"
 

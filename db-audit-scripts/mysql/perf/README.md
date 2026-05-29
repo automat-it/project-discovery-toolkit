@@ -66,8 +66,8 @@ After a run completes, parse the report folder into an HTML report:
 
 # Render to PDF (optional -- HTML is always produced)
 google-chrome --headless --disable-gpu --no-pdf-header-footer \
-    --print-to-pdf=perf_analysis.pdf \
-    "file://$(pwd)/reports/mysql_perf_YYYYMMDD_HHMMSS/perf_analysis.html"
+    --print-to-pdf=mysql_perf_analysis.pdf \
+    "file://$(pwd)/reports/mysql_perf_YYYYMMDD_HHMMSS/mysql_perf_analysis.html"
 ```
 
 The analyzer is pure Python standard library (no `pip install` step).

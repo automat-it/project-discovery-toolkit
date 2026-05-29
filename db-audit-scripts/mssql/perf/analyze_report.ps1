@@ -16,7 +16,7 @@
       - Per-database appendix
       - Glossary of wait types and DMV terms
 
-    Default output: <ReportDir>\perf_analysis.pdf (with .html intermediate).
+    Default output: <ReportDir>\mssql_perf_analysis.pdf (with .html intermediate).
 
 .PARAMETER ReportDir
     Folder produced by run_audit.ps1 / run_all_databases.ps1.
@@ -28,7 +28,7 @@
     Customer name printed on the cover. Optional.
 
 .PARAMETER OutFile
-    Output path. Default: <ReportDir>\perf_analysis.pdf.
+    Output path. Default: <ReportDir>\mssql_perf_analysis.pdf.
 
 .PARAMETER NoPdf
     Skip PDF conversion -- produce HTML only.
@@ -74,7 +74,7 @@ if (-not (Test-Path $ReportDir)) { Write-Error "Report directory not found: $Rep
 $ReportDir = (Resolve-Path -LiteralPath $ReportDir).Path
 if (-not $OutFile) {
     $ext = if ($NoPdf) { 'html' } else { 'pdf' }
-    $OutFile = Join-Path $ReportDir "perf_analysis.$ext"
+    $OutFile = Join-Path $ReportDir "mssql_perf_analysis.$ext"
 }
 $HtmlPath = if ($OutFile -like '*.html') { $OutFile } else { [System.IO.Path]::ChangeExtension($OutFile, 'html') }
 

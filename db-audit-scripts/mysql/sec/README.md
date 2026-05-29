@@ -52,8 +52,8 @@ After a run completes, parse the report folder into an HTML report:
 
 # Render to PDF (optional -- HTML is always produced)
 google-chrome --headless --disable-gpu --no-pdf-header-footer \
-    --print-to-pdf=sec_analysis.pdf \
-    "file://$(pwd)/reports/mysql_sec_YYYYMMDD_HHMMSS/sec_analysis.html"
+    --print-to-pdf=mysql_sec_analysis.pdf \
+    "file://$(pwd)/reports/mysql_sec_YYYYMMDD_HHMMSS/mysql_sec_analysis.html"
 ```
 
 Standard Python library only -- no `pip install` step.

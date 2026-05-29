@@ -989,7 +989,7 @@ def main() -> int:
     ap.add_argument('report_dir', help='Folder produced by run_audit.sh / run_all_databases.sh')
     ap.add_argument('--server',   default='', help='Server label printed on the cover')
     ap.add_argument('--customer', default='', help='Customer / project name printed on the cover (optional)')
-    ap.add_argument('--out',      default='', help='Output HTML path (default: <report_dir>/perf_analysis.html)')
+    ap.add_argument('--out',      default='', help='Output HTML path (default: <report_dir>/mysql_perf_analysis.html)')
     args = ap.parse_args()
 
     report_dir = Path(args.report_dir).resolve()
@@ -997,7 +997,7 @@ def main() -> int:
         print(f'ERROR: report directory not found: {report_dir}', file=sys.stderr)
         return 2
 
-    out = Path(args.out) if args.out else (report_dir / 'perf_analysis.html')
+    out = Path(args.out) if args.out else (report_dir / 'mysql_perf_analysis.html')
 
     contexts = discover_contexts(report_dir)
     if not contexts:

@@ -35,7 +35,7 @@ cd db-audit-scripts\mssql
 `<TIMESTAMP>` is replaced by the runner — look in `.\reports\` for the
 folder it just created.
 
-You'll find `perf_analysis.pdf` and `sec_analysis.pdf` inside the
+You'll find `mssql_perf_analysis.pdf` and `mssql_sec_analysis.pdf` inside the
 report folder. Open and share.
 
 ---
@@ -118,10 +118,10 @@ db-audit-scripts\
     run_all_databases.ps1      ← every user database
     _analyze_lib.ps1           ← shared library for the PDF analyzers
     perf\
-      analyze_report.ps1       ← builds perf_analysis.pdf
+      analyze_report.ps1       ← builds mssql_perf_analysis.pdf
       critical\, high\, medium\, low\   ← the .sql scripts
     sec\
-      analyze_report.ps1       ← builds sec_analysis.pdf
+      analyze_report.ps1       ← builds mssql_sec_analysis.pdf
       critical\, high\, medium\, low\   ← the .sql scripts
 ```
 

@@ -43,8 +43,8 @@ HTML report:
 
 # Render to PDF (optional -- HTML is always produced)
 google-chrome --headless --disable-gpu --no-pdf-header-footer \
-    --print-to-pdf=sec_analysis.pdf \
-    "file://$(pwd)/reports/postgres_sec_YYYYMMDD_HHMMSS/sec_analysis.html"
+    --print-to-pdf=postgres_sec_analysis.pdf \
+    "file://$(pwd)/reports/postgres_sec_YYYYMMDD_HHMMSS/postgres_sec_analysis.html"
 ```
 
 Standard Python library only -- no `pip install` step.

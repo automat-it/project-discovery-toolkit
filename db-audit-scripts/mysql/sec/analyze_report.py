@@ -946,7 +946,7 @@ def main() -> int:
     if not report_dir.is_dir():
         print(f'ERROR: report directory not found: {report_dir}', file=sys.stderr)
         return 2
-    out = Path(args.out) if args.out else (report_dir / 'sec_analysis.html')
+    out = Path(args.out) if args.out else (report_dir / 'mysql_sec_analysis.html')
 
     contexts = discover_contexts(report_dir)
     if not contexts:

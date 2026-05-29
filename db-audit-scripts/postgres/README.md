@@ -32,8 +32,8 @@ python3 ./sec/analyze_report.py  ./reports/postgres_sec_<TIMESTAMP> \
 
 # 4. (Optional) render the HTML to PDF
 google-chrome --headless --disable-gpu --no-pdf-header-footer \
-    --print-to-pdf=perf_analysis.pdf \
-    "file://$(pwd)/reports/postgres_perf_<TIMESTAMP>/perf_analysis.html"
+    --print-to-pdf=postgres_perf_analysis.pdf \
+    "file://$(pwd)/reports/postgres_perf_<TIMESTAMP>/postgres_perf_analysis.html"
 ```
 
 `<TIMESTAMP>` is the folder created by the runner — look in
@@ -180,7 +180,7 @@ postgres/
   _analyze_lib.py            ← shared parser / fingerprint / HTML helpers
   perf/
     run_audit.sh             ← Bash runner for the perf category
-    analyze_report.py        ← builds perf_analysis.html (+ PDF if Chrome)
+    analyze_report.py        ← builds postgres_perf_analysis.html (+ PDF if Chrome)
     {critical,high,medium,low}/   ← the .sql scripts
   sec/
     run_audit.sh

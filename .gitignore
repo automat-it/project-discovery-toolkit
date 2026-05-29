@@ -1,6 +1,9 @@
 # macOS
 .DS_Store
-.claude
+
+# Claude Code: track shared .claude/settings.json, ignore local overrides
+.claude/settings.local.json
+.claude/*.local.json
 
 # Logs
 *.log

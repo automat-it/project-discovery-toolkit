@@ -1,0 +1,25 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(psql:*)",
+      "Bash(mysql:*)",
+      "Bash(sqlcmd:*)",
+      "Bash(export PGPASSWORD=:*)",
+      "Bash(export MYSQL_PWD=:*)",
+      "Bash(bash db-audit-scripts/*)",
+      "Bash(python3 db-audit-scripts/*)",
+      "Bash(pdfinfo:*)",
+      "Bash(pdftoppm:*)",
+      "Bash(pdftotext:*)",
+      "Bash(git status:*)",
+      "Bash(git diff:*)",
+      "Bash(git log:*)"
+    ],
+    "deny": [
+      "Read(./.env)",
+      "Read(./**/*.pem)",
+      "Read(./**/*.key)",
+      "Read(./.claude/settings.local.json)"
+    ]
+  }
+}

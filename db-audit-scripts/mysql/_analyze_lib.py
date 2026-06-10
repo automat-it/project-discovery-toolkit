@@ -722,7 +722,7 @@ def render_fingerprint_card(fp: Dict[str, str],
         ('performance_schema',    _onoff(fp.get('performance_schema'))),
         ('log_bin',               _onoff(fp.get('log_bin'))),
         ('gtid_mode',             fp.get('gtid_mode') or '(unknown)'),
-        ('Report folder',         str(report_dir)),
+        ('Report folder',         Path(report_dir).name),
     ]
     rows = [(k, v) for k, v in rows if v not in (None, '', '(unknown)')] or rows
     return f"<div class='card'><h2 style='margin-top:0;border:none;'>Environment Fingerprint</h2>{kv_grid(rows)}</div>"

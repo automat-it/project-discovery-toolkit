@@ -681,7 +681,7 @@ def render_fingerprint_card(fp: Dict[str, str],
         ('wal_level',           fp.get('wal_level') or '(unknown)'),
         ('SSL',                 fp.get('ssl_enabled') or '(unknown)'),
         ('password_encryption', fp.get('password_encryption') or '(unknown)'),
-        ('Report folder',       str(report_dir)),
+        ('Report folder',       Path(report_dir).name),
     ]
     rows = [(k, v) for k, v in rows if v not in (None, '', '(unknown)')] or rows
     return f"<div class='card'><h2 style='margin-top:0;border:none;'>Environment Fingerprint</h2>{kv_grid(rows)}</div>"

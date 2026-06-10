@@ -816,7 +816,7 @@ def build_html(report: list, server_label: str, report_dir: Path,
     parts.append(f"""<header>
   <h1>MySQL Performance Audit Report</h1>
   <p><strong>Server:</strong> {esc(server)}</p>
-  <p><strong>Report folder:</strong> {esc(str(report_dir))}</p>
+  <p><strong>Report folder:</strong> {esc(report_dir.name)}</p>
   <p><strong>Generated:</strong> {now_str()}</p>
 </header>""")
 
@@ -907,7 +907,7 @@ def build_html(report: list, server_label: str, report_dir: Path,
             parts.append(f"<section class='db' id='db_{anchor}'>")
             parts.append(f"<h3>{esc(r['name'])}</h3>")
         parts.append(
-            f"<div class='meta'>Logs: <code>{esc(str(r['log_dir']))}</code> "
+            f"<div class='meta'>Logs: <code>{esc(Path(r['log_dir']).name)}</code> "
             f"&middot; Scripts run: {r['passed'] + r['failed']} "
             f"(OK: {r['passed']}, Failed: {r['failed']})</div>"
         )

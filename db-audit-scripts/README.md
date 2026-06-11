@@ -137,7 +137,9 @@ Every PDF/HTML report — regardless of engine — follows the same outline:
    timestamp; branded background.
 2. **Environment Fingerprint** — host, database, version, role, AWS-
    managed flag, time zone, key tuning variables.
-3. **1. Executive Summary** — five KPI cards (databases analyzed /
+3. **1. Executive Summary** — opens with a plain-language **"Bottom
+   line"** TL;DR callout plus a **"Next steps - what to fix first"**
+   top-3 action list, followed by five KPI cards (databases analyzed /
    critical / warning / info / failed), a severity-mix donut chart, a
    "Findings by Domain" bar chart, and a "Top issues — what to fix"
    block linking to the detailed finding rows.

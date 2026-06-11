@@ -201,7 +201,8 @@ multi-page **PDF report** covering every database in the run:
 - **Environment fingerprint** — edition / build / CPU / RAM / uptime /
   collation / AG state (perf) or auth mode / sysadmin count / audit
   status (sec)
-- **Executive summary** — KPI cards + findings-by-domain bar chart
+- **Executive summary** — plain-language "Bottom line" TL;DR + top-3
+  "Next steps" action list, then KPI cards + findings-by-domain bar chart
 - **Server-wide findings** — instance-level issues, deduplicated
 - **Database fleet rollup** — "X of N databases affected" per finding
 - **Backup freshness alert** (perf) — databases with last full backup

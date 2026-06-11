@@ -37,7 +37,8 @@ single multi-page **PDF report** covering every database in the run:
 
 * Cover page — server, customer, severity donut chart, generation date
 * Environment fingerprint — edition, build, CPU, RAM, uptime, collation, AG state
-* Executive summary — KPI cards + findings-by-domain bar chart
+* Executive summary — "Bottom line" TL;DR + top-3 "Next steps" list,
+  then KPI cards + findings-by-domain bar chart
 * **Server-wide findings** — instance-level issues, deduplicated
 * **Database fleet rollup** — "X of N databases affected"
 * Backup-freshness alert — databases > 72h since last full backup

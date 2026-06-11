@@ -37,7 +37,8 @@ single multi-page **PDF report** covering every database in the run:
 
 * Cover page — server, customer, severity donut chart, generation date
 * Environment fingerprint — auth mode, sysadmin count, audit status
-* Executive summary — KPI cards + findings-by-domain bar chart
+* Executive summary — "Bottom line" TL;DR + top-3 "Next steps" list,
+  then KPI cards + findings-by-domain bar chart
 * **Server-wide findings** — instance-level issues, deduplicated
 * **Database fleet rollup** — "X of N databases affected"
 * **Top-N inventories** — privileged accounts, weak-password logins,

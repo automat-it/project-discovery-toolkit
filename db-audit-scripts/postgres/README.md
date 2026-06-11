@@ -51,7 +51,9 @@ The HTML report contains, top-to-bottom:
   Aurora / RDS flag, uptime, this DB size, shared_buffers,
   max_connections, wal_level. Populated from a single-row header that
   `perf_05` / `sec_21` emit specifically for the analyzer.
-* **1. Executive Summary** — five large KPI cards (Databases analyzed /
+* **1. Executive Summary** — opens with a plain-language **"Bottom
+  line"** TL;DR callout and a **"Next steps - what to fix first"** top-3
+  action list, then five large KPI cards (Databases analyzed /
   Critical / Warning / Info / Failed), a severity-mix **donut chart**,
   a **"Findings by Domain"** horizontal bar chart, and a **Top issues —
   what to fix** block listing the highest-priority findings as anchor

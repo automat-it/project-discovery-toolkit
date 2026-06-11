@@ -90,6 +90,9 @@ The analyzer is pure Python standard library (no `pip install` step).
   Summary, Findings, SQL Appendix. Hidden in print.
 
 * **1. Executive Summary**
+  - **Bottom line** TL;DR callout - one plain-language sentence with the
+    severity mix and the single most urgent item, followed by a
+    **Next steps - what to fix first** top-3 action list.
   - Five large KPI cards: Databases analyzed, Critical, Warning, Info,
     Failed scripts.
   - Severity-mix **donut chart** with legend (Critical / Warning / Info).

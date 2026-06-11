@@ -393,7 +393,7 @@ def svg_donut(critical: int, warning: int, info: int) -> str:
                f"font-size='22' font-weight='600' fill='#222'>{total}</text>")
     out.append(f"<text x='{cx}' y='{cy + 18}' text-anchor='middle' "
                f"font-size='10' fill='#777'>findings</text>")
-    out.append("<g font-family='Segoe UI,Arial' font-size='12'>")
+    out.append("<g font-family='-apple-system,BlinkMacSystemFont,Segoe UI,Roboto,Helvetica,Arial' font-size='12'>")
     ly = 30
     for label, n, c in vals:
         out.append(f"<rect x='240' y='{ly}' width='14' height='14' fill='{c}'/>")
@@ -412,7 +412,7 @@ def svg_bar(items: list, color: str = '#1F497D') -> str:
     row_h, pad_top, pad_left, width = 22, 10, 200, 600
     h = pad_top + row_h * len(items) + 10
     out = [f"<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 {width} {h}' "
-           f"width='{width}' height='{h}' font-family='Segoe UI,Arial' font-size='12'>"]
+           f"width='{width}' height='{h}' font-family='-apple-system,BlinkMacSystemFont,Segoe UI,Roboto,Helvetica,Arial' font-size='12'>"]
     y = pad_top
     for label, n in items:
         w = int((width - pad_left - 50) * n / max_n)
@@ -464,6 +464,49 @@ def domain_counts(findings: list, buckets: dict) -> list:
     return [(d, c) for d, c in counts.items() if c > 0]
 
 
+def render_at_a_glance(n_ctx: int, n_crit: int, n_warn: int, n_info: int,
+                       findings: list) -> str:
+    """Plain-language 'bottom line' callout plus a short, prioritized
+    'Next steps' list, shown at the very top of the Executive Summary so a
+    non-technical reader grasps the outcome and what to do without parsing
+    the KPI cards or charts below."""
+    total = n_crit + n_warn + n_info
+    db_word = 'database' if n_ctx == 1 else 'databases'
+    ranked = sorted(
+        [f for f in findings if f.get('severity') in ('Critical', 'Warning')],
+        key=lambda f: (severity_rank(f['severity']), f.get('script', '')))
+
+    if total == 0:
+        tldr = (f"<strong>Bottom line:</strong> this audit ran cleanly across "
+                f"{n_ctx} {db_word} and found no critical or warning issues "
+                f"against the checks performed.")
+    else:
+        bits = []
+        if n_crit:
+            bits.append(f"<strong>{n_crit} critical</strong>")
+        if n_warn:
+            bits.append(f"{n_warn} warning")
+        if n_info:
+            bits.append(f"{n_info} informational")
+        mix = (' and '.join(bits) if len(bits) <= 2
+               else ', '.join(bits[:-1]) + ', and ' + bits[-1])
+        plural = 's' if total != 1 else ''
+        lead = ranked[0]['title'] if ranked else None
+        urgent = (f" The most urgent item is <em>{esc(lead)}</em>."
+                  if lead else "")
+        tldr = (f"<strong>Bottom line:</strong> across {n_ctx} {db_word}, this "
+                f"audit surfaced {mix} finding{plural}.{urgent}")
+
+    out = [f"<div class='tldr'>{tldr}</div>"]
+    if ranked:
+        out.append("<div class='nextsteps'><h3>Next steps - what to fix first</h3><ol>")
+        for f in ranked[:3]:
+            out.append(f"<li><strong>{esc(f['title'])}</strong> - "
+                       f"{esc(f.get('recommendation', ''))}</li>")
+        out.append("</ol></div>")
+    return ''.join(out)
+
+
 def render_cover(title: str, server: str, customer: str,
                  databases_analysed: int) -> str:
     """Branded cover page matching the MSSQL analyzer."""
@@ -511,7 +554,7 @@ SHARED_CSS = """\
 .cover .meta{font-size:11pt;color:#444;margin:0 0 6px;}
 .cover .date{font-size:11pt;color:#666;margin-top:8px;}
 @media screen{.cover{background-color:#f5f5f5;}}
-body{font-family:Segoe UI,Arial,sans-serif;margin:0;padding:20px;background:#f5f5f5;color:#222;line-height:1.4;font-size:9.5pt;}
+body{font-family:-apple-system,BlinkMacSystemFont,Segoe UI,Roboto,Helvetica,Arial,sans-serif;margin:0;padding:20px;background:#f5f5f5;color:#222;line-height:1.4;font-size:9.5pt;}
 h1{margin:0 0 4px 0;}
 h2{border-bottom:2px solid #336791;padding-bottom:4px;margin-top:28px;color:#336791;}
 h3{margin:14px 0 6px;color:#1F497D;}
@@ -615,6 +658,11 @@ table.objs td.wrap{overflow-wrap:anywhere;word-break:break-word;
 .issue-list a.jump{font-size:0.85em;color:#1F497D;text-decoration:none;border-bottom:1px dotted #1F497D;}
 .note{background:#fff8e1;border-left:4px solid #e67e22;padding:8px 12px;border-radius:4px;margin:8px 0;}
 .alert{background:#fdecea;border-left:4px solid #c0392b;padding:8px 12px;border-radius:4px;margin:8px 0;}
+.tldr{background:#eef4fb;border-left:5px solid #1F497D;border-radius:5px;padding:13px 18px;margin:4px 0 14px;font-size:11.5pt;color:#1f2d3d;line-height:1.55;page-break-inside:avoid;break-inside:avoid;}
+.nextsteps{background:#fff8ef;border:1px solid #f0d9bd;border-radius:6px;padding:4px 20px 14px;margin:0 0 18px;page-break-inside:avoid;break-inside:avoid;}
+.nextsteps h3{margin:12px 0 6px;color:#b9651b;border:none;}
+.nextsteps ol{margin:6px 0 2px;padding-left:20px;}
+.nextsteps li{margin:6px 0;color:#333;font-size:10pt;line-height:1.45;}
 a.qid-link{color:#1F497D;text-decoration:none;border-bottom:1px dotted #1F497D;font-family:Consolas,monospace;}
 a.qid-link:hover{background:#eef5fc;}
 pre.sql-full{background:#1e1e1e;color:#d4d4d4;padding:10px 14px;border-radius:4px;font-family:Consolas,monospace;font-size:0.85em;white-space:pre-wrap;word-break:break-word;page-break-inside:avoid;margin:6px 0 16px;}

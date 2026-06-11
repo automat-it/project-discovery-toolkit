@@ -508,7 +508,7 @@ $now = Get-Date -Format 'yyyy-MM-dd HH:mm:ss'
 $css = @'
 <style>
 @page{size:A4;margin:18mm 14mm;@bottom-center{content:counter(page) ' / ' counter(pages);font-size:8pt;color:#777}}
-body{font-family:Segoe UI,Arial,sans-serif;margin:0;padding:0;color:#222;background:#fff;font-size:10.5pt;line-height:1.45}
+body{font-family:-apple-system,BlinkMacSystemFont,Segoe UI,Roboto,Helvetica,Arial,sans-serif;margin:0;padding:0;color:#222;background:#fff;font-size:10.5pt;line-height:1.45}
 h1{font-size:22pt;margin:0 0 8px}
 h2{font-size:15pt;margin:24px 0 10px;color:#1F497D;padding-bottom:4px;border-bottom:2px solid #6FA827}
 h3{font-size:12.5pt;margin:14px 0 6px;color:#1F497D}
@@ -538,6 +538,11 @@ th{background:#eef5e3;font-weight:600;color:#1F497D}
 .kpi .num{font-size:22pt;font-weight:700;color:#1F497D}
 .kpi .num.crit{color:#c0392b}.kpi .num.warn{color:#e67e22}.kpi .num.fail{color:#c0392b}
 .kpi .lbl{font-size:9pt;color:#666;text-transform:uppercase;letter-spacing:0.5px}
+.tldr{background:#eef4fb;border-left:5px solid #1F497D;border-radius:5px;padding:13px 18px;margin:4px 0 14px;font-size:11.5pt;color:#1f2d3d;line-height:1.55;page-break-inside:avoid;break-inside:avoid}
+.nextsteps{background:#fff8ef;border:1px solid #f0d9bd;border-radius:6px;padding:4px 20px 14px;margin:0 0 18px;page-break-inside:avoid;break-inside:avoid}
+.nextsteps h3{margin:12px 0 6px;color:#b9651b;border:none}
+.nextsteps ol{margin:6px 0 2px;padding-left:20px}
+.nextsteps li{margin:6px 0;color:#333;font-size:10pt;line-height:1.45}
 .badge{display:inline-block;padding:1px 8px;border-radius:3px;font-size:0.78em;font-weight:700;color:white}
 .badge.critical{background:#c0392b}.badge.warning{background:#e67e22}.badge.info{background:#2980b9}
 .badge.server{background:#34495e}.badge.database{background:#16a085}
@@ -591,6 +596,33 @@ Add-To $sb "<section class='cover'><div class='cover-content'><h1>SQL Server Sec
 # Executive summary -- placed first so readers see the high-level
 # picture (counts, severity mix, domain breakdown) before any details.
 Add-To $sb "<section class='section firstaftercov'><h2>1. Executive Summary</h2>"
+
+# At-a-glance: plain-language bottom line + prioritized next steps, so a
+# non-technical reader gets the outcome and the actions before the KPI cards.
+$glanceTotal = $totalCrit + $totalWarn + $totalInfo
+$glanceDbWord = if ($dbCount -eq 1) { 'database' } else { 'databases' }
+$glanceRanked = @($aggregated | Where-Object { $_.Severity -in @('Critical','Warning') })
+if ($glanceTotal -eq 0) {
+    $glanceTldr = "<strong>Bottom line:</strong> this audit ran cleanly across $dbCount $glanceDbWord and found no critical or warning issues against the checks performed."
+} else {
+    $glanceBits = @()
+    if ($totalCrit) { $glanceBits += "<strong>$totalCrit critical</strong>" }
+    if ($totalWarn) { $glanceBits += "$totalWarn warning" }
+    if ($totalInfo) { $glanceBits += "$totalInfo informational" }
+    if ($glanceBits.Count -le 2) { $glanceMix = ($glanceBits -join ' and ') }
+    else { $glanceMix = (($glanceBits[0..($glanceBits.Count-2)] -join ', ') + ', and ' + $glanceBits[-1]) }
+    $glancePlural = if ($glanceTotal -ne 1) { 's' } else { '' }
+    $glanceUrgent = if ($glanceRanked.Count -gt 0) { " The most urgent item is <em>$(Esc $glanceRanked[0].Title)</em>." } else { '' }
+    $glanceTldr = "<strong>Bottom line:</strong> across $dbCount $glanceDbWord, this audit surfaced $glanceMix finding$glancePlural.$glanceUrgent"
+}
+Add-To $sb "<div class='tldr'>$glanceTldr</div>"
+if ($glanceRanked.Count -gt 0) {
+    Add-To $sb "<div class='nextsteps'><h3>Next steps - what to fix first</h3><ol>"
+    foreach ($g in @($glanceRanked | Select-Object -First 3)) {
+        Add-To $sb "<li><strong>$(Esc $g.Title)</strong> - $(Esc $g.Recommendation)</li>"
+    }
+    Add-To $sb "</ol></div>"
+}
 Add-To $sb "<p>Snapshot of this audit: how many databases were analysed, the severity mix of findings, and which security domains drove the count.</p>"
 Add-To $sb "<div class='exec'>"
 Add-To $sb "<div class='kpi'><div class='lbl'>Databases analyzed</div><div class='num'>$dbCount</div></div>"
@@ -776,7 +808,7 @@ $reportSorted = @($report | Sort-Object @{Expression = { if ($_.Name -eq '_serve
 foreach ($r in $reportSorted) {
     if ($r.Findings.Length -eq 0) { continue }
     Add-To $sb "<h3>$(Esc $r.Name) <span class='tag'>$($r.Critical) crit</span><span class='tag'>$($r.Warning) warn</span><span class='tag'>$($r.Info) info</span></h3>"
-    Add-To $sb "<table><thead><tr><th>Sev</th><th>Scope</th><th>Script</th><th>Finding</th></tr></thead><tbody>"
+    Add-To $sb "<table><thead><tr><th>Severity</th><th>Scope</th><th>Script</th><th>Finding</th></tr></thead><tbody>"
     foreach ($f in ($r.Findings | Sort-Object _Rank, Title)) {
         $sevC = $f.Severity.ToLower()
         Add-To $sb "<tr class='sev-$sevC'><td><span class='badge $sevC'>$($f.Severity)</span></td><td><span class='badge $($f.Scope.ToLower())'>$($f.Scope)</span></td><td><span class='kbd'>$(Esc $f.Script)</span></td><td><strong>$(Esc $f.Title)</strong><br><span class='detail'>$(Esc $f.Detail)</span></td></tr>"

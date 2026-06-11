@@ -32,7 +32,8 @@ from _analyze_lib import (  # noqa: E402
     DOMAIN_BUCKETS_PERF, SHARED_CSS, context_label, copy_brand_assets,
     domain_counts, esc, find_log, has_data_rows, kv_grid, now_str,
     object_table, parse_result_sets, read_fingerprint, read_log_text,
-    read_summary, read_target, render_cover, render_fingerprint_card,
+    read_summary, read_target, render_at_a_glance, render_cover,
+    render_fingerprint_card,
     script_matches_log, severity_rank, svg_bar, svg_donut,
 )
 
@@ -876,6 +877,8 @@ def build_html(report: list, server_label: str, report_dir: Path,
         all_findings.extend(r['findings'])
     parts.append("<a id='exec-summary'></a>")
     parts.append("<section class='section card'><h2>1. Executive Summary</h2>")
+    parts.append(render_at_a_glance(len(report), total_crit, total_warn,
+                                    total_info, all_findings))
     parts.append("<p class='intro'>Snapshot of this audit: how many databases "
                  "were analyzed, the severity mix of findings, and which "
                  "functional areas drove the count.</p>")

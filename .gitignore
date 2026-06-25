@@ -39,6 +39,15 @@ docker-compose*.yaml
 **/fixture*.sql
 **/_sandbox*.sql
 
+# Terraform local sandbox - state holds PLAINTEXT credentials; never commit.
+# (Was only protected by .git/info/exclude, which is per-clone and unshared.)
+terraform/
+*.tfstate
+*.tfstate.*
+*.tfvars
+.terraform/
+.terraform.lock.hcl
+
 # Credentials
 .env
 *.pem

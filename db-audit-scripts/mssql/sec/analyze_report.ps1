@@ -107,7 +107,7 @@ function Get-SysadminMembers {
             }
         }
     }
-    return ($names | Sort-Object -Unique)
+    return ,@($names | Sort-Object -Unique)
 }
 
 function Get-WeakPasswordLogins {
@@ -125,7 +125,9 @@ function Get-WeakPasswordLogins {
             }
         }
     }
-    return $rows.ToArray()
+    # Unary comma keeps a 0- or 1-element array intact; a bare .ToArray() on an
+    # empty list unwraps to $null, which breaks $weakPwds.Length -eq 0 downstream.
+    return ,$rows.ToArray()
 }
 
 function Get-PiiColumns {
@@ -153,7 +155,7 @@ function Get-PiiColumns {
             }
         }
     }
-    return $rows.ToArray()
+    return ,$rows.ToArray()
 }
 
 # ===========================================================================
@@ -194,7 +196,20 @@ REVOKE <permission> ON <securable> FROM public;
 '@
     }
     @{ Script='sec_05_authentication_and_passwords'; Severity='Critical'; Scope='Server'
-       Pattern='(?i)weak_password|password\s*=\s*login_name'
+       # Fire ONLY on an actual weak-password DATA row. sqlcmd always prints the
+       # `weak_password_matched` (and the `finding` = "Password equals login name")
+       # column HEADERS even when the query returns zero rows, so a plain text
+       # match on the column name produced a false positive on every clean server.
+       # The predicate instead reads the parsed result sets and requires a real
+       # data value under one of those columns.
+       Predicate={ param($p)
+           $hits = @()
+           foreach ($v in (Get-ColumnValues $p @('weak_password_matched'))) { if ($v) { $hits += $v } }
+           foreach ($v in (Get-ColumnValues $p @('finding'))) {
+               if ($v -match '(?i)password\s+equals\s+login') { $hits += $v }
+           }
+           if ($hits.Count -gt 0) { "matched: $(( $hits | Select-Object -Unique -First 5) -join ', ')" } else { $false }
+       }
        Title='Weak or trivially guessable passwords detected'
        CIS='3.5'; GDPR='Art.32(1)(b)'; SOC2='CC6.1'; HIPAA='164.308(a)(5)'; PCI='8.2'
        Detail='SQL logins with passwords matching common dictionary words or equal to the login name.'
@@ -206,7 +221,17 @@ ALTER LOGIN [<login>] WITH PASSWORD = ''<TempStrongP@ss>'' MUST_CHANGE,
 '@
     }
     @{ Script='sec_05_authentication_and_passwords'; Severity='Critical'; Scope='Server'
-       Pattern='is_policy_checked\s*\n\s*-+\s*\n[^\(]*\b0\b'
+       # The CHECK_POLICY result set aliases sys.sql_logins.is_policy_checked to
+       # the column header `check_policy` (see sec_05.sql:43); the old pattern
+       # keyed on `is_policy_checked` followed by a single-column separator and
+       # never matched the real multi-column, mid-header layout. Read the parsed
+       # column value and fire when any SQL login has CHECK_POLICY = 0.
+       Predicate={ param($p)
+           foreach ($v in (Get-ColumnValues $p @('check_policy','is_policy_checked'))) {
+               if ($v -match '^\s*0\s*$') { return 'a SQL login has CHECK_POLICY disabled (check_policy=0)' }
+           }
+           return $false
+       }
        Title='SQL logins with CHECK_POLICY disabled'
        CIS='3.4'; GDPR='-'; SOC2='CC6.1'; HIPAA='164.308(a)(5)'; PCI='8.2'
        Detail='At least one SQL login is excluded from password policy enforcement.'
@@ -214,7 +239,14 @@ ALTER LOGIN [<login>] WITH PASSWORD = ''<TempStrongP@ss>'' MUST_CHANGE,
        Remediation='ALTER LOGIN [<login>] WITH CHECK_POLICY = ON, CHECK_EXPIRATION = ON;'
     }
     @{ Script='sec_06_audit_logging'; Severity='Warning'; Scope='Server'
-       Pattern='server_audits_running\s*\n\s*-+\s*\n.*\b0\b'
+       # `server_audits_running` is the 2nd column of the audit-readiness summary
+       # (sec_06.sql:167), so it is mid-header with a multi-dash-run separator;
+       # the old single-column pattern never matched. Read the parsed value and
+       # fire when zero Server Audits are STARTED.
+       Predicate={ param($p)
+           $v = Get-ColumnValue $p @('server_audits_running')
+           if ($null -ne $v -and $v -match '^\s*0\s*$') { 'No SQL Server Audit is in the STARTED state (server_audits_running=0)' } else { $false }
+       }
        Title='No SQL Server Audit currently running'
        CIS='5.1'; GDPR='Art.32(1)(d)'; SOC2='CC7.2'; HIPAA='164.312(b)'; PCI='10.2'
        Detail='Without an active Server Audit, security-relevant actions are not retained.'
@@ -231,7 +263,18 @@ CREATE SERVER AUDIT SPECIFICATION [sec_spec] FOR SERVER AUDIT [security_audit]
 '@
     }
     @{ Script='sec_07_encryption_status'; Severity='Warning'; Scope='Database'
-       Pattern='(?i)encryption_state\s*\n\s*-+\s*\n.*\b(0|1)\b'
+       # `encryption_state` is mid-header in the TDE result set (sec_07.sql:62);
+       # the old pattern assumed a single-column set and also matched the
+       # `encryption_state_desc` header text. Read the parsed integer column and
+       # fire only when a database encryption key is present but not encrypted
+       # (state 0 = no key, 1 = key set / unencrypted). Rows with a value of 2-6
+       # (encrypting / encrypted / re-keying) are healthy and must not fire.
+       Predicate={ param($p)
+           foreach ($v in (Get-ColumnValues $p @('encryption_state'))) {
+               if ($v -match '^\s*[01]\s*$') { return "a database encryption key is unencrypted (encryption_state=$($v.Trim()))" }
+           }
+           return $false
+       }
        Title='Database not protected by TDE'
        CIS='6.1'; GDPR='Art.32(1)(a)'; SOC2='CC6.7'; HIPAA='164.312(a)(2)(iv)'; PCI='3.4'
        Detail='Database is in encryption_state 0 (none) or 1 (key set, not encrypted).'
@@ -290,24 +333,48 @@ EXEC sp_configure ''Ad Hoc Distributed Queries'', 0; RECONFIGURE;
 EXEC sp_configure ''Ole Automation Procedures'', 0; RECONFIGURE;
 '@
     }
-    @{ Script='sec_12_dba_role_review'; Severity='Info'; Scope='Database'
-       Title='db_owner / DBA role expansion review'
+    @{ Script='sec_12_dormant_users'; Severity='Info'; Scope='Database'
+       Title='Dormant / inactive accounts to review'
        CIS='4.3'; GDPR='-'; SOC2='CC6.1'; HIPAA='-'; PCI='7.1'
-       Detail='Members of db_owner and adjacent high-privilege roles in user databases.'
-       Recommendation='Review db_owner / sysadmin chain for least-privilege opportunities.'
-       Remediation='ALTER ROLE db_owner DROP MEMBER [<user>];'
+       Detail='Disabled logins, logins unmodified for >90 days with no active session, expired-but-enabled logins, and orphaned database users (sec_12_dormant_users).'
+       Recommendation='Review dormant / orphaned accounts for least-privilege opportunities and disable or drop the ones no longer needed.'
+       Remediation=@'
+-- Disable a dormant login
+ALTER LOGIN [<login>] DISABLE;
+
+-- Drop an orphaned database user (no matching server login)
+DROP USER [<user>];
+'@
     }
-    @{ Script='sec_17_recovery_and_backup_security'; Severity='Warning'; Scope='Database'
-       Pattern='(?i)\bencrypted\b\s*\n\s*-+\s*\n.*\b0\b'
-       Title='Recent backups are not encrypted'
+    @{ Script='sec_14_backup_security'; Severity='Warning'; Scope='Database'
+       # The backup-security script is sec_14 (sec_17 is deprecated-features).
+       # Its summary exposes `unencrypted_last_7d` and `databases_never_backed_up`
+       # (sec_14.sql:172,177); fire when recent backups were taken without
+       # encryption, or a user database has never had a full backup.
+       Predicate={ param($p)
+           $unenc = Get-ColumnValue $p @('unencrypted_last_7d')
+           $never = Get-ColumnValue $p @('databases_never_backed_up')
+           $bits = @()
+           if ($unenc -and $unenc -match '^\s*[1-9]\d*\s*$') { $bits += "$($unenc.Trim()) unencrypted backup(s) in the last 7 days" }
+           if ($never -and $never -match '^\s*[1-9]\d*\s*$') { $bits += "$($never.Trim()) database(s) never backed up" }
+           if ($bits.Count -gt 0) { ($bits -join '; ') } else { $false }
+       }
+       Title='Backup security exposure (unencrypted or missing backups)'
        CIS='6.2'; GDPR='Art.32(1)(a)'; SOC2='CC6.7'; HIPAA='164.312(a)(2)(iv)'; PCI='3.4'
-       Detail='Most recent backup file(s) for one or more databases are not encrypted.'
-       Recommendation='Enable backup encryption (TDE-backed key or backup encryption certificate).'
+       Detail='Recent backup sets were written without encryption, or one or more user databases have never had a full backup.'
+       Recommendation='Enable backup encryption (TDE-backed key or backup encryption certificate) and ensure every database has a scheduled, succeeding full backup.'
        Remediation=@'
 BACKUP DATABASE [<db>] TO DISK=''<path>\<db>.bak''
 WITH ENCRYPTION (ALGORITHM = AES_256, SERVER CERTIFICATE = [backup_cert]),
      COMPRESSION, CHECKSUM;
 '@
+    }
+    @{ Script='sec_17_deprecated_features'; Severity='Info'; Scope='Database'
+       Title='Deprecated features / legacy configuration in use'
+       CIS='-'; GDPR='-'; SOC2='CC7.1'; HIPAA='-'; PCI='-'
+       Detail='Databases on an old compatibility level, deprecated-feature usage counters, legacy server options, or deprecated data types (text/ntext/image) are present (sec_17_deprecated_features).'
+       Recommendation='Raise compatibility levels after testing, retire deprecated data types and legacy server options, and eliminate deprecated-feature usage.'
+       Remediation='ALTER DATABASE [<db>] SET COMPATIBILITY_LEVEL = 160;'
     }
     @{ Script='sec_20_failed_login_patterns'; Severity='Warning'; Scope='Server'
        Title='Failed-login activity recorded'
@@ -320,7 +387,22 @@ EXEC xp_readerrorlog 0, 1, N''Login failed'', NULL, @s, NULL, N''DESC'';
 '@
     }
     @{ Script='sec_22_cert_and_key_expiry'; Severity='Warning'; Scope='Server'
-       Pattern='(?i)days_to_expiry\s*\n\s*-+\s*\n.*\b(-?\d|[1-9]\d|1[0-7]\d|180)\b'
+       # The real column is `days_until_expiry` (certs, sec_22.sql:29,51,135) and
+       # `days_until_expiration` (SQL logins, sec_22.sql:154); the old literal
+       # `days_to_expiry` matched neither. Read the parsed integer column(s) and
+       # fire when any certificate / key / login credential is already expired
+       # or expires within 180 days.
+       Predicate={ param($p)
+           $soonest = $null
+           foreach ($v in (Get-ColumnValues $p @('days_until_expiry','days_until_expiration'))) {
+               $t = $v.Trim()
+               if ($t -match '^-?\d+$') {
+                   $n = [int]$t
+                   if ($n -le 180) { if ($null -eq $soonest -or $n -lt $soonest) { $soonest = $n } }
+               }
+           }
+           if ($null -ne $soonest) { "a certificate / key / login credential expires in $soonest day(s) (<= 180)" } else { $false }
+       }
        Title='Certificate or key expires within 180 days'
        CIS='6.3'; GDPR='-'; SOC2='CC6.7'; HIPAA='-'; PCI='3.6'
        Detail='Server certificate / asymmetric key approaching expiry.'
@@ -373,11 +455,16 @@ $DocsByTitle = @{
         @{ Name = 'Ad Hoc Distributed Queries'; Url = 'https://learn.microsoft.com/sql/database-engine/configure-windows/ad-hoc-distributed-queries-server-configuration-option' }
         @{ Name = 'OLE Automation Procedures'; Url = 'https://learn.microsoft.com/sql/database-engine/configure-windows/ole-automation-procedures-server-configuration-option' }
     )
-    'db_owner / DBA role expansion review' = @(
+    'Dormant / inactive accounts to review' = @(
         @{ Name = 'Database-Level Roles'; Url = 'https://learn.microsoft.com/sql/relational-databases/security/authentication-access/database-level-roles' }
+        @{ Name = 'ALTER LOGIN (Transact-SQL)'; Url = 'https://learn.microsoft.com/sql/t-sql/statements/alter-login-transact-sql' }
     )
-    'Recent backups are not encrypted' = @(
+    'Backup security exposure (unencrypted or missing backups)' = @(
         @{ Name = 'Backup encryption'; Url = 'https://learn.microsoft.com/sql/relational-databases/backup-restore/backup-encryption' }
+    )
+    'Deprecated features / legacy configuration in use' = @(
+        @{ Name = 'ALTER DATABASE compatibility level'; Url = 'https://learn.microsoft.com/sql/t-sql/statements/alter-database-transact-sql-compatibility-level' }
+        @{ Name = 'Deprecated database engine features'; Url = 'https://learn.microsoft.com/sql/database-engine/deprecated-database-engine-features-in-sql-server' }
     )
     'Failed-login activity recorded' = @(
         @{ Name = 'xp_readerrorlog'; Url = 'https://learn.microsoft.com/sql/relational-databases/system-stored-procedures/sp-readerrorlog-transact-sql' }
@@ -400,7 +487,7 @@ $DomainBuckets = [ordered]@{
     'Network exposure'          = @('sec_08')
     'Sensitive data (PII)'      = @('sec_09')
     'Dangerous objects'         = @('sec_10','sec_15')
-    'Backup security'           = @('sec_17')
+    'Backup security'           = @('sec_14')
     'Patch / CVE level'         = @('sec_21')
 }
 
@@ -428,8 +515,8 @@ foreach ($ctx in $contexts) {
 
 $serverCtx   = $report.Where({ $_.Name -eq '_server' }, 'First', 1) | Select-Object -First 1
 $fingerprint = if ($serverCtx) { Get-ServerFingerprint $serverCtx.LogDir } else { $null }
-$sysadmins   = if ($serverCtx) { Get-SysadminMembers $serverCtx.LogDir } else { @() }
-$weakPwds    = if ($serverCtx) { Get-WeakPasswordLogins $serverCtx.LogDir } else { @() }
+$sysadmins   = @(if ($serverCtx) { Get-SysadminMembers $serverCtx.LogDir } else { @() })
+$weakPwds    = @(if ($serverCtx) { Get-WeakPasswordLogins $serverCtx.LogDir } else { @() })
 
 # PII across all DBs
 $piiAll = New-Object System.Collections.Generic.List[object]
@@ -455,10 +542,20 @@ foreach ($r in $report) {
                 Docs = $f.Docs
                 CIS = $f.CIS; GDPR = $f.GDPR; SOC2 = $f.SOC2; HIPAA = $f.HIPAA; PCI = $f.PCI
                 Databases = New-Object System.Collections.Generic.List[string]
+                SeenInServerRun = $false
                 UniqueDbsCached = $null
             }
         }
-        if ($r.Name -ne '_server' -or $f.Scope -eq 'Server') {
+        # Never push the literal '_server' pseudo-context into the per-database
+        # affected set: it is not a database and inflates the "N of M" counts.
+        # - Server-scope findings are instance-wide; they don't track DBs.
+        # - Database-scope findings add the real database name. When such a
+        #   finding surfaces only in the _server pass (its script enumerates all
+        #   user DBs from master, e.g. sec_14 backup security), flag it so the
+        #   rollup can attribute it as instance-wide instead of "0 of N".
+        if ($r.Name -eq '_server') {
+            if ($f.Scope -eq 'Database') { $titleAgg[$key].SeenInServerRun = $true }
+        } else {
             [void]$titleAgg[$key].Databases.Add($r.Name)
         }
     }
@@ -484,7 +581,26 @@ foreach ($r in $report) {
     $totalInfo += [int]$r.Info
     $totalFail += [int]$r.Failed
 }
-$dbCount = $report.Count
+# Count only real databases -- the '_server' pseudo-context is the instance-wide
+# pass, not a database, so it must not inflate "Databases analyzed" nor the
+# "N of M databases" denominators that use $dbCount.
+$dbCount = @($report | Where-Object { $_.Name -ne '_server' }).Count
+
+# Pre-compute the human "scope" phrase for each aggregated finding so every
+# render site (top issues, fleet rollup, roadmap) stays consistent.
+#   Server scope                -> instance-wide
+#   DB scope, named DBs         -> "N of M databases"
+#   DB scope, only in _server   -> instance-wide (all databases) -- the finding
+#     came from the master pass whose query enumerates every user DB, so it is
+#     not attributable to a single named DB but is genuinely fleet-wide.
+foreach ($a in $aggregated) {
+    $whereText =
+        if ($a.Scope -eq 'Server') { 'instance-wide' }
+        elseif ($a.UniqueDbsCached.Count -gt 0) { "$($a.UniqueDbsCached.Count) of $dbCount databases" }
+        elseif ($a.SeenInServerRun) { 'instance-wide (all databases)' }
+        else { "0 of $dbCount databases" }
+    Add-Member -InputObject $a -NotePropertyName WhereText -NotePropertyValue $whereText -Force
+}
 
 $domainCounts = New-Object System.Collections.Generic.List[object]
 foreach ($dom in $DomainBuckets.Keys) {
@@ -646,7 +762,7 @@ if ($topIssues.Length -eq 0) {
     Add-To $sb "<ol class='issue-list'>"
     foreach ($a in $topIssues) {
         $sevC  = $a.Severity.ToLower()
-        $where = if ($a.Scope -eq 'Server') { 'instance-wide' } else { "$($a.UniqueDbsCached.Count) of $dbCount databases" }
+        $where = $a.WhereText
         $cls   = if ($sevC -eq 'warning') { 'warn' } else { '' }
         Add-To $sb "<li class='$cls'><div class='it'><span class='ti'><a class='jump' href='#$($a.Anchor)'>$(Esc $a.Title)</a></span><span class='sc'><span class='badge $sevC'>$($a.Severity)</span> &middot; $where</span></div><div class='ac'><strong>Action:</strong> $(Esc $a.Recommendation)</div></li>"
     }
@@ -702,9 +818,20 @@ if ($dbFindings.Length -eq 0) {
         $sevC = $a.Severity.ToLower()
         $dbs  = $a.UniqueDbsCached
         $cnt  = $dbs.Count
-        $top  = ($dbs | Select-Object -First 6) -join ', '
-        if ($cnt -gt 6) { $top += " ... (+$($cnt - 6) more)" }
-        Add-To $sb "<tr id='$($a.Anchor)' class='sev-$sevC'><td><span class='badge $sevC'>$($a.Severity)</span></td><td><strong>$(Esc $a.Title)</strong><br><span class='detail'>$(Esc $a.Recommendation)</span></td><td><strong>$cnt</strong> of $dbCount</td><td class='detail'>$(Esc $top)</td><td class='compl'>$(Esc $a.CIS)</td><td class='compl'>$(Esc $a.GDPR)</td></tr>"
+        if ($cnt -gt 0) {
+            $affected = "<strong>$cnt</strong> of $dbCount"
+            $top      = ($dbs | Select-Object -First 6) -join ', '
+            if ($cnt -gt 6) { $top += " ... (+$($cnt - 6) more)" }
+        } elseif ($a.SeenInServerRun) {
+            # Surfaced only in the instance-wide (_server) pass, whose query
+            # enumerates every user database -- not attributable to one named DB.
+            $affected = 'all databases'
+            $top      = '(instance-wide check)'
+        } else {
+            $affected = "<strong>0</strong> of $dbCount"
+            $top      = ''
+        }
+        Add-To $sb "<tr id='$($a.Anchor)' class='sev-$sevC'><td><span class='badge $sevC'>$($a.Severity)</span></td><td><strong>$(Esc $a.Title)</strong><br><span class='detail'>$(Esc $a.Recommendation)</span></td><td>$affected</td><td class='detail'>$(Esc $top)</td><td class='compl'>$(Esc $a.CIS)</td><td class='compl'>$(Esc $a.GDPR)</td></tr>"
     }
     Add-To $sb "</tbody></table>"
 }
@@ -723,7 +850,7 @@ if ($smArr.Length -eq 0) {
     Add-To $sb "</ul>"
 }
 Add-To $sb "<h3>5.2 Weak / trivial passwords</h3>"
-if ($weakPwds.Length -eq 0) {
+if ($null -eq $weakPwds -or @($weakPwds).Count -eq 0) {
     Add-To $sb "<p class='ok'>No weak-password matches recorded.</p>"
 } else {
     Add-To $sb "<table><thead><tr><th>Login</th><th>Detection rule</th></tr></thead><tbody>"
@@ -773,7 +900,7 @@ foreach ($p in $phases) {
         Add-To $sb "<li>No items.</li>"
     } else {
         foreach ($f in $items) {
-            $where = if ($f.Scope -eq 'Server') { 'instance-wide' } else { "$($f.UniqueDbsCached.Count) of $dbCount databases" }
+            $where = $f.WhereText
             Add-To $sb "<li><strong>$(Esc $f.Title)</strong> ($where) -- $(Esc $f.Recommendation)</li>"
         }
     }

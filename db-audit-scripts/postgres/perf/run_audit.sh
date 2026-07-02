@@ -50,14 +50,14 @@ echo "  host=$DB_HOST port=$DB_PORT user=$DB_USER db=$DB_NAME"
 echo "  output=$OUT"
 echo "================================================================================"
 
-pass=0; fail=0; skipped=0
+pass=0; fail=0
 SUMMARY="$OUT/_summary.txt"
 : > "$SUMMARY"
 
 for priority in critical high medium low; do
     [ -d "$SCRIPT_DIR/$priority" ] || continue
     for f in "$SCRIPT_DIR/$priority"/*.sql; do
-        [ -f "$f" ] || { skipped=$((skipped+1)); continue; }
+        [ -f "$f" ] || continue
         base=$(basename "$f" .sql)
         log="$OUT/${priority}_${base}.log"
         if psql -h "$DB_HOST" -p "$DB_PORT" -U "$DB_USER" -d "$DB_NAME" \

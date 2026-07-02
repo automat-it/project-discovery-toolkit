@@ -98,7 +98,10 @@ if (-not $OutRoot) { $OutRoot = Join-Path $MsqlRoot "reports" }
 
 $Runner = Join-Path $MsqlRoot "run_audit.ps1"
 if (-not (Test-Path $Runner)) {
-    Write-Error "run_audit.ps1 not found at $Runner"
+    # Write-Error is TERMINATING under $ErrorActionPreference='Stop', so a
+    # following `exit N` would never run and the documented exit code would be
+    # lost. Emit to stderr non-terminating and exit explicitly.
+    [Console]::Error.WriteLine("run_audit.ps1 not found at $Runner")
     exit 2
 }
 
@@ -106,12 +109,12 @@ if (-not (Test-Path $Runner)) {
 # Locate sqlcmd
 # ---------------------------------------------------------------------------
 if (-not (Get-Command sqlcmd -ErrorAction SilentlyContinue)) {
-    Write-Error @"
+    [Console]::Error.WriteLine(@"
 sqlcmd not found on PATH.
 Install via winget:
   winget install Microsoft.go-sqlcmd
   winget install Microsoft.SQLServerCmdLineUtils
-"@
+"@)
     exit 2
 }
 
@@ -129,6 +132,11 @@ $authLabel = if ($User) { "SQL Server ($User)" } else { "Windows Authentication"
 # ---------------------------------------------------------------------------
 # Enumerate user databases
 # ---------------------------------------------------------------------------
+# Escape single quotes so a database-name pattern containing a quote cannot
+# break out of the string literal (T-SQL injection). Legitimate LIKE wildcards
+# (% and _) are preserved -- only the quote delimiter is doubled.
+$IncludeLikeSql = $IncludeLike -replace "'", "''"
+
 $enumQuery = @"
 SET NOCOUNT ON;
 SELECT d.name
@@ -142,7 +150,7 @@ LEFT JOIN sys.availability_replicas ar
 WHERE d.database_id > 4
   AND d.name <> N'distribution'
   AND d.state_desc = N'ONLINE'
-  AND d.name LIKE N'$IncludeLike'
+  AND d.name LIKE N'$IncludeLikeSql'
   AND (ars.role_desc IS NULL
        OR ars.role_desc = N'PRIMARY'
        OR ar.secondary_role_allow_connections_desc IN (N'ALL', N'READ_ONLY'))
@@ -150,10 +158,32 @@ ORDER BY d.name;
 "@
 
 $enumArgs = @("-S", $Server) + $authArgs + @("-d", "master", "-C", "-b", "-h", "-1", "-W", "-Q", $enumQuery)
-$rawDbs   = & sqlcmd @enumArgs 2>&1
 
-if ($LASTEXITCODE -ne 0) {
-    Write-Error "Database enumeration failed:`n$($rawDbs -join "`n")"
+# Relax ErrorActionPreference around the native call: under 'Stop', a benign
+# sqlcmd stderr line raises a terminating NativeCommandError on Windows
+# PowerShell 5.1 and aborts the whole fleet run. Capture stdout and stderr
+# separately so (a) a stderr warning does not kill the run and (b) a stderr
+# line is never mistaken for a database name. (Same workaround as
+# run_audit.ps1's per-script invocation.)
+$prevPref    = $ErrorActionPreference
+$ErrorActionPreference = 'Continue'
+$enumErrFile = [System.IO.Path]::GetTempFileName()
+$enumErr     = $null
+try {
+    # Redirect only stderr to a temp file so a benign warning line is captured
+    # rather than parsed as a database name; stdout (the db list) is returned.
+    $rawDbs = & sqlcmd @enumArgs 2>$enumErrFile
+    $rc     = $LASTEXITCODE
+    if (Test-Path $enumErrFile) {
+        $enumErr = (Get-Content -LiteralPath $enumErrFile -Raw -ErrorAction SilentlyContinue)
+    }
+} finally {
+    $ErrorActionPreference = $prevPref
+    Remove-Item -LiteralPath $enumErrFile -Force -ErrorAction SilentlyContinue
+}
+
+if ($rc -ne 0) {
+    [Console]::Error.WriteLine("Database enumeration failed (rc=$rc):`n$enumErr`n$($rawDbs -join "`n")")
     exit 4
 }
 
@@ -167,7 +197,7 @@ if ($ExcludeRegex) {
 }
 
 if (-not $databases) {
-    Write-Error "No user databases matched (include='$IncludeLike' exclude='$ExcludeRegex')"
+    [Console]::Error.WriteLine("No user databases matched (include='$IncludeLike' exclude='$ExcludeRegex')")
     exit 3
 }
 
@@ -208,13 +238,19 @@ function Invoke-AuditForDb {
         "-Category", $Category,
         "-OutRoot",  $dbOut
     )
-    if ($User)     { $runArgs += @("-User",     $User) }
-    if ($Password) { $runArgs += @("-Password", $Password) }
+    if ($User) { $runArgs += @("-User", $User) }
+    # Do NOT pass -Password: putting the plaintext secret on the child
+    # powershell.exe command line makes it visible in the process list. The
+    # child inherits $env:SQLCMDPASSWORD (set in the auth block above), which
+    # sqlcmd reads directly, so the password never touches a command line.
 
-    # Use Windows PowerShell on Windows, pwsh on macOS / Linux. Without
-    # this branch the script tried to invoke powershell.exe everywhere and
-    # failed on non-Windows hosts.
-    $shell = if ($IsWindows -or ($PSVersionTable.PSEdition -eq 'Desktop')) { 'powershell.exe' } else { 'pwsh' }
+    # Use Windows PowerShell on Windows, pwsh on macOS / Linux. $IsWindows is an
+    # automatic variable only on PowerShell 6+; under Set-StrictMode -Latest on
+    # Windows PowerShell 5.1 it is undefined and referencing it throws. Guard by
+    # engine major version, and treat Desktop edition (5.1) as Windows.
+    $isWin  = ($PSVersionTable.PSEdition -eq 'Desktop') -or
+              ($PSVersionTable.PSVersion.Major -ge 6 -and $IsWindows)
+    $shell  = if ($isWin) { 'powershell.exe' } else { 'pwsh' }
     & $shell -ExecutionPolicy Bypass -File $Runner @runArgs | Out-Null
     return $LASTEXITCODE
 }

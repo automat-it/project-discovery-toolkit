@@ -15,7 +15,23 @@ SET TRANSACTION ISOLATION LEVEL READ UNCOMMITTED;  -- read-only audit; avoid tak
 -- Columns with very low cardinality (n_distinct approx) — read from the
 -- histogram unique-value count.
 -- ---------------------------------------------------------------------------
-;WITH hist AS (
+;WITH stat_src AS (
+    -- Bound the expensive per-stat histogram expansion: leading-column
+    -- statistics on user tables only, capped so a database with tens of
+    -- thousands of stats cannot run for hours / time out.
+    SELECT TOP (200)
+        s.object_id, s.stats_id, s.name
+    FROM sys.stats s
+    JOIN sys.objects o ON o.object_id = s.object_id
+    JOIN sys.stats_columns sc
+          ON sc.object_id = s.object_id
+         AND sc.stats_id  = s.stats_id
+         AND sc.stats_column_id = 1                   -- leading column only
+    WHERE o.is_ms_shipped = 0
+      AND o.type = 'U'
+    ORDER BY s.object_id, s.stats_id
+),
+hist AS (
     SELECT
         s.object_id,
         s.stats_id,
@@ -25,10 +41,8 @@ SET TRANSACTION ISOLATION LEVEL READ UNCOMMITTED;  -- read-only audit; avoid tak
         SUM(dh.equal_rows)                            AS rows_equal,
         SUM(dh.range_rows)                            AS rows_range,
         MAX(dh.equal_rows)                            AS top_equal_rows
-    FROM sys.stats s
+    FROM stat_src s
     CROSS APPLY sys.dm_db_stats_histogram(s.object_id, s.stats_id) dh
-    JOIN sys.objects o ON o.object_id = s.object_id
-    WHERE o.is_ms_shipped = 0
     GROUP BY s.object_id, s.stats_id, s.name
 )
 SELECT TOP 50
@@ -50,16 +64,29 @@ ORDER BY top_value_pct DESC;
 -- ---------------------------------------------------------------------------
 -- Histograms with very few steps (likely skewed / low-cardinality columns)
 -- ---------------------------------------------------------------------------
-;WITH step_count AS (
+;WITH stat_src AS (
+    -- Bound the per-stat histogram expansion (see note in the first query):
+    -- leading-column stats on user tables only, capped at 200.
+    SELECT TOP (200)
+        s.object_id, s.stats_id, s.name
+    FROM sys.stats s
+    JOIN sys.objects o ON o.object_id = s.object_id
+    JOIN sys.stats_columns sc
+          ON sc.object_id = s.object_id
+         AND sc.stats_id  = s.stats_id
+         AND sc.stats_column_id = 1                   -- leading column only
+    WHERE o.is_ms_shipped = 0
+      AND o.type = 'U'
+    ORDER BY s.object_id, s.stats_id
+),
+step_count AS (
     SELECT
         s.object_id,
         s.stats_id,
         s.name                                        AS stat_name,
         COUNT(*)                                      AS step_count
-    FROM sys.stats s
+    FROM stat_src s
     CROSS APPLY sys.dm_db_stats_histogram(s.object_id, s.stats_id) dh
-    JOIN sys.objects o ON o.object_id = s.object_id
-    WHERE o.is_ms_shipped = 0
     GROUP BY s.object_id, s.stats_id, s.name
 )
 SELECT TOP 30
@@ -105,22 +132,36 @@ ORDER BY schema_name, table_name, p.partition_number;
 -- ---------------------------------------------------------------------------
 -- Columns with very high NULL fraction (inferred from first histogram step)
 -- ---------------------------------------------------------------------------
-;WITH null_stats AS (
+;WITH stat_src AS (
+    -- Bound the per-stat histogram expansion (see note in the first query):
+    -- leading-column stats on user tables only, capped at 200. This query
+    -- expands the histogram twice per stat, so the cap matters most here.
+    SELECT TOP (200)
+        s.object_id, s.stats_id, s.name
+    FROM sys.stats s
+    JOIN sys.objects o ON o.object_id = s.object_id
+    JOIN sys.stats_columns sc
+          ON sc.object_id = s.object_id
+         AND sc.stats_id  = s.stats_id
+         AND sc.stats_column_id = 1                   -- leading column only
+    WHERE o.is_ms_shipped = 0
+      AND o.type = 'U'
+    ORDER BY s.object_id, s.stats_id
+),
+null_stats AS (
     SELECT
         s.object_id,
         s.stats_id,
         s.name                                        AS stat_name,
         MIN(dh.range_high_key)                        AS first_bucket_high_key,
         dh_first.equal_rows                           AS first_bucket_rows
-    FROM sys.stats s
+    FROM stat_src s
     CROSS APPLY sys.dm_db_stats_histogram(s.object_id, s.stats_id) dh
     CROSS APPLY (
         SELECT TOP 1 dh2.equal_rows, dh2.range_high_key
           FROM sys.dm_db_stats_histogram(s.object_id, s.stats_id) dh2
          ORDER BY dh2.step_number
     ) dh_first
-    JOIN sys.objects o ON o.object_id = s.object_id
-    WHERE o.is_ms_shipped = 0
     GROUP BY s.object_id, s.stats_id, s.name, dh_first.equal_rows
 )
 SELECT TOP 30

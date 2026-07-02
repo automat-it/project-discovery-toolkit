@@ -25,7 +25,8 @@ WHERE s.idx_scan < 50
   AND NOT i.indisunique
   AND NOT i.indisprimary
   AND pg_relation_size(s.indexrelid) > 1024 * 1024
-ORDER BY pg_relation_size(s.indexrelid) DESC;
+ORDER BY pg_relation_size(s.indexrelid) DESC
+LIMIT 50;
 
 -- ---------------------------------------------------------------------------
 -- Indexes that have NEVER been scanned
@@ -40,7 +41,8 @@ SELECT
 FROM pg_stat_user_indexes s
 JOIN pg_index i ON i.indexrelid = s.indexrelid
 WHERE s.idx_scan = 0
-ORDER BY pg_relation_size(s.indexrelid) DESC;
+ORDER BY pg_relation_size(s.indexrelid) DESC
+LIMIT 50;
 
 -- ---------------------------------------------------------------------------
 -- Duplicate indexes (strict): same table, same key columns, same opclass,

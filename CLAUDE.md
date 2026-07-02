@@ -25,8 +25,8 @@ PostgreSQL:
 ```bash
 cd db-audit-scripts/postgres
 export PGPASSWORD='<password>'
-bash perf/run_audit.sh -u <user> -h <host> -p 5432 -d <db> -o ./reports
-bash sec/run_audit.sh  -u <user> -h <host> -p 5432 -d <db> -o ./reports
+bash perf/run_audit.sh -h <host> -P 5432 -U <user> -d <db> -o ./reports
+bash sec/run_audit.sh  -h <host> -P 5432 -U <user> -d <db> -o ./reports
 python3 perf/analyze_report.py ./reports/postgres_perf_<TS> --server <label>
 python3 sec/analyze_report.py  ./reports/postgres_sec_<TS>  --server <label>
 ```

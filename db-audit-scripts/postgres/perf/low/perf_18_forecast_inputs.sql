@@ -14,7 +14,9 @@
 SELECT
     now()                                                AS snapshot_at,
     (SELECT sum(pg_database_size(datname))
-     FROM pg_database WHERE NOT datistemplate)           AS total_db_bytes,
+     FROM pg_database
+     WHERE NOT datistemplate
+       AND has_database_privilege(datname, 'CONNECT'))   AS total_db_bytes,
     (SELECT count(*) FROM pg_stat_activity
      WHERE backend_type = 'client backend')              AS client_connections,
     (SELECT count(*) FROM pg_stat_activity
@@ -59,7 +61,8 @@ SELECT
     deadlocks,
     stats_reset
 FROM pg_stat_database
-WHERE datname IS NOT NULL;
+WHERE datname IS NOT NULL
+  AND has_database_privilege(datname, 'CONNECT');
 
 -- ---------------------------------------------------------------------------
 -- Per-table snapshot for top 50 tables by size

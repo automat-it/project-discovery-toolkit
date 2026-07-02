@@ -28,9 +28,10 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from _analyze_lib import (  # noqa: E402
     DOMAIN_BUCKETS_SEC, SHARED_CSS, context_label, copy_brand_assets,
-    domain_counts, esc, has_data_rows, kv_grid, now_str, object_table,
-    parse_result_sets, read_fingerprint, read_log_text, read_summary,
-    read_target, render_at_a_glance, render_cover, render_fingerprint_card,
+    domain_counts, esc, finding_anchor, has_data_rows, kv_grid, now_str,
+    object_table, parse_result_sets, read_fingerprint, read_log_text,
+    read_summary, read_target, render_at_a_glance, render_cover,
+    render_fingerprint_card,
     script_matches_log, severity_rank, svg_bar, svg_donut,
 )
 
@@ -237,6 +238,16 @@ def _ext_expired_password_users(text):
                  columns=cols, rows=rows[:200])]
 
 
+def _check_expired_passwords(text):
+    """True only when a sec_05 data row has ``password_expired`` == Y.
+
+    The old ``password_expired\\t[Y]`` pattern matched the header (where
+    ``password_expired`` is the LAST column, followed by a newline, not a
+    tab + Y) and never a real data row, so it could not fire. Reuse the
+    extractor's column-aware check instead."""
+    return bool(_ext_expired_password_users(text))
+
+
 def _ext_audit_log_settings(text):
     """sec_06: surface the audit-related variable rows so the reader sees
     exactly which logs are OFF."""
@@ -361,8 +372,8 @@ RULES = [
     ),
     dict(
         script='sec_05_authentication_and_passwords',
-        mode='pattern', severity='Warning',
-        pattern=r'(?im)password_expired\t[Y]',
+        mode='check', check=_check_expired_passwords,
+        severity='Warning',
         title='Accounts with expired passwords',
         recommendation='Force password reset for expired accounts. Configure '
                        'default_password_lifetime to limit silent-expiry risk.',
@@ -642,10 +653,12 @@ RULES = [
 def find_findings(log_dir: Path) -> list:
     findings: list = []
 
+    failed_stems: set = set()
     for status, script in read_summary(log_dir / '_summary.txt'):
         if status != 'FAIL':
             continue
         log_base = script.replace('/', '_').replace('.sql', '.log')
+        failed_stems.add(Path(log_base).stem)
         log_path = log_dir / log_base
         detail = '(no log captured)'
         if log_path.exists():
@@ -668,6 +681,11 @@ def find_findings(log_dir: Path) -> list:
     # both call parse_result_sets internally).
     log_text_cache: dict = {}
     for log in sorted(log_dir.glob('*.log')):
+        # Skip content-rule evaluation for scripts already marked FAIL:
+        # their partial output is error-contaminated and would produce a
+        # second bogus finding on top of the "Script execution failed" one.
+        if log.stem in failed_stems:
+            continue
         for rule in RULES:
             if not script_matches_log(rule['script'], log.stem):
                 continue
@@ -687,6 +705,16 @@ def find_findings(log_dir: Path) -> list:
                     hit = True
                     snip = m.group(0)
                     detail = 'Match: ' + (snip if len(snip) <= 200 else snip[:200] + '...')
+            elif rule['mode'] == 'check':
+                # Custom predicate -- used when has_data / pattern are too
+                # broad or cannot see column values (e.g. sec_05
+                # password_expired, where the flag is a mid-row cell).
+                try:
+                    if rule['check'](text):
+                        hit = True
+                except Exception as e:
+                    print(f'[warn] check predicate failed on {log.name}: {e}',
+                          file=sys.stderr)
             if not hit:
                 continue
             objs: list = []
@@ -747,7 +775,7 @@ def render_top_issues(findings: list) -> str:
     for f in top:
         sev = f['severity'].lower()
         cls = 'warn' if sev == 'warning' else ''
-        anchor = re.sub(r'[^A-Za-z0-9]', '-', f['script'] + '-' + f['title']).lower()
+        anchor = finding_anchor(f)
         parts.append(
             f"<li class='{cls}'><div class='it'>"
             f"<span class='ti'><a class='jump' href='#f-{anchor}'>{esc(f['title'])}</a></span>"
@@ -767,7 +795,7 @@ def render_findings(findings: list) -> str:
     parts = []
     for f in sorted(findings, key=lambda x: (severity_rank(x['severity']), x['script'])):
         sev = f['severity'].lower()
-        anchor = re.sub(r'[^A-Za-z0-9]', '-', f['script'] + '-' + f['title']).lower()
+        anchor = finding_anchor(f)
         parts.append(f"<div class='finding sev-{sev}' id='f-{anchor}'>")
         parts.append(
             f"<div class='finding-head'>"
@@ -976,6 +1004,10 @@ def main() -> int:
         if not fingerprint and ctx_fp:
             fingerprint = ctx_fp
         ctx_name = context_label(ctx_fp, target, ctx['name'])
+        # Stamp the context onto every finding so per-(context, finding)
+        # HTML anchors are unique across databases in a multi-DB report.
+        for f in findings:
+            f['context'] = ctx_name
         report.append(dict(
             name=ctx_name, log_dir=ctx['log_dir'], findings=findings,
             passed=passed, failed=failed,

@@ -188,6 +188,13 @@ function Get-LogResultSets {
         } else { $i++ }
     }
     $script:_LogCache[$key].Sets = $sets.ToArray()
+    # Once the structured result sets are parsed, the raw Text/Lines for this
+    # log are no longer needed by any downstream rule (all column-aware rules
+    # go through the parsed Sets). Drop them so a large-fleet run does not hold
+    # the full text of every log in memory. Pattern-based rules that still want
+    # the raw text call Get-LogText, which re-reads from disk on demand.
+    $script:_LogCache[$key].Text  = $null
+    $script:_LogCache[$key].Lines = $null
     return $script:_LogCache[$key].Sets
 }
 
@@ -241,6 +248,35 @@ function Test-LogHasDataRows {
     param([string]$LogPath)
     foreach ($s in (Get-LogResultSets $LogPath)) { if ($s.Rows -and $s.Rows.Length -gt 0) { return $true } }
     return $false
+}
+
+# Collect EVERY data-row value found under any column whose (space/underscore-
+# stripped, lower-cased) name matches one of $ColumnAliases, across all parsed
+# result sets. Unlike Get-ColumnValue (which stops at the first non-empty hit),
+# this returns the full list so a rule can scan multiple rows / multiple DBs.
+function Get-ColumnValues {
+    param([string]$LogPath, [string[]]$ColumnAliases)
+    $out = New-Object System.Collections.Generic.List[string]
+    $sets = Get-LogResultSets $LogPath
+    if (-not $sets -or $sets.Count -eq 0) { return ,$out.ToArray() }
+    $aliasNorm = New-Object System.Collections.Generic.List[string]
+    foreach ($a in $ColumnAliases) {
+        $n = ($a -replace '[\s_]', '').ToLowerInvariant()
+        if ($n) { [void]$aliasNorm.Add($n) }
+    }
+    foreach ($set in $sets) {
+        if (-not $set.Columns) { continue }
+        for ($ci = 0; $ci -lt $set.Columns.Length; $ci++) {
+            $cnorm = ([string]$set.Columns[$ci] -replace '[\s_]', '').ToLowerInvariant()
+            if ($aliasNorm.Contains($cnorm)) {
+                foreach ($row in $set.Rows) {
+                    $v = [string]$row.($set.Columns[$ci])
+                    if ($null -ne $v) { [void]$out.Add($v.Trim()) }
+                }
+            }
+        }
+    }
+    return ,$out.ToArray()
 }
 
 # -----------------------------------------------------------------------------
@@ -305,7 +341,24 @@ function Get-FindingsFromRules {
             if (-not $base.Contains($script)) { continue }
             foreach ($rule in $idx[$script]) {
                 $hit = $false; $context = ''
-                if ($rule.Pattern) {
+                if ($rule.Predicate) {
+                    # Column-aware rule: the scriptblock inspects the parsed
+                    # result sets (via Get-LogResultSets / Get-ColumnValue) and
+                    # returns either a boolean or a non-empty context string.
+                    # This is more robust than a text regex against the padded,
+                    # multi-column sqlcmd output where the target column is
+                    # mid-header and the separator is several dash-runs.
+                    $res = & $rule.Predicate $logFull
+                    # Collapse any stray pipeline output to the last emitted
+                    # value so an accidental extra write does not confuse the
+                    # boolean/string check below.
+                    if ($res -is [System.Array]) { $res = if ($res.Count) { $res[-1] } else { $false } }
+                    if ($res -is [string]) {
+                        if ($res) { $hit = $true; $context = $res }
+                    } elseif ($res) {
+                        $hit = $true; $context = '(condition matched in script output)'
+                    }
+                } elseif ($rule.Pattern) {
                     if ($null -eq $textCached) { $textCached = Get-LogText $logFull }
                     if ($textCached -and ($textCached -match $rule.Pattern)) {
                         $hit = $true

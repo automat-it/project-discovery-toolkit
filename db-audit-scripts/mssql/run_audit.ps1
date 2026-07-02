@@ -84,12 +84,15 @@ $Categories = if ($Category -eq "both") { @("perf","sec") } else { @($Category) 
 # Locate sqlcmd
 # ---------------------------------------------------------------------------
 if (-not (Get-Command sqlcmd -ErrorAction SilentlyContinue)) {
-    Write-Error @"
+    # Write-Error is TERMINATING under $ErrorActionPreference='Stop', so a
+    # following `exit 2` would never run. Emit to stderr non-terminating and
+    # exit explicitly so the documented exit code actually propagates.
+    [Console]::Error.WriteLine(@"
 sqlcmd not found on PATH.
 Install via winget:
   winget install Microsoft.go-sqlcmd          # recommended (no ODBC)
   winget install Microsoft.SQLServerCmdLineUtils
-"@
+"@)
     exit 2
 }
 

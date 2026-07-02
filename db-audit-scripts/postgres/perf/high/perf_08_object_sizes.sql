@@ -14,6 +14,7 @@ SELECT
     pg_database_size(datname)                            AS size_bytes
 FROM pg_database
 WHERE NOT datistemplate
+  AND has_database_privilege(datname, 'CONNECT')
 ORDER BY pg_database_size(datname) DESC;
 
 -- ---------------------------------------------------------------------------
@@ -107,11 +108,11 @@ SELECT
     ispopulated,
     hasindexes,
     pg_size_pretty(pg_total_relation_size(
-        (schemaname || '.' || quote_ident(matviewname))::regclass
+        (quote_ident(schemaname) || '.' || quote_ident(matviewname))::regclass
     ))                                                   AS size
 FROM pg_matviews
 ORDER BY pg_total_relation_size(
-    (schemaname || '.' || quote_ident(matviewname))::regclass
+    (quote_ident(schemaname) || '.' || quote_ident(matviewname))::regclass
 ) DESC;
 
 -- ---------------------------------------------------------------------------

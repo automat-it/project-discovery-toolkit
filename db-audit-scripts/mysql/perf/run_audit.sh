@@ -79,9 +79,13 @@ pass=0; fail=0
 SUMMARY="$OUT/_summary.txt"
 : > "$SUMMARY"
 
-# mysql does not uniformly support --abort-source-on-error across builds.
-# We detect statement-level errors by grepping the log for "^ERROR NNNN" after
-# each run, which is how the mysql client prefixes server errors to stderr.
+# mysql does not uniformly support --abort-source-on-error across builds, so
+# the client's exit status alone can miss a mid-script statement error. As a
+# backstop we also scan the log for a genuine mysql CLI error line, which the
+# client prints to stderr as:  ERROR NNNN (SQLSTATE): message
+# The regex below requires the 4-digit error code AND the " (" that opens the
+# SQLSTATE, so an ordinary result row whose first column merely starts with
+# the word "ERROR" (e.g. an audit finding) does NOT flip the run to FAIL.
 run_mysql() {
     if [ -n "$DEFAULTS_FILE" ]; then
         # --defaults-file MUST be the first option on the command line.
@@ -104,7 +108,7 @@ for priority in critical high medium low; do
         log="$OUT/${priority}_${base}.log"
         rc=0
         run_mysql "$f" > "$log" 2>&1 || rc=$?
-        if [ "$rc" -eq 0 ] && ! grep -qE '^ERROR [0-9]+' "$log"; then
+        if [ "$rc" -eq 0 ] && ! grep -qE '^ERROR [0-9]{4} \(' "$log"; then
             pass=$((pass+1))
             printf "[OK  ] %-8s %s\n" "$priority" "$base.sql"
             printf "OK  %s/%s\n" "$priority" "$base.sql" >> "$SUMMARY"

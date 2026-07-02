@@ -21,9 +21,23 @@ SELECT extname, extversion
 FROM pg_extension
 WHERE extname = 'pg_stat_statements';
 
--- Statistics reset timestamp (interpret all stats relative to this)
+-- Gate the whole file on the extension being installed; compute once.
+SELECT EXISTS (
+    SELECT 1 FROM pg_extension WHERE extname = 'pg_stat_statements'
+) AS has_pgss
+\gset
+\if :has_pgss
+
+-- Statistics reset timestamp (interpret all stats relative to this).
+-- pg_stat_statements_info is PostgreSQL 14+; guard it separately.
+SELECT current_setting('server_version_num')::int >= 140000 AS has_pgss_info
+\gset
+\if :has_pgss_info
 SELECT stats_reset
 FROM pg_stat_statements_info;
+\else
+SELECT 'pg_stat_statements_info requires PostgreSQL 14+ - skipped' AS note;
+\endif
 
 -- ---------------------------------------------------------------------------
 -- Top 25 queries by TOTAL execution time (overall load contributors)
@@ -142,3 +156,7 @@ FROM pg_stat_statements
 WHERE shared_blks_dirtied > 0
 ORDER BY shared_blks_dirtied DESC
 LIMIT 25;
+
+\else
+SELECT 'pg_stat_statements not installed - section skipped' AS note;
+\endif

@@ -230,12 +230,14 @@ on Aurora.
   `pg_ls_tmpdir`, `pg_read_server_files`, `pg_rotate_logfile`,
   `pg_reload_conf`, `pg_switch_wal`, or `ALTER SYSTEM`.
 
-* **`pg_stat_statements` must be enabled in the audited database.**
-  Default Aurora parameter groups already load the library via
-  `shared_preload_libraries`; you still need to run, once per database:
-  `CREATE EXTENSION IF NOT EXISTS pg_stat_statements;`. Without it,
-  `perf_01`, `perf_04`, `perf_13`, `perf_16`, `perf_23` raise `relation
-  "pg_stat_statements" does not exist`.
+* **`pg_stat_statements` is strongly recommended** but no longer
+  required to run. Default Aurora parameter groups already load the
+  library via `shared_preload_libraries`; enable it once per database
+  with `CREATE EXTENSION IF NOT EXISTS pg_stat_statements;` for full SQL
+  workload analysis. When the extension is absent, `perf_01`, `perf_04`,
+  `perf_09`, `perf_13`, `perf_16`, and `perf_23` now detect that and skip
+  their pg_stat_statements sections cleanly (emitting a short note row)
+  instead of aborting.
 
 * **Recommended parameter-group tweaks** (take effect after reboot on
   cluster parameter group):

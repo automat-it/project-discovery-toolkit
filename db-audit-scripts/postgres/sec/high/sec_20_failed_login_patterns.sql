@@ -33,16 +33,9 @@ ORDER BY name;
 -- with pg_read_server_files in 14+). Guard behind a privilege check so the
 -- script does not fail for ordinary audit roles.
 -- ---------------------------------------------------------------------------
-DO $$
-BEGIN
-    IF has_table_privilege('pg_catalog.pg_hba_file_rules', 'SELECT') THEN
-        RAISE NOTICE 'pg_hba_file_rules accessible — inspecting rules';
-    ELSE
-        RAISE NOTICE 'pg_hba_file_rules NOT accessible for this role; skipping';
-    END IF;
-END
-$$;
-
+SELECT has_table_privilege('pg_catalog.pg_hba_file_rules', 'SELECT') AS can_read_hba
+\gset
+\if :can_read_hba
 SELECT
     line_number,
     type,
@@ -54,8 +47,10 @@ SELECT
     options,
     error
 FROM pg_hba_file_rules
-WHERE has_table_privilege('pg_catalog.pg_hba_file_rules','SELECT')
 ORDER BY line_number;
+\else
+SELECT 'pg_hba_file_rules NOT accessible for this role - skipped' AS note;
+\endif
 
 -- ---------------------------------------------------------------------------
 -- Roles with LOGIN and no password expiry window

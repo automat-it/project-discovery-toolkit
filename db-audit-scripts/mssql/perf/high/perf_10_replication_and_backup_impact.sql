@@ -188,9 +188,19 @@ END CATCH;
 -- ---------------------------------------------------------------------------
 IF OBJECT_ID('msdb.dbo.log_shipping_monitor_primary') IS NOT NULL
 BEGIN
-    SELECT * FROM msdb.dbo.log_shipping_monitor_primary;
+    BEGIN TRY
+        SELECT * FROM msdb.dbo.log_shipping_monitor_primary;
+    END TRY
+    BEGIN CATCH
+        PRINT '[note] log_shipping_monitor_primary not accessible: ' + ERROR_MESSAGE();
+    END CATCH;
 END;
 IF OBJECT_ID('msdb.dbo.log_shipping_monitor_secondary') IS NOT NULL
 BEGIN
-    SELECT * FROM msdb.dbo.log_shipping_monitor_secondary;
+    BEGIN TRY
+        SELECT * FROM msdb.dbo.log_shipping_monitor_secondary;
+    END TRY
+    BEGIN CATCH
+        PRINT '[note] log_shipping_monitor_secondary not accessible: ' + ERROR_MESSAGE();
+    END CATCH;
 END;

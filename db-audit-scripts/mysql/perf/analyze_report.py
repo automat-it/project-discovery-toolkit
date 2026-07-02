@@ -29,10 +29,10 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from _analyze_lib import (  # noqa: E402
     DOMAIN_BUCKETS_PERF, SHARED_CSS, context_label, copy_brand_assets,
-    domain_counts, esc, find_log, has_data_rows, kv_grid, now_str,
-    object_table, parse_result_sets, read_fingerprint, read_log_text,
-    read_summary, read_target, render_at_a_glance, render_cover,
-    render_fingerprint_card,
+    domain_counts, esc, find_log, finding_anchor, has_data_rows, kv_grid,
+    now_str, object_table, parse_result_sets, read_fingerprint,
+    read_log_text, read_summary, read_target, render_at_a_glance,
+    render_cover, render_fingerprint_card,
     script_matches_log, severity_rank, svg_bar, svg_donut,
 )
 
@@ -288,8 +288,18 @@ def _ext_seq_scans(text):
     return s['rows'][:200] if s else []
 
 
+# Fire capacity findings at >= 80% consumed (AUTO_INCREMENT headroom,
+# connection usage). The trigger predicate and the object extractor share
+# this threshold so a finding never fires with an empty object table.
+_CAPACITY_PCT_THRESHOLD = 80.0
+
+
 def _ext_capacity(text):
-    """perf_15: AUTO_INCREMENT consumption, max_connections usage etc."""
+    """perf_15: AUTO_INCREMENT consumption, max_connections usage etc.
+
+    perf_15 emits BARE numeric percentages (pct_consumed with no trailing
+    ``%`` sign), so we parse the numeric value of any pct/percent column
+    and keep rows at or above the capacity threshold."""
     sets = parse_result_sets(text)
     out = []
     for s in sets:
@@ -302,11 +312,75 @@ def _ext_capacity(text):
                 if 'pct' not in col.lower() and 'percent' not in col.lower():
                     continue
                 try:
-                    if float(str(val).rstrip('%')) >= 50:
+                    if float(str(val).rstrip('%')) >= _CAPACITY_PCT_THRESHOLD:
                         out.append(r); break
                 except ValueError:
                     pass
     return out[:200]
+
+
+def _check_capacity(text):
+    """True when any perf_15 pct column is at/above the capacity
+    threshold. Replaces the old literal-``%`` pattern which never fired
+    because perf_15 prints bare numerics (pct_consumed)."""
+    return bool(_ext_capacity(text))
+
+
+def _check_replica_lag(text):
+    """True when perf_10 shows a real, non-zero replica apply lag.
+
+    perf_10 does NOT emit a ``Seconds_Behind_Source`` column (that name
+    only appears in SQL comments). The real per-worker lag column is
+    ``lag_seconds`` (a TIMESTAMPDIFF in seconds from the applier-status-
+    by-worker view); ``delay_remaining_sec`` is the configured apply
+    delay. Both views are empty on a primary, so this correctly does not
+    fire there. We also honour a genuine SHOW REPLICA/SLAVE STATUS
+    ``Seconds_Behind_Source`` / ``Seconds_Behind_Master`` column if a
+    real replica emits one."""
+    lag_cols = ('lag_seconds', 'seconds_behind_source',
+                'seconds_behind_master')
+    for s in parse_result_sets(text):
+        by_lc = {c.lower(): c for c in s['columns']}
+        present = [by_lc[c] for c in lag_cols if c in by_lc]
+        if not present:
+            continue
+        for r in s['rows']:
+            for col in present:
+                v = (r.get(col) or '').strip()
+                if not v or v.upper() in ('NULL', 'NONE'):
+                    continue
+                try:
+                    if float(v) > 0:
+                        return True
+                except ValueError:
+                    pass
+    return False
+
+
+def _ext_replica_lag(text):
+    """Surface the lagging per-worker / status rows for the finding card."""
+    lag_cols = ('lag_seconds', 'seconds_behind_source',
+                'seconds_behind_master')
+    groups = []
+    for s in parse_result_sets(text):
+        by_lc = {c.lower(): c for c in s['columns']}
+        present = [by_lc[c] for c in lag_cols if c in by_lc]
+        if not present:
+            continue
+        rows = []
+        for r in s['rows']:
+            for col in present:
+                v = (r.get(col) or '').strip()
+                try:
+                    if v and v.upper() not in ('NULL', 'NONE') and float(v) > 0:
+                        rows.append(r)
+                        break
+                except ValueError:
+                    pass
+        if rows:
+            groups.append(dict(label='Replica apply lag',
+                               columns=s['columns'], rows=rows[:200]))
+    return groups
 
 
 def _ext_partitions(text):
@@ -457,13 +531,14 @@ RULES = [
     ),
     dict(
         script='perf_10_replication_and_backup_impact',
-        mode='pattern',
-        pattern=r'(?im)Seconds_Behind_(Source|Master)\s+[1-9]\d*',
+        mode='check', check=_check_replica_lag,
         severity='Critical',
         title='Replica lag detected',
         recommendation='Replica is behind primary. Check parallel-replication '
                        'settings (replica_parallel_workers, replica_preserve_'
                        'commit_order) and IO capacity.',
+        extractor=_ext_replica_lag,
+        ext_label='Lagging replica workers',
         commands=(
             "-- See per-worker apply progress\n"
             "SELECT CHANNEL_NAME, WORKER_ID, SERVICE_STATE, LAST_APPLIED_TRANSACTION\n"
@@ -527,13 +602,14 @@ RULES = [
     ),
     dict(
         script='perf_15_capacity_and_growth',
-        mode='pattern',
-        # Require trailing `%` so the rule fires only on capacity-percent
-        # columns -- without it, ANY numeric column with a 50+ value
-        # (durations, sizes, row counts) wrongly produces a Critical.
-        pattern=r'(?im)\b(5[0-9]|6[0-9]|7[0-9]|8[0-9]|9[0-9]|100)\.\d+\s*%',
+        # perf_15 emits pct_consumed as a BARE numeric (no trailing '%'),
+        # so the old literal-'%' pattern never fired. A check predicate
+        # parses the numeric pct columns and fires at/above the capacity
+        # threshold -- while still ignoring durations / sizes / row counts
+        # that are not pct columns.
+        mode='check', check=_check_capacity,
         severity='Critical',
-        title='Capacity headroom under 50% (AUTO_INCREMENT / storage / conns)',
+        title='Capacity headroom under 20% (AUTO_INCREMENT / storage / conns)',
         recommendation='Plan AUTO_INCREMENT widening (INT->BIGINT), storage '
                        'expansion, or raise max_connections before exhaustion.',
         extractor=_ext_capacity,
@@ -591,10 +667,12 @@ def find_findings(log_dir: Path) -> list:
     findings: list = []
 
     # 1. Failed scripts -> Critical
+    failed_stems: set = set()
     for status, script in read_summary(log_dir / '_summary.txt'):
         if status != 'FAIL':
             continue
         log_base = script.replace('/', '_').replace('.sql', '.log')
+        failed_stems.add(Path(log_base).stem)
         log_path = log_dir / log_base
         detail = '(no log captured)'
         if log_path.exists():
@@ -615,6 +693,11 @@ def find_findings(log_dir: Path) -> list:
     # 2. Apply content rules. Read each .log at most once.
     log_text_cache: dict = {}
     for log in sorted(log_dir.glob('*.log')):
+        # Skip content-rule evaluation for scripts already marked FAIL:
+        # their partial output is error-contaminated and would produce a
+        # second bogus finding on top of the "Script execution failed" one.
+        if log.stem in failed_stems:
+            continue
         for rule in RULES:
             if not script_matches_log(rule['script'], log.stem):
                 continue
@@ -710,7 +793,7 @@ def render_top_issues(findings: list) -> str:
     for f in top:
         sev = f['severity'].lower()
         cls = 'warn' if sev == 'warning' else ''
-        anchor = re.sub(r'[^A-Za-z0-9]', '-', f['script'] + '-' + f['title']).lower()
+        anchor = finding_anchor(f)
         parts.append(
             f"<li class='{cls}'><div class='it'>"
             f"<span class='ti'><a class='jump' href='#f-{anchor}'>{esc(f['title'])}</a></span>"
@@ -737,7 +820,7 @@ def render_findings(findings: list) -> str:
     parts = []
     for f in sorted(findings, key=lambda x: (severity_rank(x['severity']), x['script'])):
         sev = f['severity'].lower()
-        anchor = re.sub(r'[^A-Za-z0-9]', '-', f['script'] + '-' + f['title']).lower()
+        anchor = finding_anchor(f)
         parts.append(f"<div class='finding sev-{sev}' id='f-{anchor}'>")
         # Header
         parts.append(
@@ -1029,6 +1112,10 @@ def main() -> int:
             fingerprint = ctx_fp
         # Replace "(single run)" with actual DB name when available.
         ctx_name = context_label(ctx_fp, target, ctx['name'])
+        # Stamp the context onto every finding so per-(context, finding)
+        # HTML anchors are unique across databases in a multi-DB report.
+        for f in findings:
+            f['context'] = ctx_name
         report.append(dict(
             name=ctx_name, log_dir=ctx['log_dir'], findings=findings,
             passed=passed, failed=failed,

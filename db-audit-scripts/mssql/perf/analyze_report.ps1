@@ -128,13 +128,36 @@ function Get-ServerFingerprint {
     return [pscustomobject]$fp
 }
 
-function Get-LastBackupAge {
+# Return per-database backup ages parsed from perf_10's last-full-backup result
+# set. That set (perf_10.sql:162-177) has one row per user database with a
+# `database_name` column and a trailing `hours_since_full` column, so the old
+# "first trailing number wins" regex reported the alphabetically-first DB's age
+# for every context. Here we locate the result set that carries BOTH columns and
+# emit a {Database; Hours} record per row so callers attribute each age to the
+# correct database.
+function Get-BackupAges {
     param([string]$LogDir)
+    $out = New-Object System.Collections.Generic.List[object]
     $log = Find-LogFile $LogDir 'perf_10_replication_and_backup'
-    if (-not $log) { return $null }
-    $text = Get-LogText $log.FullName
-    if ($text -match '(?ims)hours_since_full[^\n]*\n[\s\-]+\n[^\n]*?\b(\d+)\s*$') { return [int]$matches[1] }
-    return $null
+    if (-not $log) { return ,$out.ToArray() }
+    foreach ($set in (Get-LogResultSets $log.FullName)) {
+        if (-not $set.Columns) { continue }
+        $dbCol = $null; $hrCol = $null
+        foreach ($c in $set.Columns) {
+            $n = ([string]$c -replace '[\s_]', '').ToLowerInvariant()
+            if ($n -eq 'databasename')   { $dbCol = $c }
+            if ($n -eq 'hourssincefull') { $hrCol = $c }
+        }
+        if (-not $dbCol -or -not $hrCol) { continue }
+        foreach ($row in $set.Rows) {
+            $db = [string]$row.$dbCol
+            $hv = [string]$row.$hrCol
+            if ($db -and $hv -match '^\d+$') {
+                [void]$out.Add([pscustomobject]@{ Database = $db.Trim(); Hours = [int]$hv })
+            }
+        }
+    }
+    return ,$out.ToArray()
 }
 
 # ===========================================================================
@@ -215,7 +238,20 @@ ALTER INDEX [<index>] ON [<schema>].[<table>] REBUILD WITH (ONLINE = ON);
 '@
     }
     @{ Script='perf_09_temp_and_memory_pressure'; Severity='Critical'; Scope='Server'
-       Pattern='pending_memory_grant_count\s*\n\s*-+\s*\n\s*[1-9]'
+       # perf_09 has no `pending_memory_grant_count` column. The memory-grant
+       # queue backlog is exposed by the resource-semaphore result set
+       # (perf_09.sql:62) as `waiter_count` (queries waiting for a grant) plus
+       # `timeout_error_count` / `forced_grant_count`. Fire when any of those is
+       # non-zero on a data row (mid-header, multi-column -> use parsed values).
+       Predicate={ param($p)
+           $bits = @()
+           foreach ($col in @('waiter_count','timeout_error_count','forced_grant_count')) {
+               foreach ($v in (Get-ColumnValues $p @($col))) {
+                   if ($v -match '^[1-9]\d*$') { $bits += "$col=$v"; break }
+               }
+           }
+           if ($bits.Count -gt 0) { "memory-grant queue backlog ($($bits -join ', '))" } else { $false }
+       }
        Title='Pending memory grants -- memory pressure'
        CIS='-'; GDPR='-'; SOC2='A1.2'
        Detail='Queries are queuing for memory; capacity issue.'
@@ -235,7 +271,17 @@ ALTER DATABASE tempdb ADD FILE (NAME=tempdev2, FILENAME=''<path>\tempdb2.ndf'', 
 '@
     }
     @{ Script='perf_10_replication_and_backup_impact'; Severity='Critical'; Scope='Database'
-       Pattern='hours_since_full\s*\n\s*-+\s*\n.*\b([2-9]\d{2,}|1\d{3,})\b'
+       # `hours_since_full` is the LAST column of a multi-column, multi-row set
+       # (one row per user DB, perf_10.sql:171); the old single-column pattern
+       # never matched. Read every parsed value and fire when any database's
+       # last full backup is older than 7 days (168h) -- a real multi-day gap.
+       Predicate={ param($p)
+           $worst = -1
+           foreach ($v in (Get-ColumnValues $p @('hours_since_full'))) {
+               if ($v -match '^\d+$') { $n = [int]$v; if ($n -gt $worst) { $worst = $n } }
+           }
+           if ($worst -gt 168) { "a database's last full backup is $worst hours old (> 7 days)" } else { $false }
+       }
        Title='Last full backup older than several days'
        CIS='2.7'; GDPR='Art.32(1)(c)'; SOC2='A1.2'
        Detail='Full backup gap. Verify the backup job runs and the target storage accepts writes.'
@@ -358,10 +404,20 @@ foreach ($r in $report) {
                 Docs = $f.Docs
                 CIS = $f.CIS; GDPR = $f.GDPR; SOC2 = $f.SOC2
                 Databases = New-Object System.Collections.Generic.List[string]
+                SeenInServerRun = $false
                 UniqueDbsCached = $null
             }
         }
-        if ($r.Name -ne '_server' -or $f.Scope -eq 'Server') {
+        # Never push the literal '_server' pseudo-context into the per-database
+        # affected set: it is not a database and inflates the "N of M" counts.
+        # - Server-scope findings are instance-wide; they don't track DBs.
+        # - Database-scope findings add the real database name. When such a
+        #   finding surfaces only in the _server pass (its script enumerates all
+        #   user DBs from master, e.g. perf_10 backup gap), flag it so the rollup
+        #   can attribute it as instance-wide instead of "0 of N".
+        if ($r.Name -eq '_server') {
+            if ($f.Scope -eq 'Database') { $titleAgg[$key].SeenInServerRun = $true }
+        } else {
             [void]$titleAgg[$key].Databases.Add($r.Name)
         }
     }
@@ -389,7 +445,25 @@ foreach ($r in $report) {
     $totalInfo += [int]$r.Info
     $totalFail += [int]$r.Failed
 }
-$dbCount = $report.Count
+# Count only real databases -- the '_server' pseudo-context is the instance-wide
+# pass, not a database, so it must not inflate "Databases analyzed" nor the
+# "N of M databases" denominators that use $dbCount.
+$dbCount = @($report | Where-Object { $_.Name -ne '_server' }).Count
+
+# Pre-compute the human "scope" phrase for each aggregated finding so every
+# render site (server-wide table, fleet rollup, roadmap) stays consistent.
+#   Server scope                -> instance-wide
+#   DB scope, named DBs         -> "N of M databases"
+#   DB scope, only in _server   -> instance-wide (all databases) -- the finding
+#     came from the master pass whose query enumerates every user DB.
+foreach ($a in $aggregated) {
+    $whereText =
+        if ($a.Scope -eq 'Server') { 'instance-wide' }
+        elseif ($a.UniqueDbsCached.Count -gt 0) { "$($a.UniqueDbsCached.Count) of $dbCount databases" }
+        elseif ($a.SeenInServerRun) { 'instance-wide (all databases)' }
+        else { "0 of $dbCount databases" }
+    Add-Member -InputObject $a -NotePropertyName WhereText -NotePropertyValue $whereText -Force
+}
 
 # Domain counts
 $domainCounts = New-Object System.Collections.Generic.List[object]
@@ -555,7 +629,7 @@ if ($topIssues.Length -eq 0) {
     Add-To $sb "<ol class='issue-list'>"
     foreach ($a in $topIssues) {
         $sevC  = $a.Severity.ToLower()
-        $where = if ($a.Scope -eq 'Server') { 'instance-wide' } else { "$($a.UniqueDbsCached.Count) of $dbCount databases" }
+        $where = $a.WhereText
         $cls   = if ($sevC -eq 'warning') { 'warn' } else { '' }
         Add-To $sb "<li class='$cls'><div class='it'><span class='ti'><a class='jump' href='#$($a.Anchor)'>$(Esc $a.Title)</a></span><span class='sc'><span class='badge $sevC'>$($a.Severity)</span> &middot; $where</span></div><div class='ac'><strong>Action:</strong> $(Esc $a.Recommendation)</div></li>"
     }
@@ -598,7 +672,7 @@ if ($serverFindings.Length -eq 0) {
     Add-To $sb "<table><thead><tr><th>Severity</th><th>Finding</th><th>Affected DBs</th><th>CIS</th><th>GDPR</th><th>SOC2</th></tr></thead><tbody>"
     foreach ($a in $serverFindings) {
         $sevC = $a.Severity.ToLower()
-        Add-To $sb "<tr id='$($a.Anchor)' class='sev-$sevC'><td><span class='badge $sevC'>$($a.Severity)</span></td><td><strong>$(Esc $a.Title)</strong><br><span class='detail'>$(Esc $a.Recommendation)</span></td><td>$($a.UniqueDbsCached.Count)</td><td class='compl'>$(Esc $a.CIS)</td><td class='compl'>$(Esc $a.GDPR)</td><td class='compl'>$(Esc $a.SOC2)</td></tr>"
+        Add-To $sb "<tr id='$($a.Anchor)' class='sev-$sevC'><td><span class='badge $sevC'>$($a.Severity)</span></td><td><strong>$(Esc $a.Title)</strong><br><span class='detail'>$(Esc $a.Recommendation)</span></td><td>all</td><td class='compl'>$(Esc $a.CIS)</td><td class='compl'>$(Esc $a.GDPR)</td><td class='compl'>$(Esc $a.SOC2)</td></tr>"
     }
     Add-To $sb "</tbody></table>"
 }
@@ -615,20 +689,40 @@ if ($dbFindings.Length -eq 0) {
         $sevC = $a.Severity.ToLower()
         $dbs  = $a.UniqueDbsCached
         $cnt  = $dbs.Count
-        $top  = ($dbs | Select-Object -First 6) -join ', '
-        if ($cnt -gt 6) { $top += " ... (+$($cnt - 6) more)" }
-        Add-To $sb "<tr id='$($a.Anchor)' class='sev-$sevC'><td><span class='badge $sevC'>$($a.Severity)</span></td><td><strong>$(Esc $a.Title)</strong><br><span class='detail'>$(Esc $a.Recommendation)</span></td><td><strong>$cnt</strong> of $dbCount</td><td class='detail'>$(Esc $top)</td><td class='compl'>$(Esc $a.CIS)</td><td class='compl'>$(Esc $a.GDPR)</td></tr>"
+        if ($cnt -gt 0) {
+            $affected = "<strong>$cnt</strong> of $dbCount"
+            $top      = ($dbs | Select-Object -First 6) -join ', '
+            if ($cnt -gt 6) { $top += " ... (+$($cnt - 6) more)" }
+        } elseif ($a.SeenInServerRun) {
+            # Surfaced only in the instance-wide (_server) pass, whose query
+            # enumerates every user database -- not attributable to one named DB.
+            $affected = 'all databases'
+            $top      = '(instance-wide check)'
+        } else {
+            $affected = "<strong>0</strong> of $dbCount"
+            $top      = ''
+        }
+        Add-To $sb "<tr id='$($a.Anchor)' class='sev-$sevC'><td><span class='badge $sevC'>$($a.Severity)</span></td><td><strong>$(Esc $a.Title)</strong><br><span class='detail'>$(Esc $a.Recommendation)</span></td><td>$affected</td><td class='detail'>$(Esc $top)</td><td class='compl'>$(Esc $a.CIS)</td><td class='compl'>$(Esc $a.GDPR)</td></tr>"
     }
     Add-To $sb "</tbody></table>"
 }
 Add-To $sb "</section>"
 
-# Backup freshness
-$oldBackups = New-Object System.Collections.Generic.List[object]
+# Backup freshness -- perf_10 in every context enumerates all user databases, so
+# collect ages from all contexts and keep the WORST (oldest) age seen per real
+# database name. This attributes each age to the correct database instead of
+# labelling the alphabetically-first row with the context name.
+$ageByDb = @{}
 foreach ($r in $report) {
-    if ($r.Name -eq '_server') { continue }
-    $age = Get-LastBackupAge $r.LogDir
-    if ($null -ne $age -and $age -gt 72) { [void]$oldBackups.Add([pscustomobject]@{ Name = $r.Name; Hours = $age }) }
+    foreach ($b in (Get-BackupAges $r.LogDir)) {
+        if (-not $ageByDb.ContainsKey($b.Database) -or $b.Hours -gt $ageByDb[$b.Database]) {
+            $ageByDb[$b.Database] = $b.Hours
+        }
+    }
+}
+$oldBackups = New-Object System.Collections.Generic.List[object]
+foreach ($db in $ageByDb.Keys) {
+    if ($ageByDb[$db] -gt 72) { [void]$oldBackups.Add([pscustomobject]@{ Name = $db; Hours = $ageByDb[$db] }) }
 }
 Add-To $sb "<section class='section'><h2>5. Backup Freshness Alert</h2>"
 if ($oldBackups.Count -gt 0) {
@@ -667,7 +761,7 @@ foreach ($p in $phases) {
         Add-To $sb "<li>No items.</li>"
     } else {
         foreach ($f in $items) {
-            $where = if ($f.Scope -eq 'Server') { 'instance-wide' } else { "$($f.UniqueDbsCached.Count) of $dbCount databases" }
+            $where = $f.WhereText
             Add-To $sb "<li><strong>$(Esc $f.Title)</strong> ($where) -- $(Esc $f.Recommendation)</li>"
         }
     }

@@ -16,22 +16,30 @@ SET NOCOUNT ON;
 SET TRANSACTION ISOLATION LEVEL READ UNCOMMITTED;  -- read-only audit; avoid taking shared locks on hot objects
 
 -- ---------------------------------------------------------------------------
--- Database sizes (data + log files)
+-- Database sizes (data + log files). sys.master_files is unavailable on
+-- Azure SQL Database; TRY/CATCH lets the block skip cleanly instead of
+-- aborting the whole script.
 -- ---------------------------------------------------------------------------
-SELECT
-    d.name                                            AS database_name,
-    d.state_desc,
-    d.recovery_model_desc,
-    CAST(SUM(CASE WHEN mf.type = 0 THEN mf.size END) * 8.0 / 1024 AS DECIMAL(18,2)) AS data_mb,
-    CAST(SUM(CASE WHEN mf.type = 1 THEN mf.size END) * 8.0 / 1024 AS DECIMAL(18,2)) AS log_mb,
-    CAST(SUM(mf.size) * 8.0 / 1024 AS DECIMAL(18,2))   AS total_mb,
-    COUNT(CASE WHEN mf.type = 0 THEN 1 END)           AS data_file_count,
-    COUNT(CASE WHEN mf.type = 1 THEN 1 END)           AS log_file_count
-FROM sys.databases d
-JOIN sys.master_files mf ON mf.database_id = d.database_id
-WHERE d.database_id > 4
-GROUP BY d.name, d.state_desc, d.recovery_model_desc
-ORDER BY total_mb DESC;
+BEGIN TRY
+    SELECT
+        d.name                                            AS database_name,
+        d.state_desc,
+        d.recovery_model_desc,
+        CAST(SUM(CASE WHEN mf.type = 0 THEN mf.size END) * 8.0 / 1024 AS DECIMAL(18,2)) AS data_mb,
+        CAST(SUM(CASE WHEN mf.type = 1 THEN mf.size END) * 8.0 / 1024 AS DECIMAL(18,2)) AS log_mb,
+        CAST(SUM(mf.size) * 8.0 / 1024 AS DECIMAL(18,2))   AS total_mb,
+        COUNT(CASE WHEN mf.type = 0 THEN 1 END)           AS data_file_count,
+        COUNT(CASE WHEN mf.type = 1 THEN 1 END)           AS log_file_count
+    FROM sys.databases d
+    JOIN sys.master_files mf ON mf.database_id = d.database_id
+    WHERE d.database_id > 4
+    GROUP BY d.name, d.state_desc, d.recovery_model_desc
+    ORDER BY total_mb DESC;
+END TRY
+BEGIN CATCH
+    PRINT '[note] sys.master_files not accessible (likely Azure SQL DB): '
+          + ERROR_MESSAGE();
+END CATCH;
 
 -- ---------------------------------------------------------------------------
 -- Schema sizes in the current database

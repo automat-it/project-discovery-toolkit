@@ -74,6 +74,11 @@ ORDER BY query_start;
 -- ---------------------------------------------------------------------------
 -- Top queries by rollback ratio (often the same as deadlock victims)
 -- ---------------------------------------------------------------------------
+SELECT EXISTS (
+    SELECT 1 FROM pg_extension WHERE extname = 'pg_stat_statements'
+) AS has_pgss
+\gset
+\if :has_pgss
 SELECT
     calls,
     rows,
@@ -86,3 +91,6 @@ WHERE query ILIKE '%UPDATE%'
    OR query ILIKE '%INSERT%'
 ORDER BY calls DESC
 LIMIT 25;
+\else
+SELECT 'pg_stat_statements not installed - section skipped' AS note;
+\endif

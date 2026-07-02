@@ -33,7 +33,7 @@ WHERE NAME IN ('events_statements_current',
 -- Top 25 queries by TOTAL execution time (overall load contributors)
 -- ---------------------------------------------------------------------------
 SELECT
-    ROUND(SUM_TIMER_WAIT / 1e12, 2)                         AS total_ms,
+    ROUND(SUM_TIMER_WAIT / 1e9, 2)                          AS total_ms,
     ROUND(SUM_TIMER_WAIT / 1e12 / 60, 2)                    AS total_min,
     COUNT_STAR                                               AS calls,
     ROUND(AVG_TIMER_WAIT / 1e9, 2)                          AS mean_ms,

@@ -67,8 +67,8 @@ cd db-audit-scripts/postgres
 
 # Run all perf + all sec scripts in priority order
 export PGPASSWORD='<your-password>'
-bash perf/run_audit.sh -u <user> -h <host> -p 5432 -d <database> -o ./reports
-bash sec/run_audit.sh  -u <user> -h <host> -p 5432 -d <database> -o ./reports
+bash perf/run_audit.sh -h <host> -P 5432 -U <user> -d <database> -o ./reports
+bash sec/run_audit.sh  -h <host> -P 5432 -U <user> -d <database> -o ./reports
 
 # Build the branded HTML report (cover + watermark from ../assets/)
 python3 perf/analyze_report.py ./reports/postgres_perf_<TS> \

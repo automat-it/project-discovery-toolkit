@@ -7,6 +7,13 @@
 -- Read-only.
 -- =============================================================================
 
+-- Gate the pg_stat_statements sections on the extension being installed.
+SELECT EXISTS (
+    SELECT 1 FROM pg_extension WHERE extname = 'pg_stat_statements'
+) AS has_pgss
+\gset
+\if :has_pgss
+
 -- ---------------------------------------------------------------------------
 -- Queries with high coefficient of variation (stddev / mean)
 -- ---------------------------------------------------------------------------
@@ -50,6 +57,10 @@ WHERE calls > 20
   AND max_exec_time > min_exec_time * 100
 ORDER BY (max_exec_time - min_exec_time) DESC
 LIMIT 30;
+
+\else
+SELECT 'pg_stat_statements not installed - section skipped' AS note;
+\endif
 
 -- ---------------------------------------------------------------------------
 -- Plan-cache mode and prepared statement settings

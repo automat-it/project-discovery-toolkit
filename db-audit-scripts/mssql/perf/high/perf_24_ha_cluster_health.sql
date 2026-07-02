@@ -165,7 +165,7 @@ SELECT
     t.transaction_id,
     t.name                                                AS tran_name,
     t.transaction_begin_time,
-    DATEDIFF(second, t.transaction_begin_time, SYSUTCDATETIME()) AS age_seconds,
+    DATEDIFF(second, t.transaction_begin_time, SYSDATETIME()) AS age_seconds,
     t.transaction_type,
     t.transaction_state,
     s.status                                              AS session_status,
@@ -177,7 +177,7 @@ FROM sys.dm_tran_active_transactions t
 JOIN sys.dm_tran_session_transactions st ON st.transaction_id = t.transaction_id
 JOIN sys.dm_exec_sessions s              ON s.session_id = st.session_id
 LEFT JOIN sys.dm_exec_requests r         ON r.session_id = st.session_id
-WHERE t.transaction_begin_time < DATEADD(minute, -5, SYSUTCDATETIME())
+WHERE t.transaction_begin_time < DATEADD(minute, -5, SYSDATETIME())
 ORDER BY t.transaction_begin_time;
 
 -- ---------------------------------------------------------------------------
@@ -193,7 +193,7 @@ BEGIN TRY
         (SELECT COUNT(*) FROM sys.dm_hadr_database_replica_states
           WHERE synchronization_state <> 2)                                     AS unsynced_db_replicas,
         (SELECT COUNT(*) FROM sys.dm_tran_active_transactions
-          WHERE transaction_begin_time < DATEADD(minute, -5, SYSUTCDATETIME())) AS long_running_txns;
+          WHERE transaction_begin_time < DATEADD(minute, -5, SYSDATETIME())) AS long_running_txns;
 END TRY
 BEGIN CATCH
     PRINT '[note] HA summary failed: ' + ERROR_MESSAGE();

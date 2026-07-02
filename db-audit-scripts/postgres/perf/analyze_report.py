@@ -30,10 +30,10 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from _analyze_lib import (  # noqa: E402
     DOMAIN_BUCKETS_PERF, SHARED_CSS, context_label, copy_brand_assets,
-    domain_counts, esc, find_log, has_data_rows, kv_grid, now_str,
-    object_table, parse_result_sets, read_fingerprint, read_log_text,
-    read_summary, read_target, render_at_a_glance, render_cover,
-    render_fingerprint_card,
+    domain_counts, esc, find_log, finding_anchor, has_data_rows, kv_grid,
+    now_str, object_table, parse_result_sets, read_fingerprint,
+    read_log_text, read_summary, read_target, render_at_a_glance,
+    render_cover, render_fingerprint_card,
     script_matches_log, severity_rank, svg_bar, svg_donut,
 )
 
@@ -281,17 +281,35 @@ def _ext_bloat(text):
     return []
 
 
+# Fire capacity findings at >= 80% headroom-consumed (sequence wraparound,
+# xid wraparound, storage). The trigger predicate and the object extractor
+# share this threshold so a finding never fires with an empty object table.
+_CAPACITY_PCT_THRESHOLD = 80.0
+
+
 def _ext_temp_files(text):
     """perf_09 set 0: per-database temp activity. set 1: per-statement.
-    Return whichever set has rows whose temp counter is non-zero."""
+    Return whichever set has rows whose temp counter is non-zero.
+
+    Deliberately restricted to result sets that expose a real temp
+    *activity* metric (temp_file_count / temp_bytes_total / temp_blks_*).
+    The trailing pg_settings block (name|setting rows such as
+    ``log_temp_files | -1``) is NOT a temp-activity set and must never
+    make this fire."""
     sets = parse_result_sets(text)
     out = []
     for s in sets:
         if not s['rows']:
             continue
-        lc = [c.lower() for c in s['columns']]
-        # Look for any column that smells like temp metric
-        temp_cols = [c for c in s['columns'] if 'temp_' in c.lower() or 'temp_blocks' in c.lower()]
+        cols_lc = {c.lower() for c in s['columns']}
+        # A settings block is name|setting -- skip it explicitly so the
+        # ``log_temp_files | -1`` row cannot be mistaken for temp activity.
+        if 'name' in cols_lc and 'setting' in cols_lc:
+            continue
+        temp_cols = [c for c in s['columns']
+                     if 'temp_file' in c.lower() or 'temp_bytes' in c.lower()
+                     or 'temp_blocks' in c.lower() or 'temp_blks' in c.lower()
+                     or 'temp_total' in c.lower()]
         if not temp_cols:
             continue
         kept = []
@@ -312,12 +330,22 @@ def _ext_temp_files(text):
     return out
 
 
+def _check_temp_spill(text):
+    """True only when perf_09 shows genuine temp-file activity (>0 temp
+    files / bytes) -- excludes the ``log_temp_files | -1`` settings row
+    that made the old ``temp_files\\s*\\|.*[1-9]`` pattern always fire."""
+    return bool(_ext_temp_files(text))
+
+
 def _ext_capacity(text):
     """perf_15: identity / sequence consumption + storage usage.
 
-    Only keep rows whose pct/percent column reads >= 50. The value must
-    be a plain number (optionally with a trailing %) -- we explicitly
-    reject things like ``50 GB`` to avoid wrongly flagging sizes.
+    perf_15 emits BARE numeric percentages (pct_to_wraparound,
+    pct_consumed, ...) with NO trailing ``%`` sign, so we parse the
+    numeric value of any pct/percent/consumed column. Only keep rows at
+    or above the capacity threshold. The value must be a plain number
+    (optionally with a trailing %) -- we explicitly reject things like
+    ``50 GB`` to avoid wrongly flagging sizes.
     """
     out = []
     pct_re = re.compile(r'^\s*([0-9]+(?:\.[0-9]+)?)\s*%?\s*$')
@@ -336,10 +364,17 @@ def _ext_capacity(text):
                     n = float(m.group(1))
                 except ValueError:
                     continue
-                if 50 <= n <= 100:
+                if _CAPACITY_PCT_THRESHOLD <= n <= 100:
                     out.append(r)
                     break
     return out[:200]
+
+
+def _check_capacity(text):
+    """True when any perf_15 pct column is at/above the capacity
+    threshold. Replaces the old literal-``%`` pattern which never fired
+    because perf_15 prints bare numerics."""
+    return bool(_ext_capacity(text))
 
 
 def _ext_checkpoint(text):
@@ -349,12 +384,121 @@ def _ext_checkpoint(text):
     return []
 
 
+def _check_forced_checkpoints(text):
+    """True when perf_14 reports a meaningful share of *requested*
+    (forced) checkpoints. perf_14 emits forced_checkpoints (a count) and
+    forced_pct (requested / total, 2dp) as VALUES under psql headers, so
+    the old ``forced_checkpoints\\s*\\|\\s*[1-9]`` header-alias pattern
+    never matched. We fire when forced_pct >= 5 (the script's own hint
+    threshold) or, as a fallback, when the forced_checkpoints count > 0
+    and there is no forced_pct column."""
+    for s in parse_result_sets(text):
+        cols = s['columns']
+        has_pct = 'forced_pct' in cols
+        has_cnt = 'forced_checkpoints' in cols
+        if not (has_pct or has_cnt):
+            continue
+        for r in s['rows']:
+            if has_pct:
+                try:
+                    if float(str(r.get('forced_pct', '')).strip()) >= 5.0:
+                        return True
+                except ValueError:
+                    pass
+            elif has_cnt:
+                try:
+                    if int(str(r.get('forced_checkpoints', '')).strip()) > 0:
+                        return True
+                except ValueError:
+                    pass
+    return False
+
+
+# Wait-event categories that are ALWAYS present as background/idle noise
+# on any server (the audit's own session, idle client waits, CPU rows).
+# They must not by themselves raise a "wait events captured" warning.
+_BACKGROUND_WAIT_TYPES = {'activity', 'client', 'cpu', 'cpu/running', '', '-'}
+
+
 def _ext_wait_events(text):
     # First table in perf_04: wait_event_type|wait_event|sessions|pct
     for s in parse_result_sets(text):
         if 'wait_event_type' in s['columns'] and 'sessions' in s['columns']:
             return s['rows'][:200]
     return []
+
+
+def _check_wait_events(text):
+    """True only when perf_04 captured a MEANINGFUL (non-background) wait.
+
+    The old regex matched the literal words IO/LWLock/Lock/Client/Activity
+    anywhere in the log, so the always-present background Activity/Client
+    waits fired a warning on every run. We instead inspect the wait rows
+    and ignore the background/idle categories (Activity, Client, CPU)."""
+    for s in parse_result_sets(text):
+        cols_lc = {c.lower() for c in s['columns']}
+        if not ({'wait_event_type', 'sessions'} <= cols_lc):
+            continue
+        for r in s['rows']:
+            wtype = (r.get('wait_event_type') or '').strip().lower()
+            if wtype and wtype not in _BACKGROUND_WAIT_TYPES:
+                return True
+    return False
+
+
+def _check_replication_lag(text):
+    """True when perf_10 shows a real, non-zero replication lag.
+
+    Two signals from perf_10:
+      * pg_stat_replication.replay_lag -- an interval rendered HH:MM:SS
+        (or D days HH:MM:SS); non-zero means the replica is behind.
+      * replica_lag_seconds -- epoch seconds since last replayed xact,
+        emitted on a standby (NULL/blank on a primary).
+    On a primary both are empty, so this correctly does not fire."""
+    def _interval_nonzero(v):
+        v = (v or '').strip()
+        if not v:
+            return False
+        # Match [<n> days ]HH:MM:SS[.frac]; non-zero if any component > 0.
+        m = re.search(r'(?:(\d+)\s*days?\s*)?(\d+):(\d{2}):(\d{2})', v)
+        if not m:
+            return False
+        days = int(m.group(1) or 0)
+        h, mi, s = int(m.group(2)), int(m.group(3)), int(m.group(4))
+        return (days or h or mi or s) > 0
+
+    for s in parse_result_sets(text):
+        cols = s['columns']
+        if 'replay_lag' in cols:
+            for r in s['rows']:
+                if _interval_nonzero(r.get('replay_lag')):
+                    return True
+        if 'replica_lag_seconds' in cols:
+            for r in s['rows']:
+                v = (r.get('replica_lag_seconds') or '').strip()
+                try:
+                    if v and float(v) > 0:
+                        return True
+                except ValueError:
+                    pass
+    return False
+
+
+def _ext_replication_lag(text):
+    """Surface the concrete lagging replica rows for the finding card."""
+    groups = []
+    for s in parse_result_sets(text):
+        cols = s['columns']
+        if 'replay_lag' in cols and s['rows']:
+            groups.append(dict(label='Streaming replicas (pg_stat_replication)',
+                               columns=cols, rows=s['rows'][:200]))
+        elif 'replica_lag_seconds' in cols:
+            rows = [r for r in s['rows']
+                    if (r.get('replica_lag_seconds') or '').strip()]
+            if rows:
+                groups.append(dict(label='Replica apply lag (seconds)',
+                                   columns=cols, rows=rows[:200]))
+    return groups
 
 
 RULES = [
@@ -414,8 +558,7 @@ RULES = [
     ),
     dict(
         script='perf_04_wait_events_and_io',
-        mode='pattern',
-        pattern=r'(?i)\b(IO|LWLock|Lock|BufferPin|Client|Activity)\b',
+        mode='check', check=_check_wait_events,
         severity='Warning',
         title='Wait events captured',
         recommendation='Wait events were recorded. Review their distribution to '
@@ -488,8 +631,7 @@ RULES = [
     ),
     dict(
         script='perf_09_temp_and_memory_pressure',
-        mode='pattern',
-        pattern=r'(?im)temp_files\s*\|.*\b[1-9]\d*\b|temp_bytes\s*\|.*\b[1-9]\d*\b',
+        mode='check', check=_check_temp_spill,
         severity='Warning',
         title='Temporary files spilled to disk',
         recommendation='work_mem is too low for some queries. Increase work_mem '
@@ -517,12 +659,13 @@ RULES = [
     ),
     dict(
         script='perf_10_replication_and_backup_impact',
-        mode='pattern',
-        pattern=r'(?im)replay_lag\s*\|\s*\d+:\d+:\d+',
+        mode='check', check=_check_replication_lag,
         severity='Critical',
         title='Replication lag detected',
         recommendation='Replica is behind primary. Check network throughput and '
                        'replica I/O / replay capacity.',
+        extractor=_ext_replication_lag,
+        ext_label='Lagging replicas',
         commands=(
             "-- Inspect replica state\n"
             "SELECT client_addr, state, sent_lsn, write_lsn, flush_lsn, replay_lsn,\n"
@@ -568,8 +711,7 @@ RULES = [
     ),
     dict(
         script='perf_14_checkpoint_bgwriter',
-        mode='pattern',
-        pattern=r'(?im)forced_checkpoints\s*\|\s*[1-9]\d*|checkpoints_req\s*\|\s*[1-9]\d*',
+        mode='check', check=_check_forced_checkpoints,
         severity='Warning',
         title='Requested (forced) checkpoints occurring',
         recommendation='Requested checkpoints indicate WAL pressure. Increase '
@@ -590,10 +732,9 @@ RULES = [
     ),
     dict(
         script='perf_15_capacity_and_growth',
-        mode='pattern',
-        pattern=r'(?im)\b(5[0-9]|6[0-9]|7[0-9]|8[0-9]|9[0-9]|100)\.\d+\s*%',
+        mode='check', check=_check_capacity,
         severity='Critical',
-        title='Capacity headroom under 50% (sequence / storage / connections)',
+        title='Capacity headroom under 20% (sequence / storage / connections)',
         recommendation='Plan widening (INT to BIGINT for sequences), storage '
                        'expansion, or raise max_connections before exhaustion.',
         extractor=_ext_capacity,
@@ -628,10 +769,14 @@ def find_findings(log_dir: Path) -> list:
     findings: list = []
 
     # 1. Failed scripts -> Critical
+    failed_stems: set = set()
     for status, script in read_summary(log_dir / '_summary.txt'):
         if status != 'FAIL':
             continue
+        # Log file name for e.g. 'critical/perf_01_top_sql.sql' is
+        # 'critical_perf_01_top_sql.log' -> stem 'critical_perf_01_top_sql'.
         log_base = script.replace('/', '_').replace('.sql', '.log')
+        failed_stems.add(Path(log_base).stem)
         log_path = log_dir / log_base
         detail = '(no log captured)'
         if log_path.exists():
@@ -652,6 +797,12 @@ def find_findings(log_dir: Path) -> list:
     # 2. Apply content rules. Read each .log at most once.
     log_text_cache: dict = {}
     for log in sorted(log_dir.glob('*.log')):
+        # A script marked FAIL already produced a "Script execution
+        # failed" finding above. Its log holds only error-contaminated
+        # partial output, so running content rules against it would emit
+        # a second, bogus finding. Skip content evaluation for it.
+        if log.stem in failed_stems:
+            continue
         for rule in RULES:
             if not script_matches_log(rule['script'], log.stem):
                 continue
@@ -747,7 +898,7 @@ def render_top_issues(findings: list) -> str:
     for f in top:
         sev = f['severity'].lower()
         cls = 'warn' if sev == 'warning' else ''
-        anchor = re.sub(r'[^A-Za-z0-9]', '-', f['script'] + '-' + f['title']).lower()
+        anchor = finding_anchor(f)
         parts.append(
             f"<li class='{cls}'><div class='it'>"
             f"<span class='ti'><a class='jump' href='#f-{anchor}'>{esc(f['title'])}</a></span>"
@@ -774,7 +925,7 @@ def render_findings(findings: list) -> str:
     parts = []
     for f in sorted(findings, key=lambda x: (severity_rank(x['severity']), x['script'])):
         sev = f['severity'].lower()
-        anchor = re.sub(r'[^A-Za-z0-9]', '-', f['script'] + '-' + f['title']).lower()
+        anchor = finding_anchor(f)
         parts.append(f"<div class='finding sev-{sev}' id='f-{anchor}'>")
         # Header
         parts.append(
@@ -1063,6 +1214,10 @@ def main() -> int:
             fingerprint = ctx_fp
         # Replace "(single run)" with actual DB name when available.
         ctx_name = context_label(ctx_fp, target, ctx['name'])
+        # Stamp the context onto every finding so per-(context, finding)
+        # HTML anchors are unique across databases in a multi-DB report.
+        for f in findings:
+            f['context'] = ctx_name
         report.append(dict(
             name=ctx_name, log_dir=ctx['log_dir'], findings=findings,
             passed=passed, failed=failed,

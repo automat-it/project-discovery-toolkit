@@ -26,6 +26,11 @@ ORDER BY temp_bytes DESC;
 -- ---------------------------------------------------------------------------
 -- Top queries spilling to disk (pg_stat_statements)
 -- ---------------------------------------------------------------------------
+SELECT EXISTS (
+    SELECT 1 FROM pg_extension WHERE extname = 'pg_stat_statements'
+) AS has_pgss
+\gset
+\if :has_pgss
 SELECT
     temp_blks_read                                       AS temp_blocks_read,
     temp_blks_written                                    AS temp_blocks_written,
@@ -40,6 +45,9 @@ FROM pg_stat_statements
 WHERE temp_blks_written > 0
 ORDER BY temp_blks_written DESC
 LIMIT 25;
+\else
+SELECT 'pg_stat_statements not installed - section skipped' AS note;
+\endif
 
 -- ---------------------------------------------------------------------------
 -- Currently active queries using temp files

@@ -98,9 +98,10 @@ ORDER BY trx_started;
 -- ---------------------------------------------------------------------------
 -- Uncommitted XA transactions — silent tail-latency + binlog-retention source
 -- ---------------------------------------------------------------------------
-SET @xa_sql := 'XA RECOVER';
--- XA RECOVER requires XA_RECOVER_ADMIN privilege; we execute best-effort.
--- Consumers without the privilege will see a permission error line.
+-- XA RECOVER cannot be gated read-only from information_schema and needs
+-- XA_RECOVER_ADMIN (8.0.29+) or PROCESS; running it here could abort the
+-- script for a normal audit user, so surface it as a manual follow-up.
+SELECT 'XA RECOVER requires XA_RECOVER_ADMIN; run manually' AS note;
 
 -- ---------------------------------------------------------------------------
 -- Summary

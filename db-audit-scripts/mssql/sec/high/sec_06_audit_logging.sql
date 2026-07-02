@@ -99,17 +99,22 @@ SELECT name, value, value_in_use
 FROM sys.configurations
 WHERE name = 'default trace enabled';
 
-SELECT
-    id                                                AS trace_id,
-    status,
-    path,
-    max_size,
-    max_files,
-    start_time,
-    last_event_time,
-    event_count,
-    dropped_event_count
-FROM sys.traces;
+-- sys.traces does not exist on Azure SQL Database. Deferred-name-resolution
+-- makes an absent object a batch-aborting compile error, so guard it via
+-- OBJECT_ID + dynamic SQL rather than TRY/CATCH.
+IF OBJECT_ID('sys.traces') IS NOT NULL
+    EXEC sp_executesql N'
+        SELECT
+            id                                                AS trace_id,
+            status,
+            path,
+            max_size,
+            max_files,
+            start_time,
+            last_event_time,
+            event_count,
+            dropped_event_count
+        FROM sys.traces;';
 
 -- ---------------------------------------------------------------------------
 -- Extended Events sessions currently running

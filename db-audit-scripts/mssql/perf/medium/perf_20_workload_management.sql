@@ -139,7 +139,7 @@ SELECT TOP 50
     r.command,
     r.wait_type,
     r.wait_time,
-    DATEDIFF(second, r.start_time, SYSUTCDATETIME())     AS seconds_running,
+    DATEDIFF(second, r.start_time, SYSDATETIME())        AS seconds_running,
     r.cpu_time,
     r.total_elapsed_time,
     r.percent_complete,
@@ -148,7 +148,7 @@ FROM sys.dm_exec_requests r
 JOIN sys.dm_exec_sessions s ON s.session_id = r.session_id
 OUTER APPLY sys.dm_exec_sql_text(r.sql_handle) txt
 WHERE s.is_user_process = 1
-  AND DATEDIFF(second, r.start_time, SYSUTCDATETIME()) > 60
+  AND DATEDIFF(second, r.start_time, SYSDATETIME()) > 60
 ORDER BY seconds_running DESC;
 
 -- ---------------------------------------------------------------------------
@@ -183,4 +183,4 @@ SELECT
     (SELECT COUNT(*) FROM sys.dm_exec_requests r
       JOIN sys.dm_exec_sessions s ON s.session_id = r.session_id
       WHERE s.is_user_process = 1
-        AND DATEDIFF(second, r.start_time, SYSUTCDATETIME()) > 60)             AS long_running_requests;
+        AND DATEDIFF(second, r.start_time, SYSDATETIME()) > 60)             AS long_running_requests;

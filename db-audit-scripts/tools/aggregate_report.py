@@ -4,15 +4,16 @@ aggregate_report.py
 
 Aggregate the output of a full audit run into a single HTML report.
 
-The audit scripts in this repository each write one text file per script
-(see the `run_audit.sh` runners in the accompanying docker harness).
-This tool walks a directory of those outputs and renders:
+The audit scripts in this repository each write one log file per script
+(see the `run_audit.sh` runners for postgres/mysql and the `.ps1` runners
+for mssql). This tool walks a directory of those outputs and renders:
 
-  * A summary table: script | exit code | size | wall time
+  * A summary table: script | status | size
   * A high-level findings roll-up: scripts that produced error markers
-    (ERROR, Msg, FATAL, severity ≥ 16) vs scripts that ran clean
+    (psql ERROR, mysql ERROR NNNN, sqlcmd Msg/Level, FATAL) vs scripts
+    that ran clean
   * Per-priority (critical / high / medium / low) success counts
-  * An expandable section per script with the raw output
+  * An expandable section per script with the raw output (truncated)
 
 The script is intentionally dependency-free (stdlib only) so it can run
 anywhere Python 3.8+ is available.
@@ -21,17 +22,21 @@ Usage:
 
   python3 aggregate_report.py <audit_output_dir> [--out report.html]
 
-  audit_output_dir is expected to have the layout produced by
-  run_audit.sh:
+  audit_output_dir is expected to have the flat layout produced by the
+  run_audit.sh runners:
 
-    <dir>/
-      perf/
-        perf_01_top_queries.txt
-        perf_02_blocking_and_locks.txt
-        ...
-      sec/
-        sec_01_users_and_privileges.txt
-        ...
+    reports/<engine>_<cat>_<TS>/
+      _summary.txt                          ← pass/fail roll-up
+      critical_perf_01_top_sql.log          ← <priority>_<script>.log
+      high_perf_06_index_audit.log
+      medium_perf_11_bloat_estimation.log
+      low_perf_16_plan_instability.log
+      ...
+
+The runner never writes per-script metadata trailers into the .log files;
+priority and script name are recovered from the log FILENAME, and pass/
+fail status is read from `_summary.txt` (falling back to scanning the log
+for engine error markers).
 
 Exit code is 0 if the report was produced, non-zero on input errors.
 The report does NOT fail the run on findings — it is purely a viewer.
@@ -49,122 +54,175 @@ from pathlib import Path
 from typing import Iterable
 
 ERROR_PATTERNS = [
-    # PG / psql style
-    re.compile(r"^(ERROR|FATAL|PANIC):", re.MULTILINE),
-    # MySQL client style
-    re.compile(r"^ERROR \d+ \(", re.MULTILINE),
-    # SQL Server sqlcmd style — Msg N, Level M (16+ treated as real error)
-    re.compile(r"^Msg \d+, Level (1[6-9]|2[0-5]),", re.MULTILINE),
+    # PG / psql style. psql prefixes errors with the input location, e.g.
+    #   psql:/path/perf_01.sql:26: ERROR:  relation "x" does not exist
+    # so the ERROR:/FATAL:/PANIC: token is NOT at line start. Match it
+    # anywhere on the line (still anchored to a word boundary).
+    re.compile(r"\b(ERROR|FATAL|PANIC):", re.MULTILINE),
+    # MySQL client style — server errors are printed to stderr as
+    #   ERROR NNNN (SQLSTATE): message
+    # Require the 4+ digit code and the "(SQLSTATE)" paren so a data row
+    # whose first column happens to read "ERROR ..." doesn't false-positive.
+    re.compile(r"^ERROR \d{4} \(", re.MULTILINE),
+    # SQL Server sqlcmd style — Msg N, Level M. Broadened to Level 11-25:
+    # Level 11-16 are the ordinary "something is wrong" errors (Msg 229
+    # "permission denied", the real RDS/least-privilege failure, is
+    # Level 14), 17-25 are resource/fatal. Levels 0-10 are informational.
+    re.compile(r"^Msg \d+, Level (1[1-9]|2[0-5]),", re.MULTILINE),
+    # SQL Server login failures (Msg 18456 & friends may arrive without a
+    # Level prefix depending on the driver).
+    re.compile(r"^(Login failed|Cannot open database)", re.MULTILINE),
     # Sqlcmd connection errors
     re.compile(r"^Sqlcmd: Error", re.MULTILINE),
 ]
 
-# Pulled from the trailing metadata block run_audit.sh appends.
-EXIT_RE = re.compile(r"^-- Exit code:\s*(\d+)\s*$", re.MULTILINE)
-FINISHED_RE = re.compile(r"^-- Finished:\s*(.+)\s*$", re.MULTILINE)
-SCRIPT_RE = re.compile(r"^-- Script:\s*(.+)\s*$", re.MULTILINE)
-DATABASE_RE = re.compile(r"^-- Database:\s*(.+)\s*$", re.MULTILINE)
+# `_summary.txt` roll-up lines written by every runner:
+#   OK  critical/perf_02_blocking_and_locks.sql
+#   FAIL critical/perf_01_top_sql.sql
+SUMMARY_LINE_RE = re.compile(
+    r"^(OK|FAIL)\s+(?:critical|high|medium|low)/(\S+?)\.sql\s*$",
+    re.MULTILINE,
+)
+
+
+PRIORITIES = ("critical", "high", "medium", "low")
+
+# Overall cap on recorded error lines per script (across all patterns), so
+# a log full of error rows doesn't balloon the report.
+MAX_ERROR_HITS = 10
+
+# Truncate embedded raw-log bodies so one enormous log can't make the whole
+# HTML report unopenable. Keep the head and tail (errors surface at either
+# end) with an elision marker in the middle.
+MAX_BODY_BYTES = 64 * 1024           # ~64 KB total kept per log
+_HEAD_BYTES = MAX_BODY_BYTES // 2
+_TAIL_BYTES = MAX_BODY_BYTES - _HEAD_BYTES
 
 
 @dataclass
 class ScriptResult:
-    name: str              # perf_01_top_queries
+    name: str              # perf_01_top_sql
     category: str          # perf | sec | unknown
     priority: str          # critical | high | medium | low | unknown
     path: Path
     size_bytes: int
-    exit_code: int | None
-    finished_at: str | None
-    database: str | None
+    # OK / FAIL from _summary.txt, or None if the summary didn't cover it.
+    summary_status: str | None
     error_hits: list[str] = field(default_factory=list)
     # Cached body so render_details() doesn't re-read every file from disk.
     body: str = ""
 
     @property
     def status(self) -> str:
-        if self.exit_code is None:
-            return "unknown"
-        if self.exit_code != 0:
+        # _summary.txt is authoritative for pass/fail. FAIL always wins.
+        if self.summary_status == "FAIL":
             return "failed"
+        # Error markers in the log => surface as "errors" even if the runner
+        # (or a missing summary) recorded it as OK.
         if self.error_hits:
             return "errors"
-        return "ok"
+        if self.summary_status == "OK":
+            return "ok"
+        return "unknown"
 
 
-PRIORITY_FROM_FILENAME = {
-    # The run_audit.sh runners flatten priority out of the output path, so
-    # we recover it from the *input* script path that the runner recorded
-    # in the "-- Script:" trailer. Script paths look like
-    # .../perf/critical/perf_01_top_queries.sql
-    "critical": "critical",
-    "high": "high",
-    "medium": "medium",
-    "low": "low",
-}
+def parse_summary(root: Path) -> dict[str, str]:
+    """Map script stem (e.g. 'perf_01_top_sql') -> 'OK' | 'FAIL'.
+
+    Reads the run's `_summary.txt`. Absent/unreadable => empty map, and
+    per-script status falls back to error-marker scanning.
+    """
+    summary = root / "_summary.txt"
+    if not summary.is_file():
+        return {}
+    text = summary.read_text(errors="replace")
+    result: dict[str, str] = {}
+    for m in SUMMARY_LINE_RE.finditer(text):
+        status, stem = m.group(1), m.group(2)
+        # Last write wins; a FAIL is never overwritten by a later OK.
+        if result.get(stem) != "FAIL":
+            result[stem] = status
+    return result
 
 
-def parse_result(path: Path) -> ScriptResult:
+def _split_priority(stem: str) -> tuple[str, str]:
+    """Split '<priority>_<script>' -> (priority, script-stem).
+
+    Filenames are e.g. 'critical_perf_01_top_sql'. The priority is the
+    prefix before the first underscore; the rest is the script stem.
+    """
+    prefix, _, rest = stem.partition("_")
+    if prefix in PRIORITIES and rest:
+        return prefix, rest
+    return "unknown", stem
+
+
+def parse_result(path: Path, summary: dict[str, str]) -> ScriptResult:
     text = path.read_text(errors="replace")
-    exit_match = EXIT_RE.search(text)
-    finished_match = FINISHED_RE.search(text)
-    script_match = SCRIPT_RE.search(text)
-    database_match = DATABASE_RE.search(text)
 
-    name = path.stem
+    priority, script_stem = _split_priority(path.stem)
 
-    # Prefer category from the parent directory of the output; fall back
-    # to heuristics on the name.
-    category = path.parent.name if path.parent.name in ("perf", "sec") else "unknown"
-
-    priority = "unknown"
-    if script_match:
-        parts = script_match.group(1).split("/")
-        for part in parts:
-            if part in PRIORITY_FROM_FILENAME:
-                priority = part
-                break
+    # Category from the script stem (perf_* / sec_*), else from the run
+    # folder name (postgres_perf_<TS> / mysql_sec_<TS>).
+    if script_stem.startswith("perf"):
+        category = "perf"
+    elif script_stem.startswith("sec"):
+        category = "sec"
+    elif "_perf_" in path.parent.name:
+        category = "perf"
+    elif "_sec_" in path.parent.name:
+        category = "sec"
+    else:
+        category = "unknown"
 
     error_hits: list[str] = []
-    # Only scan the body (everything before the trailing metadata block).
-    # Anchor on a newline so a stray ``-- Script: ...`` comment inside the
-    # script's SQL doesn't truncate the body.
-    if script_match:
-        body = text[:script_match.start()]
-        # If the match wasn't at line start, walk back to the previous newline.
-        nl = text.rfind("\n", 0, script_match.start())
-        if nl != -1:
-            body = text[:nl + 1]
-    else:
-        body = text
     for pat in ERROR_PATTERNS:
-        for m in pat.finditer(body):
-            # record the full matching line
-            line_start = body.rfind("\n", 0, m.start()) + 1
-            line_end = body.find("\n", m.end())
+        if len(error_hits) >= MAX_ERROR_HITS:
+            break
+        for m in pat.finditer(text):
+            line_start = text.rfind("\n", 0, m.start()) + 1
+            line_end = text.find("\n", m.end())
             if line_end == -1:
-                line_end = len(body)
-            error_hits.append(body[line_start:line_end].strip())
-            if len(error_hits) >= 10:
+                line_end = len(text)
+            error_hits.append(text[line_start:line_end].strip())
+            if len(error_hits) >= MAX_ERROR_HITS:
                 break
 
     return ScriptResult(
-        name=name,
+        name=script_stem,
         category=category,
         priority=priority,
         path=path,
         size_bytes=path.stat().st_size,
-        exit_code=int(exit_match.group(1)) if exit_match else None,
-        finished_at=finished_match.group(1).strip() if finished_match else None,
-        database=database_match.group(1).strip() if database_match else None,
+        summary_status=summary.get(script_stem),
         error_hits=error_hits,
         body=text,
+    )
+
+
+def _truncate_body(body: str) -> str:
+    """Keep head+tail of an over-long log body with an elision marker."""
+    raw = body.encode("utf-8", errors="replace")
+    if len(raw) <= MAX_BODY_BYTES:
+        return body
+    head = raw[:_HEAD_BYTES].decode("utf-8", errors="replace")
+    tail = raw[-_TAIL_BYTES:].decode("utf-8", errors="replace")
+    elided = len(raw) - _HEAD_BYTES - _TAIL_BYTES
+    return (
+        f"{head}\n\n"
+        f"... [{elided:,} bytes elided -- open the raw .log file for the "
+        f"full output] ...\n\n"
+        f"{tail}"
     )
 
 
 def iter_output_files(root: Path) -> Iterable[Path]:
     for dirpath, _dirs, files in os.walk(root):
         for f in files:
-            if f.endswith(".txt"):
+            # Every runner writes one <priority>_<script>.log per script,
+            # plus a single _summary.txt roll-up. Ingest the .log files and
+            # skip the summary (handled separately).
+            if f.endswith(".log"):
                 yield Path(dirpath) / f
 
 
@@ -208,7 +266,7 @@ Generated: {generated}</p>
 <p>
   <span class="count count-ok">{n_ok}</span>clean
   <span class="count count-errors">{n_errors}</span>errors in output
-  <span class="count count-failed">{n_failed}</span>non-zero exit
+  <span class="count count-failed">{n_failed}</span>failed
   <span class="count count-unknown">{n_unknown}</span>unknown
 </p>
 
@@ -247,8 +305,7 @@ def render_priority_table(results: list[ScriptResult]) -> str:
 
 def render_results_table(results: list[ScriptResult]) -> str:
     rows = ["<tr><th>Script</th><th>Category</th><th>Priority</th>"
-            "<th>Status</th><th>Exit</th><th>Size</th>"
-            "<th>Finished</th><th>Error hits</th></tr>"]
+            "<th>Status</th><th>Size</th><th>Error hits</th></tr>"]
     for r in sorted(results, key=lambda r: (r.category, r.priority, r.name)):
         rows.append(
             f"<tr class=\"status-{r.status}\">"
@@ -256,9 +313,7 @@ def render_results_table(results: list[ScriptResult]) -> str:
             f"<td>{html.escape(r.category)}</td>"
             f"<td>{html.escape(r.priority)}</td>"
             f"<td>{r.status}</td>"
-            f"<td>{r.exit_code if r.exit_code is not None else '?'}</td>"
             f"<td>{r.size_bytes:,}</td>"
-            f"<td class=\"muted\">{html.escape(r.finished_at or '')}</td>"
             f"<td>{len(r.error_hits)}</td>"
             f"</tr>"
         )
@@ -271,6 +326,7 @@ def render_details(results: list[ScriptResult]) -> str:
         # Use the cached body from parse_result rather than re-reading the
         # file from disk -- halves I/O on large multi-script audit runs.
         body = r.body or r.path.read_text(errors="replace")
+        body = _truncate_body(body)
         err_block = ""
         if r.error_hits:
             err_block = "<div><strong>Errors detected:</strong><br>" + "".join(
@@ -279,7 +335,8 @@ def render_details(results: list[ScriptResult]) -> str:
         chunks.append(
             f'<details id="{html.escape(r.name)}">'
             f'<summary><strong>{html.escape(r.name)}</strong> '
-            f'<span class="muted">({r.category}/{r.priority}, exit {r.exit_code})</span>'
+            f'<span class="muted">({html.escape(r.category)}/'
+            f'{html.escape(r.priority)}, {r.status})</span>'
             f'</summary>'
             f'{err_block}'
             f'<pre>{html.escape(body)}</pre>'
@@ -289,9 +346,15 @@ def render_details(results: list[ScriptResult]) -> str:
 
 
 def build_report(root: Path, out: Path) -> None:
-    results = [parse_result(p) for p in iter_output_files(root)]
+    summary = parse_summary(root)
+    results = [parse_result(p, summary) for p in iter_output_files(root)]
     if not results:
-        print(f"no .txt outputs found under {root}", file=sys.stderr)
+        print(
+            f"no per-script .log files found under {root}\n"
+            f"  expected the layout produced by run_audit.sh:\n"
+            f"    reports/<engine>_<cat>_<TS>/<priority>_<script>.log",
+            file=sys.stderr,
+        )
         sys.exit(2)
 
     from datetime import datetime, timezone

@@ -6,6 +6,12 @@
 -- Read-only.
 -- =============================================================================
 
+-- Gate pg_stat_statements sections on the extension being installed.
+SELECT EXISTS (
+    SELECT 1 FROM pg_extension WHERE extname = 'pg_stat_statements'
+) AS has_pgss
+\gset
+
 -- ---------------------------------------------------------------------------
 -- Current wait events (instantaneous snapshot)
 -- ---------------------------------------------------------------------------
@@ -110,6 +116,7 @@ LIMIT 30;
 -- shared_blk_write_time, local_blk_*, temp_blk_*. We pick the right column
 -- set per server version so the script works on both PG <= 16 and PG 17+.
 -- ---------------------------------------------------------------------------
+\if :has_pgss
 SELECT current_setting('server_version_num')::int >= 170000 AS pg17_or_newer
 \gset
 \if :pg17_or_newer
@@ -142,6 +149,9 @@ FROM pg_stat_statements
 WHERE shared_blks_read > 0
 ORDER BY shared_blks_read DESC
 LIMIT 25;
+\endif
+\else
+SELECT 'pg_stat_statements not installed - section skipped' AS note;
 \endif
 
 -- ---------------------------------------------------------------------------

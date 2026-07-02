@@ -30,7 +30,7 @@ SELECT
     blocking_sess.login_name                 AS blocking_user,
     blocking_sess.host_name                  AS blocking_host,
     blocking_sess.program_name               AS blocking_app,
-    DATEDIFF(second, blocking_sess.last_request_start_time, SYSUTCDATETIME())
+    DATEDIFF(second, blocking_sess.last_request_start_time, SYSDATETIME())
                                              AS blocker_last_request_age_sec,
     LEFT(blocked_txt.text, 300)              AS blocked_statement,
     LEFT(blocking_txt.text, 300)             AS blocking_statement
@@ -99,7 +99,7 @@ SELECT
     at.transaction_id,
     at.name                                                AS transaction_name,
     at.transaction_begin_time,
-    DATEDIFF(second, at.transaction_begin_time, SYSUTCDATETIME()) AS txn_age_sec,
+    DATEDIFF(second, at.transaction_begin_time, SYSDATETIME()) AS txn_age_sec,
     at.transaction_state,
     r.status                                               AS request_status,
     r.wait_type,
@@ -109,7 +109,7 @@ JOIN sys.dm_tran_session_transactions st ON st.transaction_id = at.transaction_i
 JOIN sys.dm_exec_sessions s               ON s.session_id = st.session_id
 LEFT JOIN sys.dm_exec_requests r          ON r.session_id = s.session_id
 OUTER APPLY sys.dm_exec_sql_text(r.sql_handle) txt
-WHERE at.transaction_begin_time < DATEADD(second, -60, SYSUTCDATETIME())
+WHERE at.transaction_begin_time < DATEADD(second, -60, SYSDATETIME())
   AND s.is_user_process = 1
 ORDER BY at.transaction_begin_time;
 
@@ -123,7 +123,7 @@ SELECT
     s.host_name,
     s.program_name,
     s.status                                               AS session_status,
-    DATEDIFF(second, s.last_request_end_time, SYSUTCDATETIME()) AS idle_sec,
+    DATEDIFF(second, s.last_request_end_time, SYSDATETIME()) AS idle_sec,
     s.open_transaction_count,
     DB_NAME(s.database_id)                                 AS database_name,
     LEFT(txt.text, 300)                                    AS last_statement

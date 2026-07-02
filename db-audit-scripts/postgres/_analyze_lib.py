@@ -77,16 +77,48 @@ _ROW_COUNT_RE = re.compile(r'^\(\s*\d+\s+rows?\s*\)\s*$')
 _ERROR_RE     = re.compile(r'^(ERROR|FATAL|psql:|Sqlcmd:|\[note\])')
 
 
-def _split_columns(line: str) -> List[str]:
-    """psql separates columns with ' | '. Split on '|' and strip whitespace."""
-    return [c.strip() for c in line.split('|')]
+# psql pads columns and separates them with ' | ' (space-pipe-space).
+# The two pipes of an embedded '||' in a value are adjacent (no space
+# between them), so a space-pipe-space delimiter never matches inside
+# '||'. Splitting on this delimiter -- and capping the split count when
+# the column count is known -- keeps embedded pipes in the LAST column.
+_PSQL_DELIM_RE = re.compile(r'\s\|\s')
 
 
-def _is_continuation(values: List[str]) -> bool:
-    """A continuation row has all leading cells blank; only the last
-    cell carries content (psql's "+ ... +" wrapping of long values)."""
-    if not values:
+def _split_columns(line: str, expected: Optional[int] = None) -> List[str]:
+    """Split a psql aligned-format line into its column cells.
+
+    Columns are separated by ' | ' (a pipe with surrounding padding). We
+    split on that delimiter -- NOT on a bare '|' -- so that a value
+    containing '||' (e.g. ``a || b`` in a Top-SQL query) is not shredded
+    into extra fields and silently dropped for having the wrong column
+    count.
+
+    When ``expected`` (the header column count) is given we cap the split
+    at ``expected - 1`` occurrences, so any real ' | ' that happens to
+    appear *inside* the last column survives intact rather than
+    overflowing the field count.
+    """
+    maxsplit = (expected - 1) if (expected and expected > 0) else 0
+    parts = _PSQL_DELIM_RE.split(line, maxsplit=maxsplit)
+    return [c.strip() for c in parts]
+
+
+def _is_continuation(values: List[str], prev_continued: bool) -> bool:
+    """Return True iff this physical line is a psql wrap-continuation of
+    the previous logical row (a long value spilling across lines).
+
+    The naive "all leading cells blank" test wrongly swallows a genuine
+    data row whose leading columns are real NULLs (rendered blank). psql
+    marks EVERY physical line of a value that continues onto the next
+    line with a trailing '+' -- so a continuation is only valid when the
+    previous physical line was itself flagged as continued (``prev_
+    continued``). A real NULL-leading row is preceded by a line with no
+    '+' marker and is therefore kept as its own row."""
+    if not prev_continued or not values:
         return False
+    # A continuation fragment carries content only in the last column and
+    # has blank leading cells.
     if not any(v.strip() for v in values[:-1]) and values[-1].strip():
         return True
     return False
@@ -119,6 +151,10 @@ def parse_result_sets(text: str) -> List[Dict]:
                 continue
             rows: List[Dict[str, str]] = []
             i += 1
+            # Track whether the previous physical line was flagged by psql
+            # as continued (trailing '+'), so a genuine wrap-continuation
+            # can be distinguished from a real NULL-leading data row.
+            prev_continued = False
             while i < len(lines):
                 r = lines[i]
                 if _ROW_COUNT_RE.match(r):
@@ -131,9 +167,11 @@ def parse_result_sets(text: str) -> List[Dict]:
                     break  # next set; do not consume divider
                 if _ERROR_RE.match(r):
                     break
-                values = _split_columns(r)
+                # psql flags a continued value line with a trailing '+'.
+                this_continued = r.rstrip().endswith('+')
+                values = _split_columns(r, expected=len(cols))
                 if len(values) == len(cols):
-                    if _is_continuation(values) and rows:
+                    if _is_continuation(values, prev_continued) and rows:
                         # Strip the trailing "+" wrap marker and append
                         # to the previous row's last column.
                         cont = values[-1].rstrip().rstrip('+').rstrip()
@@ -151,6 +189,7 @@ def parse_result_sets(text: str) -> List[Dict]:
                             cleaned[-1] = cleaned[-1].rstrip().rstrip('+').rstrip()
                         rows.append({cols[k]: cleaned[k] for k in range(len(cols))})
                 # else: row with unexpected column count -- skip silently.
+                prev_continued = this_continued
                 i += 1
             sets.append({'columns': cols, 'rows': rows})
         else:
@@ -227,7 +266,12 @@ def read_target(report_dir: Path) -> Dict[str, str]:
     if not sp.exists():
         return out
     for raw in read_log_text(sp).splitlines():
-        m = re.match(r'^Target:\s+([^@]+)@([^:]+):(\d+)/(\S+)', raw.strip())
+        # host may be an IPv6 literal (e.g. ``user@::1:5432/db``) which
+        # contains its own colons, so we anchor on the LAST ``:port`` that
+        # precedes ``/db`` and treat everything between ``@`` and that
+        # final ``:port`` as the host. ``.+?`` for the user stays
+        # non-greedy so the first ``@`` still delimits the user.
+        m = re.match(r'^Target:\s+(.+?)@(.+):(\d+)/(\S+)', raw.strip())
         if m:
             out.update(
                 user=m.group(1).strip(),
@@ -522,6 +566,24 @@ def render_cover(title: str, server: str, customer: str,
         "</div></section>"
         "<div class='page-bg'></div>"
     )
+
+
+# ---------------------------------------------------------------------------
+# Finding anchor slug
+# ---------------------------------------------------------------------------
+def finding_anchor(finding: Dict) -> str:
+    """Stable, per-(context, finding) HTML anchor slug.
+
+    In a multi-database report the same script + title recurs once per
+    database, so an anchor built only from ``script + title`` collides
+    and every Top-issues jump link lands on the first database's card.
+    We fold the finding's ``context`` (database name) into the slug so
+    each id is unique. Both the anchor definition (id=) and the link
+    (href=#f-...) must call this so they stay in sync."""
+    base = (finding.get('context', '') + '-'
+            + finding.get('script', '') + '-'
+            + finding.get('title', ''))
+    return re.sub(r'[^A-Za-z0-9]', '-', base).lower()
 
 
 # ---------------------------------------------------------------------------

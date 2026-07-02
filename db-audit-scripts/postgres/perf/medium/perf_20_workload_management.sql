@@ -129,7 +129,14 @@ SELECT 'create_index' AS progress_type, * FROM pg_stat_progress_create_index;
 
 SELECT 'basebackup' AS progress_type, * FROM pg_stat_progress_basebackup;
 
+-- pg_stat_progress_copy is PostgreSQL 14+; skip on PG 13.
+SELECT current_setting('server_version_num')::int >= 140000 AS pg14_or_newer
+\gset
+\if :pg14_or_newer
 SELECT 'copy' AS progress_type, * FROM pg_stat_progress_copy;
+\else
+SELECT 'pg_stat_progress_copy requires PostgreSQL 14+ - skipped' AS note;
+\endif
 
 -- ---------------------------------------------------------------------------
 -- Prepared transactions — each holds locks and prevents vacuum

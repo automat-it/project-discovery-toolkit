@@ -116,45 +116,68 @@ WHERE database_id > 4
 ORDER BY name;
 
 -- ---------------------------------------------------------------------------
--- File auto-growth settings (look for 1 MB / 10% defaults)
+-- File auto-growth settings (look for 1 MB / 10% defaults). sys.master_files
+-- is unavailable on Azure SQL Database; TRY/CATCH lets the block skip
+-- cleanly instead of aborting.
 -- ---------------------------------------------------------------------------
-SELECT
-    DB_NAME(database_id)                              AS database_name,
-    name                                              AS logical_file,
-    type_desc                                         AS file_type,
-    physical_name,
-    CAST(size AS BIGINT) * 8 / 1024                   AS size_mb,
-    CASE WHEN is_percent_growth = 1
-         THEN CONCAT(growth, '%')
-         ELSE CONCAT(CAST(growth AS BIGINT) * 8 / 1024, ' MB')
-    END                                               AS growth_setting,
-    CASE WHEN max_size = -1 THEN 'unlimited'
-         WHEN max_size =  0 THEN 'no growth'
-         ELSE CAST(CAST(max_size AS BIGINT) * 8 / 1024 AS VARCHAR(20)) + ' MB'
-    END                                               AS max_size,
-    state_desc
-FROM sys.master_files
-WHERE database_id > 4
-ORDER BY DB_NAME(database_id), type_desc, name;
+BEGIN TRY
+    SELECT
+        DB_NAME(database_id)                              AS database_name,
+        name                                              AS logical_file,
+        type_desc                                         AS file_type,
+        physical_name,
+        CAST(size AS BIGINT) * 8 / 1024                   AS size_mb,
+        CASE WHEN is_percent_growth = 1
+             THEN CONCAT(growth, '%')
+             ELSE CONCAT(CAST(growth AS BIGINT) * 8 / 1024, ' MB')
+        END                                               AS growth_setting,
+        CASE WHEN max_size = -1 THEN 'unlimited'
+             WHEN max_size =  0 THEN 'no growth'
+             ELSE CAST(CAST(max_size AS BIGINT) * 8 / 1024 AS VARCHAR(20)) + ' MB'
+        END                                               AS max_size,
+        state_desc
+    FROM sys.master_files
+    WHERE database_id > 4
+    ORDER BY DB_NAME(database_id), type_desc, name;
+END TRY
+BEGIN CATCH
+    PRINT '[note] sys.master_files not accessible (likely Azure SQL DB): '
+          + ERROR_MESSAGE();
+END CATCH;
 
 -- ---------------------------------------------------------------------------
--- Trace flags currently on
+-- Trace flags currently on. Wrapped so a permission error or Azure SQL DB
+-- (where DBCC TRACESTATUS is unsupported) does not abort the tempdb-config
+-- section that follows.
 -- ---------------------------------------------------------------------------
-DBCC TRACESTATUS(-1) WITH NO_INFOMSGS;
+BEGIN TRY
+    DBCC TRACESTATUS(-1) WITH NO_INFOMSGS;
+END TRY
+BEGIN CATCH
+    PRINT '[note] DBCC TRACESTATUS not available: ' + ERROR_MESSAGE();
+END CATCH;
 
 -- ---------------------------------------------------------------------------
--- TempDB configuration (file count, sizes — important for contention)
+-- TempDB configuration (file count, sizes — important for contention).
+-- sys.master_files is unavailable on Azure SQL Database; TRY/CATCH lets the
+-- block skip cleanly instead of aborting.
 -- ---------------------------------------------------------------------------
-SELECT
-    name                                              AS logical_file,
-    type_desc,
-    physical_name,
-    CAST(size AS BIGINT) * 8 / 1024                   AS size_mb,
-    CASE WHEN is_percent_growth = 1
-         THEN CONCAT(growth, '%')
-         ELSE CONCAT(CAST(growth AS BIGINT) * 8 / 1024, ' MB')
-    END                                               AS growth_setting,
-    state_desc
-FROM sys.master_files
-WHERE database_id = 2
-ORDER BY type_desc, file_id;
+BEGIN TRY
+    SELECT
+        name                                              AS logical_file,
+        type_desc,
+        physical_name,
+        CAST(size AS BIGINT) * 8 / 1024                   AS size_mb,
+        CASE WHEN is_percent_growth = 1
+             THEN CONCAT(growth, '%')
+             ELSE CONCAT(CAST(growth AS BIGINT) * 8 / 1024, ' MB')
+        END                                               AS growth_setting,
+        state_desc
+    FROM sys.master_files
+    WHERE database_id = 2
+    ORDER BY type_desc, file_id;
+END TRY
+BEGIN CATCH
+    PRINT '[note] sys.master_files not accessible (likely Azure SQL DB): '
+          + ERROR_MESSAGE();
+END CATCH;

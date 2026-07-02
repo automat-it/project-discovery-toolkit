@@ -28,58 +28,65 @@ SELECT
 -- calls > 50 to suppress one-off noise.
 -- Gracefully skips if pg_stat_statements is not available.
 -- ---------------------------------------------------------------------------
-DO $$
-BEGIN
-    IF NOT EXISTS (SELECT 1 FROM pg_extension WHERE extname = 'pg_stat_statements') THEN
-        RAISE NOTICE 'pg_stat_statements not installed — skipping variance queries';
-    END IF;
-END
-$$;
+SELECT EXISTS (
+    SELECT 1 FROM pg_extension WHERE extname = 'pg_stat_statements'
+) AS has_pgss
+\gset
+\if :has_pgss
 
--- The next SELECT is guarded: wrap in a DO block that EXECUTEs only if
--- the extension exists. This keeps the script runnable on any cluster.
-DO $$
-DECLARE
-    has_pgss boolean := EXISTS (SELECT 1 FROM pg_extension WHERE extname = 'pg_stat_statements');
-BEGIN
-    IF has_pgss THEN
-        EXECUTE $q$
-            CREATE TEMP VIEW _pgss_variance AS
-            SELECT
-                queryid,
-                LEFT(query, 200)                                   AS query_sample,
-                calls,
-                ROUND(mean_exec_time::numeric, 2)                  AS mean_ms,
-                ROUND(stddev_exec_time::numeric, 2)                AS stddev_ms,
-                CASE WHEN mean_exec_time > 0
-                     THEN ROUND((stddev_exec_time/mean_exec_time)::numeric, 2)
-                END                                                AS cv,
-                ROUND(min_exec_time::numeric, 2)                   AS min_ms,
-                ROUND(max_exec_time::numeric, 2)                   AS max_ms,
-                CASE WHEN min_exec_time > 0
-                     THEN ROUND((max_exec_time / min_exec_time)::numeric, 1)
-                END                                                AS max_over_min,
-                rows,
-                shared_blks_hit,
-                shared_blks_read
-            FROM pg_stat_statements
-            WHERE calls >= 50
-        $q$;
-    ELSE
-        EXECUTE 'CREATE TEMP VIEW _pgss_variance AS SELECT NULL::text AS note WHERE false';
-    END IF;
-END
-$$;
-
-SELECT * FROM _pgss_variance
-ORDER BY cv DESC NULLS LAST
+-- Highest coefficient of variation first (bimodal / plan-flip candidates).
+SELECT
+    queryid,
+    LEFT(query, 200)                                   AS query_sample,
+    calls,
+    ROUND(mean_exec_time::numeric, 2)                  AS mean_ms,
+    ROUND(stddev_exec_time::numeric, 2)                AS stddev_ms,
+    CASE WHEN mean_exec_time > 0
+         THEN ROUND((stddev_exec_time/mean_exec_time)::numeric, 2)
+    END                                                AS cv,
+    ROUND(min_exec_time::numeric, 2)                   AS min_ms,
+    ROUND(max_exec_time::numeric, 2)                   AS max_ms,
+    CASE WHEN min_exec_time > 0
+         THEN ROUND((max_exec_time / min_exec_time)::numeric, 1)
+    END                                                AS max_over_min,
+    rows,
+    shared_blks_hit,
+    shared_blks_read
+FROM pg_stat_statements
+WHERE calls >= 50
+ORDER BY CASE WHEN mean_exec_time > 0
+              THEN stddev_exec_time / mean_exec_time
+         END DESC NULLS LAST
 LIMIT 50;
 
-SELECT * FROM _pgss_variance
-ORDER BY max_over_min DESC NULLS LAST
+-- Widest max/min execution-time gap first (extreme outliers).
+SELECT
+    queryid,
+    LEFT(query, 200)                                   AS query_sample,
+    calls,
+    ROUND(mean_exec_time::numeric, 2)                  AS mean_ms,
+    ROUND(stddev_exec_time::numeric, 2)                AS stddev_ms,
+    CASE WHEN mean_exec_time > 0
+         THEN ROUND((stddev_exec_time/mean_exec_time)::numeric, 2)
+    END                                                AS cv,
+    ROUND(min_exec_time::numeric, 2)                   AS min_ms,
+    ROUND(max_exec_time::numeric, 2)                   AS max_ms,
+    CASE WHEN min_exec_time > 0
+         THEN ROUND((max_exec_time / min_exec_time)::numeric, 1)
+    END                                                AS max_over_min,
+    rows,
+    shared_blks_hit,
+    shared_blks_read
+FROM pg_stat_statements
+WHERE calls >= 50
+ORDER BY CASE WHEN min_exec_time > 0
+              THEN max_exec_time / min_exec_time
+         END DESC NULLS LAST
 LIMIT 25;
 
-DROP VIEW IF EXISTS _pgss_variance;
+\else
+SELECT 'pg_stat_statements not installed - section skipped' AS note;
+\endif
 
 -- ---------------------------------------------------------------------------
 -- Prepared statements on the *current session* with plan-cache status

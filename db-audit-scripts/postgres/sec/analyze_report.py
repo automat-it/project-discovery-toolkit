@@ -28,9 +28,10 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from _analyze_lib import (  # noqa: E402
     DOMAIN_BUCKETS_SEC, SHARED_CSS, context_label, copy_brand_assets,
-    domain_counts, esc, has_data_rows, kv_grid, now_str, object_table,
-    parse_result_sets, read_fingerprint, read_log_text, read_summary,
-    read_target, render_at_a_glance, render_cover, render_fingerprint_card,
+    domain_counts, esc, finding_anchor, has_data_rows, kv_grid, now_str,
+    object_table, parse_result_sets, read_fingerprint, read_log_text,
+    read_summary, read_target, render_at_a_glance, render_cover,
+    render_fingerprint_card,
     script_matches_log, severity_rank, svg_bar, svg_donut,
 )
 
@@ -264,7 +265,12 @@ RULES = [
     dict(
         script='sec_05_authentication_and_passwords',
         mode='pattern', severity='Critical',
-        pattern=r'(?im)^\s*trust\s|method\s*\|\s*trust',
+        # sec_05 renders pg_hba_file_rules with the auth_method value
+        # mid-row: ``... | trust         | options | ...``. Match a data
+        # cell whose value is exactly ``trust`` (pipe-delimited on both
+        # sides). This never matches the header (``auth_method | options``)
+        # nor scram-sha-256 rows.
+        pattern=r'(?im)\|\s*trust\s*\|',
         title='pg_hba.conf uses "trust" authentication',
         recommendation='Trust auth allows password-less access. Replace with '
                        'scram-sha-256 or cert.',
@@ -463,7 +469,13 @@ RULES = [
         ],
     ),
     dict(
-        script='sec_17_recovery_and_backup_security',
+        # archive_mode is emitted by sec_14_backup_security.sql (a
+        # pg_settings name|setting block). The old script stem
+        # 'sec_17_recovery_and_backup_security' does not exist -- the
+        # actual sec_17 file is sec_17_deprecated_features.sql and emits
+        # no archive settings -- so this rule never fired. Point it at the
+        # script that really outputs archive_mode.
+        script='sec_14_backup_security',
         mode='pattern', severity='Warning',
         pattern=r'(?im)\barchive_mode\s*\|\s*off\b',
         title='archive_mode is off',
@@ -552,10 +564,12 @@ RULES = [
 def find_findings(log_dir: Path) -> list:
     findings: list = []
 
+    failed_stems: set = set()
     for status, script in read_summary(log_dir / '_summary.txt'):
         if status != 'FAIL':
             continue
         log_base = script.replace('/', '_').replace('.sql', '.log')
+        failed_stems.add(Path(log_base).stem)
         log_path = log_dir / log_base
         detail = '(no log captured)'
         if log_path.exists():
@@ -576,6 +590,11 @@ def find_findings(log_dir: Path) -> list:
     # Read each .log at most once.
     log_text_cache: dict = {}
     for log in sorted(log_dir.glob('*.log')):
+        # Skip content-rule evaluation for scripts already marked FAIL:
+        # their partial output is error-contaminated and would produce a
+        # second bogus finding on top of the "Script execution failed" one.
+        if log.stem in failed_stems:
+            continue
         for rule in RULES:
             if not script_matches_log(rule['script'], log.stem):
                 continue
@@ -653,7 +672,7 @@ def render_top_issues(findings: list) -> str:
     for f in top:
         sev = f['severity'].lower()
         cls = 'warn' if sev == 'warning' else ''
-        anchor = re.sub(r'[^A-Za-z0-9]', '-', f['script'] + '-' + f['title']).lower()
+        anchor = finding_anchor(f)
         parts.append(
             f"<li class='{cls}'><div class='it'>"
             f"<span class='ti'><a class='jump' href='#f-{anchor}'>{esc(f['title'])}</a></span>"
@@ -673,7 +692,7 @@ def render_findings(findings: list) -> str:
     parts = []
     for f in sorted(findings, key=lambda x: (severity_rank(x['severity']), x['script'])):
         sev = f['severity'].lower()
-        anchor = re.sub(r'[^A-Za-z0-9]', '-', f['script'] + '-' + f['title']).lower()
+        anchor = finding_anchor(f)
         parts.append(f"<div class='finding sev-{sev}' id='f-{anchor}'>")
         parts.append(
             f"<div class='finding-head'>"
@@ -880,6 +899,10 @@ def main() -> int:
         if not fingerprint and ctx_fp:
             fingerprint = ctx_fp
         ctx_name = context_label(ctx_fp, target, ctx['name'])
+        # Stamp the context onto every finding so per-(context, finding)
+        # HTML anchors are unique across databases in a multi-DB report.
+        for f in findings:
+            f['context'] = ctx_name
         report.append(dict(
             name=ctx_name, log_dir=ctx['log_dir'], findings=findings,
             passed=passed, failed=failed,

@@ -71,17 +71,16 @@ ORDER BY sas.name, sasd.audit_action_name;
 --   datetime_end, order ('DESC'/'ASC')  -- order arg only on 2012 SP1+/2017+.
 -- We fall back to the 6-arg form for older builds.
 -- ---------------------------------------------------------------------------
-IF OBJECT_ID('tempdb..#el') IS NOT NULL DROP TABLE #el;
-CREATE TABLE #el (LogDate DATETIME, ProcessInfo NVARCHAR(100), Text NVARCHAR(MAX));
+DECLARE @el TABLE (LogDate DATETIME, ProcessInfo NVARCHAR(100), Text NVARCHAR(MAX));
 
 BEGIN TRY
-    INSERT INTO #el
-    EXEC xp_readerrorlog 0, 1, N'Login failed', NULL, NULL, NULL, N'DESC';
+    INSERT INTO @el
+    EXEC sys.xp_readerrorlog 0, 1, N'Login failed', NULL, NULL, NULL, N'DESC';
 END TRY
 BEGIN CATCH
     BEGIN TRY
-        INSERT INTO #el
-        EXEC xp_readerrorlog 0, 1, N'Login failed';
+        INSERT INTO @el
+        EXEC sys.xp_readerrorlog 0, 1, N'Login failed';
     END TRY
     BEGIN CATCH
         PRINT '[note] xp_readerrorlog failed: ' + ERROR_MESSAGE();
@@ -91,7 +90,7 @@ END CATCH;
 -- Most recent 100 raw failed-login lines
 SELECT TOP 100
     LogDate, ProcessInfo, Text
-FROM #el
+FROM @el
 ORDER BY LogDate DESC;
 
 -- Aggregate: count per (login, client IP, reason)
@@ -129,7 +128,7 @@ FROM (
                       CHARINDEX('Reason:', Text),
                       CASE WHEN CHARINDEX('Reason:', Text) = 0 THEN 0 ELSE 120 END),
             120)            AS reason
-    FROM #el
+    FROM @el
     GROUP BY
         LTRIM(RTRIM(SUBSTRING(
             Text,
@@ -189,10 +188,8 @@ ORDER BY active_sessions DESC;
 -- Summary
 -- ---------------------------------------------------------------------------
 SELECT
-    (SELECT COUNT(*) FROM #el)                                 AS failed_login_lines_in_errorlog,
+    (SELECT COUNT(*) FROM @el)                                 AS failed_login_lines_in_errorlog,
     (SELECT COUNT(*) FROM sys.server_audits)                   AS server_audits_configured,
     (SELECT COUNT(*) FROM sys.dm_server_audit_status WHERE status = 1) AS server_audits_running,
     (SELECT COUNT(*) FROM sys.sql_logins
       WHERE CAST(LOGINPROPERTY(name,'IsLocked') AS INT) = 1)   AS currently_locked_logins;
-
-DROP TABLE #el;

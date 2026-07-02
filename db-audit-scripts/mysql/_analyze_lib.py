@@ -123,6 +123,19 @@ def parse_result_sets(text: str) -> List[Dict]:
             flush()
             current = {'columns': cells, 'rows': []}
             continue
+        # Same tab count but the line is IDENTICAL to the current header:
+        # this is a repeated result set (e.g. two consecutive
+        # VARIABLE_NAME / VARIABLE_VALUE queries of equal width). Without
+        # this check the second header row was injected as a bogus data
+        # row {'VARIABLE_NAME': 'VARIABLE_NAME', ...}. We compare against
+        # the exact header cells rather than a generic "looks like a
+        # header" heuristic so real data rows that happen to resemble a
+        # header (e.g. ``shop_demo<TAB>customers<TAB>email``) are NOT
+        # mistaken for a boundary and dropped.
+        if cells == current['columns']:
+            flush()
+            current = {'columns': cells, 'rows': []}
+            continue
         # Same tab count: treat as data row of the current set.
         cols = current['columns']
         current['rows'].append({cols[k]: cells[k] for k in range(len(cols))})
@@ -199,7 +212,12 @@ def read_target(report_dir: Path) -> Dict[str, str]:
     if not sp.exists():
         return out
     for raw in read_log_text(sp).splitlines():
-        m = re.match(r'^Target:\s+([^@]+)@([^:]+):(\d+)/(\S+)', raw.strip())
+        # host may be an IPv6 literal (e.g. ``user@::1:3306/db``) which
+        # contains its own colons, so we anchor on the LAST ``:port`` that
+        # precedes ``/db`` and treat everything between ``@`` and that
+        # final ``:port`` as the host. ``.+?`` for the user stays
+        # non-greedy so the first ``@`` still delimits the user.
+        m = re.match(r'^Target:\s+(.+?)@(.+):(\d+)/(\S+)', raw.strip())
         if m:
             out.update(
                 user=m.group(1).strip(),
@@ -512,6 +530,24 @@ def render_cover(title: str, server: str, customer: str,
         "</div></section>"
         "<div class='page-bg'></div>"
     )
+
+
+# ---------------------------------------------------------------------------
+# Finding anchor slug
+# ---------------------------------------------------------------------------
+def finding_anchor(finding: Dict) -> str:
+    """Stable, per-(context, finding) HTML anchor slug.
+
+    In a multi-database report the same script + title recurs once per
+    database, so an anchor built only from ``script + title`` collides
+    and every Top-issues jump link lands on the first database's card.
+    We fold the finding's ``context`` (database name) into the slug so
+    each id is unique. Both the anchor definition (id=) and the link
+    (href=#f-...) must call this so they stay in sync."""
+    base = (finding.get('context', '') + '-'
+            + finding.get('script', '') + '-'
+            + finding.get('title', ''))
+    return re.sub(r'[^A-Za-z0-9]', '-', base).lower()
 
 
 # ---------------------------------------------------------------------------

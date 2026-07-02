@@ -214,9 +214,18 @@ def build_html(report_dir: Path, engine_label: str, server: str, customer: str) 
     # and CSS class can never disagree.
     sv = (summary.get('verdict') or '').strip().upper()
     computed = 'FAIL' if n_fail else ('WARN' if n_warn else 'PASS')
-    verdict = sv if sv in ('PASS', 'WARN', 'FAIL') else computed
+    # Take the WORSE of summary vs computed - the summary verdict may never
+    # downgrade what the parsed checks show (and vice versa).
+    _sev = {'PASS': 0, 'WARN': 1, 'FAIL': 2}
+    if sv in _sev:
+        verdict = sv if _sev[sv] >= _sev[computed] else computed
+    else:
+        verdict = computed
     vkey = verdict.lower()
-    server_label = server or (summary.get('target', '').split('/')[0] if summary.get('target') else '')
+    tgt = summary.get('target', '')
+    if tgt.startswith('('):  # verify-only placeholder - no scratch DB to name
+        tgt = summary.get('source', '')
+    server_label = server or (tgt.split('/')[0] if tgt else '')
 
     # headline numbers (summary first, metrics as fallback)
     rto = summary.get('rto', '') or '-'
@@ -267,7 +276,7 @@ def build_html(report_dir: Path, engine_label: str, server: str, customer: str) 
     if nonpass:
         p.append("<div class='nextsteps'><h3>Next steps - what to fix first</h3><ol>")
         for c in nonpass[:3]:
-            base = re.sub(r'^', '', c.get('check', ''))
+            base = c.get('check', '')
             rec = CHECK_META.get(base, {}).get('rec', '')
             p.append(f"<li><strong>{esc(c.get('title', base))}</strong> - {esc(rec)}</li>")
         p.append("</ol></div>")

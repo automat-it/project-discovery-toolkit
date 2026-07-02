@@ -27,7 +27,7 @@ if (-not (Get-ChildItem -LiteralPath $ReportDir -Filter *.log -ErrorAction Silen
 
 # Reuse the toolkit's helpers where available (Esc, Convert-HtmlToPdf).
 $libPath = Join-Path $PSScriptRoot "../../db-audit-scripts/mssql/_analyze_lib.ps1"
-if (Test-Path $libPath) { try { . $libPath } catch { } }
+if (Test-Path $libPath) { try { . $libPath } catch { Write-Host "[warn] could not load $libPath : $($_.Exception.Message) - using built-in fallbacks" } }
 if (-not (Get-Command Esc -ErrorAction SilentlyContinue)) {
     function Esc($s) { if ($null -eq $s) { return '' }; return [System.Net.WebUtility]::HtmlEncode([string]$s) }
 }
@@ -382,7 +382,11 @@ foreach ($c in $checks) {
 # --- write + assets + pdf ---------------------------------------------------
 $ext = if ($NoPdf) { 'html' } else { 'pdf' }
 if (-not $OutFile) { $OutFile = Join-Path $ReportDir "$DefaultName.$ext" }
-$htmlPath = [System.IO.Path]::ChangeExtension($OutFile, 'html')
+# Build the HTML path from directory + basename, not ChangeExtension: a dot in
+# a FOLDER name would make ChangeExtension truncate the wrong "extension".
+$outDirPart = Split-Path -Parent $OutFile
+if (-not $outDirPart) { $outDirPart = '.' }
+$htmlPath = Join-Path $outDirPart ([System.IO.Path]::GetFileNameWithoutExtension($OutFile) + '.html')
 $html = $H.ToString()
 Set-Content -LiteralPath $htmlPath -Value $html -Encoding utf8
 

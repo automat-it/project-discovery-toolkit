@@ -20,17 +20,19 @@ export LC_ALL=C   # deterministic dot-decimal in awk/printf regardless of host l
 usage() {
     cat <<EOF
 Usage: $0 [-h HOST] [-P PORT] [-u USER] [-d SOURCE_DB] [-o OUT_ROOT]
-          [-t SCRATCH_DB] [-r RTO_SECONDS] [-R RPO_HOURS] [-k] [-s]
+          [-t SCRATCH_DB] [-r RTO_SECONDS] [-R RPO_HOURS] [-k] [-s] [-E]
   -h  MySQL host (default: localhost)
   -P  MySQL port (default: 3306)
   -u  MySQL user (default: root)
   -d  Source database/schema to drill (default: mysql)
   -o  Report root directory (default: ./reports)
-  -t  Scratch schema name to restore INTO (default: <src>_drill_<TS>)
+  -t  Scratch schema name to restore INTO (default: <src>_drill_<TS>_<pid>)
   -r  RTO target in seconds  - restore must finish within this (default: 900)
   -R  RPO target in hours    - backup must be fresher than this (default: 24)
   -k  Keep the scratch schema and backup file (default: drop + remove)
   -s  Strict: exit non-zero on WARN as well as FAIL (for CI gates)
+  -E  Extended integrity check: run CHECK TABLE ... EXTENDED instead of the
+      default MEDIUM (thorough per-row/key verification; much slower)
   -V  Verify-only: validate the backup WITHOUT restoring (no scratch schema).
       For mysqldump this confirms the dump is complete (not truncated); it is a
       weaker assurance than a full restore drill. Omit for the full drill.
@@ -41,13 +43,13 @@ EOF
 }
 
 DB_HOST="localhost"; DB_PORT="3306"; DB_USER="root"; DB_NAME="mysql"
-OUT_ROOT="./reports"; TGT=""; RTO_TARGET="900"; RPO_TARGET="24"; KEEP=""; STRICT=""; VERIFY_ONLY=""
+OUT_ROOT="./reports"; TGT=""; RTO_TARGET="900"; RPO_TARGET="24"; KEEP=""; STRICT=""; VERIFY_ONLY=""; CHECK_MODE="MEDIUM"
 
-while getopts "h:P:u:d:o:t:r:R:ksV?" opt; do
+while getopts "h:P:u:d:o:t:r:R:ksVE?" opt; do
     case "$opt" in
         h) DB_HOST=$OPTARG ;;  P) DB_PORT=$OPTARG ;;  u) DB_USER=$OPTARG ;;
         d) DB_NAME=$OPTARG ;;  o) OUT_ROOT=$OPTARG ;; t) TGT=$OPTARG ;;
-        r) RTO_TARGET=$OPTARG ;; R) RPO_TARGET=$OPTARG ;; k) KEEP=1 ;; s) STRICT=1 ;; V) VERIFY_ONLY=1 ;; *) usage ;;
+        r) RTO_TARGET=$OPTARG ;; R) RPO_TARGET=$OPTARG ;; k) KEEP=1 ;; s) STRICT=1 ;; V) VERIFY_ONLY=1 ;; E) CHECK_MODE="EXTENDED" ;; *) usage ;;
     esac
 done
 
@@ -60,7 +62,19 @@ command -v mysql     >/dev/null 2>&1 || { echo "[ERROR] mysql not found on PATH"
 command -v mysqldump >/dev/null 2>&1 || { echo "[ERROR] mysqldump not found on PATH" >&2; exit 2; }
 
 TS=$(date +%Y%m%d_%H%M%S)
-[ -n "$TGT" ] || TGT="${DB_NAME}_drill_${TS}"
+if [ -z "$TGT" ]; then
+    SFX="_drill_${TS}_$$"
+    NM="$DB_NAME"
+    if [ $(( ${#NM} + ${#SFX} )) -gt 64 ]; then   # MySQL schema names cap at 64 chars
+        NM=${NM:0:$((64 - ${#SFX}))}
+        echo "[WARN] scratch name truncated to fit MySQL's 64-char schema limit: ${NM}${SFX}" >&2
+    fi
+    TGT="${NM}${SFX}"
+fi
+# Identifier guard: schema names are interpolated into backtick identifiers and
+# information_schema string literals; restrict to word characters (injection guard).
+case "$DB_NAME" in *[!A-Za-z0-9_]*|'') echo "[ERROR] source database (-d) must match ^[A-Za-z0-9_]+\$, got '$DB_NAME'" >&2; exit 2 ;; esac
+case "$TGT"     in *[!A-Za-z0-9_]*|'') echo "[ERROR] scratch schema (-t) must match ^[A-Za-z0-9_]+\$, got '$TGT'"      >&2; exit 2 ;; esac
 if [ "$TGT" = "$DB_NAME" ]; then
     echo "[ERROR] scratch schema (-t) must differ from the source database (-d)" >&2; exit 2
 fi
@@ -136,10 +150,16 @@ trap 'exit 130' INT TERM HUP QUIT   # ensure the EXIT trap (scratch drop, temp-f
 TMP="$ART/.tmp"; mkdir -p "$TMP"
 
 # ---- rd_01: backup create (critical) ----------------------------------------
+# --single-transaction only guarantees a consistent snapshot for InnoDB tables;
+# warn (informationally) if the source has other storage engines.
+N_NONINNODB=$(my_adm "SELECT COUNT(*) FROM information_schema.tables WHERE table_schema='$DB_NAME' AND engine IS NOT NULL AND engine <> 'InnoDB'" 2>/dev/null)
+if [ -n "${N_NONINNODB:-}" ] && [ "$N_NONINNODB" -gt 0 ] 2>/dev/null; then
+    echo "[WARN] $N_NONINNODB non-InnoDB table(s) in '$DB_NAME': --single-transaction only guarantees consistency for InnoDB; non-InnoDB tables may dump inconsistently under concurrent writes" >&2
+fi
 BACKUP_OK=""
 t0=$(_now)
 mysqldump --defaults-file="$DEFAULTS_FILE" --protocol=TCP -u "$DB_USER" -h "$DB_HOST" -P "$DB_PORT" \
-    --single-transaction --routines --triggers --events --no-tablespaces \
+    --single-transaction --routines --triggers --events --no-tablespaces --hex-blob \
     --set-gtid-purged=OFF --default-character-set=utf8mb4 \
     "$DB_NAME" > "$BACKUP_FILE" 2> "$TMP/rd01"
 rc=$?; t1=$(_now); dur=$(_elapsed "$t0" "$t1")
@@ -192,6 +212,17 @@ elif [ -n "$BACKUP_OK" ]; then
     t1=$(_now); RTO_VALUE=$(_elapsed "$t0" "$t1")
     if [ "$rrc" -eq 0 ]; then
         RESTORE_OK=1
+        # Best-effort: disable every restored event so nothing fires on the
+        # production instance while the scratch schema exists. Never fails the drill.
+        while IFS= read -r ev; do
+            [ -n "$ev" ] || continue
+            evq=$(printf '%s' "$ev" | sed 's/`/``/g')
+            if my_adm "ALTER EVENT \`$TGT\`.\`$evq\` DISABLE" >/dev/null 2>&1; then
+                echo "disabled restored event: $ev" >> "$TMP/rd02"
+            else
+                echo "could not disable restored event: $ev (non-fatal)" >> "$TMP/rd02"
+            fi
+        done <<< "$(my_adm "SELECT event_name FROM information_schema.events WHERE event_schema='$TGT'" 2>/dev/null)"
         emit_check critical rd_02_restore_execute "Restore into the scratch schema completes" PASS \
             "restore_seconds=$RTO_VALUE" "-" "Restored into scratch schema \`$TGT\` in ${RTO_VALUE}s" "$TMP/rd02"
     else
@@ -269,7 +300,7 @@ if [ -n "$RESTORE_OK" ] && [ -n "$TABLES" ]; then
     RCQ=""
     while IFS= read -r t; do
         [ -n "$t" ] || continue
-        esc=$(printf '%s' "$t" | sed "s/'/''/g")
+        esc=$(printf '%s' "$t" | sed -e 's/\\/\\\\/g' -e "s/'/''/g")   # backslashes first, then quotes
         RCQ="$RCQ SELECT '$esc' AS t, COUNT(*) AS c FROM $(qb "$t") UNION ALL"
     done <<< "$TABLES"
     RCQ=${RCQ% UNION ALL}
@@ -287,7 +318,7 @@ if [ -n "$RESTORE_OK" ] && [ -n "$TABLES" ]; then
     else
         echo "--- mismatches ---" >> "$TMP/rd05"; echo "$d" >> "$TMP/rd05"
         emit_check high rd_05_rowcount_parity "Per-table row counts match the source" FAIL \
-            "rows=$ROWS_VERIFIED" "-" "Row counts differ between source and restored copy" "$TMP/rd05"
+            "rows=$ROWS_VERIFIED" "-" "Row counts differ between source and restored copy; note: writes to the source between backup and verification also cause mismatches - re-run on a quiesced source to confirm" "$TMP/rd05"
     fi
 elif [ -n "$RESTORE_OK" ]; then
     echo "no user tables found" > "$TMP/rd05"
@@ -296,14 +327,14 @@ else
     emit_check high rd_05_rowcount_parity "Per-table row counts match the source" FAIL "-" "-" "Skipped: restore failed" ""
 fi
 
-# ---- rd_06: integrity check (high) - CHECK TABLE ... EXTENDED ----------------
+# ---- rd_06: integrity check (high) - CHECK TABLE ... MEDIUM (-E: EXTENDED) ---
 if [ -n "$RESTORE_OK" ] && [ -n "$CKLIST" ]; then
-    if my_tgt "CHECK TABLE $CKLIST EXTENDED" > "$TMP/rd06" 2>"$TMP/rd06.err"; then
+    if my_tgt "CHECK TABLE $CKLIST $CHECK_MODE" > "$TMP/rd06" 2>"$TMP/rd06.err"; then
         n_ok=$(awk -F'\t' '$NF=="OK"{c++} END{print c+0}' "$TMP/rd06")
         n_err=$(awk -F'\t' 'tolower($3)=="error"{c++} END{print c+0}' "$TMP/rd06")
         if [ "$n_err" -eq 0 ] && [ "$n_ok" -ge "$N_TABLES" ]; then
             emit_check high rd_06_integrity_check "Restored tables pass CHECK TABLE" PASS \
-                "tables_ok=$n_ok" "-" "All $N_TABLES restored tables report OK under CHECK TABLE ... EXTENDED" "$TMP/rd06"
+                "tables_ok=$n_ok" "-" "All $N_TABLES restored tables report OK under CHECK TABLE ... $CHECK_MODE" "$TMP/rd06"
         else
             emit_check high rd_06_integrity_check "Restored tables pass CHECK TABLE" FAIL \
                 "tables_ok=$n_ok;errors=$n_err" "-" "CHECK TABLE reported a non-OK result on the restored copy" "$TMP/rd06"
@@ -350,10 +381,10 @@ if [ -n "$BACKUP_OK" ]; then
     within=$(awk -v v="$AGE_H" -v t="$RPO_TARGET" 'BEGIN{print (v<=t)?1:0}')
     if [ "$within" -eq 1 ]; then
         emit_check medium rd_08_rpo_backup_age "Backup is fresh enough for the RPO target" PASS \
-            "backup_age_hours=$AGE_H" "rpo_hours<=$RPO_TARGET" "Backup is ${AGE_H}h old, within the ${RPO_TARGET}h RPO target" "$TMP/rd08"
+            "backup_age_hours=$AGE_H" "rpo_hours<=$RPO_TARGET" "Backup is ${AGE_H}h old, within the ${RPO_TARGET}h RPO target (on-demand drill backup - measures this run, not the production backup cadence)" "$TMP/rd08"
     else
         emit_check medium rd_08_rpo_backup_age "Backup is fresh enough for the RPO target" WARN \
-            "backup_age_hours=$AGE_H" "rpo_hours<=$RPO_TARGET" "Backup is ${AGE_H}h old, exceeding the ${RPO_TARGET}h RPO target" "$TMP/rd08"
+            "backup_age_hours=$AGE_H" "rpo_hours<=$RPO_TARGET" "Backup is ${AGE_H}h old, exceeding the ${RPO_TARGET}h RPO target (on-demand drill backup - measures this run, not the production backup cadence)" "$TMP/rd08"
     fi
 else
     emit_check medium rd_08_rpo_backup_age "Backup is fresh enough for the RPO target" FAIL "-" "rpo_hours<=$RPO_TARGET" "Skipped: backup failed" ""
@@ -365,19 +396,23 @@ if [ -n "$RESTORE_OK" ] && [ -n "$CKLIST" ]; then
     # CHECKSUM TABLE qualifies the name as <schema>.<table>; strip the schema
     # prefix so the source and scratch schemas compare on table name + checksum.
     my_src "CHECKSUM TABLE $CKLIST" 2>"$TMP/ck_src.err" | awk -F'\t' '{sub(/^[^.]*\./,"",$1); print $1"\t"$2}' | sort > "$TMP/ck_src"
-    my_tgt "CHECKSUM TABLE $CKLIST" | awk -F'\t' '{sub(/^[^.]*\./,"",$1); print $1"\t"$2}' | sort > "$TMP/ck_tgt"
+    my_tgt "CHECKSUM TABLE $CKLIST" 2>"$TMP/ck_tgt.err" | awk -F'\t' '{sub(/^[^.]*\./,"",$1); print $1"\t"$2}' | sort > "$TMP/ck_tgt"
     { echo "per-table content checksum (table|checksum):"; echo "--- source ---"; cat "$TMP/ck_src"; echo "--- restored ---"; cat "$TMP/ck_tgt"; } > "$TMP/rd09"
     if [ ! -s "$TMP/ck_src" ]; then
         cat "$TMP/ck_src.err" >> "$TMP/rd09" 2>/dev/null
         emit_check low rd_09_data_checksum "Row-content checksums match the source" FAIL \
             "-" "-" "CHECKSUM TABLE against the source produced no output - not verified" "$TMP/rd09"
+    elif [ -s "$TMP/ck_tgt.err" ]; then
+        echo "--- target-side errors ---" >> "$TMP/rd09"; cat "$TMP/ck_tgt.err" >> "$TMP/rd09"
+        emit_check low rd_09_data_checksum "Row-content checksums match the source" FAIL \
+            "-" "-" "target checksum query failed - restored copy not verified" "$TMP/rd09"
     elif d=$(diff "$TMP/ck_src" "$TMP/ck_tgt"); then
         emit_check low rd_09_data_checksum "Row-content checksums match the source" PASS \
             "-" "-" "Every table's CHECKSUM TABLE matches the source - data is faithful" "$TMP/rd09"
     else
         echo "--- mismatches ---" >> "$TMP/rd09"; echo "$d" >> "$TMP/rd09"
         emit_check low rd_09_data_checksum "Row-content checksums match the source" FAIL \
-            "-" "-" "Content checksums differ - restored data does not match the source" "$TMP/rd09"
+            "-" "-" "Content checksums differ - restored data does not match the source; note: writes to the source between backup and verification also cause mismatches - re-run on a quiesced source to confirm" "$TMP/rd09"
     fi
 elif [ -n "$RESTORE_OK" ]; then
     echo "no user tables" > "$TMP/rd09"

@@ -19,7 +19,7 @@ export LC_ALL=C   # deterministic dot-decimal in awk/printf regardless of host l
 usage() {
     cat <<EOF
 Usage: $0 [-h HOST] [-P PORT] [-U USER] [-d SOURCE_DB] [-o OUT_ROOT]
-          [-t SCRATCH_DB] [-r RTO_SECONDS] [-R RPO_HOURS] [-F c|p] [-k] [-s]
+          [-t SCRATCH_DB] [-r RTO_SECONDS] [-R RPO_HOURS] [-F c|p] [-j JOBS] [-k] [-s]
   -h  PostgreSQL host (default: localhost)
   -P  PostgreSQL port (default: 5432)
   -U  PostgreSQL user (default: postgres)
@@ -29,6 +29,7 @@ Usage: $0 [-h HOST] [-P PORT] [-U USER] [-d SOURCE_DB] [-o OUT_ROOT]
   -r  RTO target in seconds  - restore must finish within this (default: 900)
   -R  RPO target in hours    - backup must be fresher than this (default: 24)
   -F  Backup format: c=custom (pg_restore), p=plain SQL (psql) (default: c)
+  -j  Parallel restore jobs for pg_restore (custom format only, default: 1)
   -k  Keep the scratch database and backup file (default: drop + remove)
   -s  Strict: exit non-zero on WARN as well as FAIL (for CI gates)
   -V  Verify-only: validate the backup WITHOUT restoring (no scratch database).
@@ -42,18 +43,18 @@ EOF
 
 DB_HOST="localhost"; DB_PORT="5432"; DB_USER="postgres"; DB_NAME="postgres"
 OUT_ROOT="./reports"; TGT=""; RTO_TARGET="900"; RPO_TARGET="24"
-FMT="c"; KEEP=""; STRICT=""; VERIFY_ONLY=""; MAINT_DB="postgres"
+FMT="c"; KEEP=""; STRICT=""; VERIFY_ONLY=""; MAINT_DB="postgres"; JOBS="1"
 
-while getopts "h:P:U:d:o:t:r:R:F:ksV?" opt; do
+while getopts "h:P:U:d:o:t:r:R:F:j:ksV?" opt; do
     case "$opt" in
         h) DB_HOST=$OPTARG ;;  P) DB_PORT=$OPTARG ;;  U) DB_USER=$OPTARG ;;
         d) DB_NAME=$OPTARG ;;  o) OUT_ROOT=$OPTARG ;; t) TGT=$OPTARG ;;
         r) RTO_TARGET=$OPTARG ;; R) RPO_TARGET=$OPTARG ;;
-        F) FMT=$OPTARG ;; k) KEEP=1 ;; s) STRICT=1 ;; V) VERIFY_ONLY=1 ;; *) usage ;;
+        F) FMT=$OPTARG ;; j) JOBS=$OPTARG ;; k) KEEP=1 ;; s) STRICT=1 ;; V) VERIFY_ONLY=1 ;; *) usage ;;
     esac
 done
 
-for n in "RTO target:-r:$RTO_TARGET" "RPO target:-R:$RPO_TARGET" "port:-P:$DB_PORT"; do
+for n in "RTO target:-r:$RTO_TARGET" "RPO target:-R:$RPO_TARGET" "port:-P:$DB_PORT" "restore jobs:-j:$JOBS"; do
     lbl=${n%%:*}; rest=${n#*:}; flag=${rest%%:*}; val=${rest#*:}
     case $val in ''|*[!0-9]*) echo "[ERROR] $lbl ($flag) must be a non-negative integer, got '$val'" >&2; exit 2 ;; esac
 done
@@ -68,6 +69,10 @@ TS=$(date +%Y%m%d_%H%M%S)
 if [ "$TGT" = "$DB_NAME" ]; then
     echo "[ERROR] scratch database (-t) must differ from the source database (-d)" >&2; exit 2
 fi
+# Identifier guard: both names are interpolated into CREATE/DROP DATABASE, so
+# restrict them to word characters (closes the identifier-injection hole).
+case "$DB_NAME" in *[!A-Za-z0-9_]*|'') echo "[ERROR] source database name (-d) must match ^[A-Za-z0-9_]+\$, got '$DB_NAME'" >&2; exit 2 ;; esac
+case "$TGT"     in *[!A-Za-z0-9_]*|'') echo "[ERROR] scratch database name (-t) must match ^[A-Za-z0-9_]+\$, got '$TGT'" >&2; exit 2 ;; esac
 
 OUT="$OUT_ROOT/postgres_restore_$TS"
 ART="$OUT/_artifacts"
@@ -124,7 +129,13 @@ emit_check() {
 SCRATCH_CREATED=""
 cleanup() {
     if [ -z "$KEEP" ]; then
-        [ -n "$SCRATCH_CREATED" ] && PGCONNECT_TIMEOUT=10 q_mnt "DROP DATABASE IF EXISTS \"$TGT\"" >/dev/null 2>&1
+        if [ -n "$SCRATCH_CREATED" ]; then
+            # WITH (FORCE) kicks out lingering sessions (PG13+); fall back to the
+            # plain form on older servers. Never discard a failed drop silently.
+            PGCONNECT_TIMEOUT=10 q_mnt "DROP DATABASE IF EXISTS \"$TGT\" WITH (FORCE)" >/dev/null 2>&1 \
+                || PGCONNECT_TIMEOUT=10 q_mnt "DROP DATABASE IF EXISTS \"$TGT\"" >/dev/null 2>&1 \
+                || echo "[WARN] could not drop scratch database \"$TGT\" - drop it manually" >&2
+        fi
         rm -rf "$ART"
     fi
 }
@@ -166,8 +177,10 @@ if [ -n "$VERIFY_ONLY" ]; then
             { pg_restore -l "$BACKUP_FILE" >/dev/null && pg_restore -f /dev/null "$BACKUP_FILE"; } > "$TMP/rd02" 2>&1
             vrc=$?
         else
-            if grep -q 'PostgreSQL database dump complete' "$BACKUP_FILE"; then vrc=0; else vrc=1; fi
-            echo "checked plain dump for the 'PostgreSQL database dump complete' marker (rc=$vrc)" > "$TMP/rd02"
+            # Anchor to the file tail: the marker must close the dump, not merely
+            # appear somewhere inside it (e.g. in restored data).
+            if tail -n 5 "$BACKUP_FILE" | grep -q 'PostgreSQL database dump complete'; then vrc=0; else vrc=1; fi
+            echo "checked plain dump tail for the 'PostgreSQL database dump complete' marker (rc=$vrc)" > "$TMP/rd02"
         fi
         t1=$(_now); VERIFY_SECONDS=$(_elapsed "$t0" "$t1")
         if [ "$vrc" -eq 0 ]; then
@@ -182,14 +195,25 @@ if [ -n "$VERIFY_ONLY" ]; then
     fi
 elif [ -n "$BACKUP_OK" ]; then
     t0=$(_now)
-    q_mnt "CREATE DATABASE \"$TGT\"" > "$TMP/rd02" 2>&1 && SCRATCH_CREATED=1
+    # Match the source's encoding/locale so checksum/text comparisons aren't
+    # skewed by a scratch DB created under different defaults. Values come
+    # from pg_database (and DB_NAME is validated), but escape quotes anyway.
+    SRCPROPS=$("${PSQL[@]}" -d "$MAINT_DB" -t -A -c "SELECT pg_encoding_to_char(encoding)||'|'||datcollate||'|'||datctype FROM pg_database WHERE datname='$DB_NAME'" 2>/dev/null)
+    if [ -n "$SRCPROPS" ]; then
+        enc=${SRCPROPS%%|*}; rest=${SRCPROPS#*|}; coll=${rest%%|*}; ctype=${rest#*|}
+        enc=${enc//\'/\'\'}; coll=${coll//\'/\'\'}; ctype=${ctype//\'/\'\'}
+        q_mnt "CREATE DATABASE \"$TGT\" TEMPLATE template0 ENCODING '$enc' LC_COLLATE '$coll' LC_CTYPE '$ctype'" > "$TMP/rd02" 2>&1 && SCRATCH_CREATED=1
+    else
+        q_mnt "CREATE DATABASE \"$TGT\"" > "$TMP/rd02" 2>&1 && SCRATCH_CREATED=1
+    fi
     crc=$?
     if [ "$crc" -eq 0 ]; then
         if [ "$FMT" = "c" ]; then
             # --exit-on-error: by default pg_restore continues past failed items
             # and STILL exits 0 (only prints "errors ignored on restore: N"),
             # which would make a half-restored database look successful.
-            pg_restore -h "$DB_HOST" -p "$DB_PORT" -U "$DB_USER" -d "$TGT" --no-owner --exit-on-error "$BACKUP_FILE" >> "$TMP/rd02" 2>&1
+            JOBS_OPT=(); [ "$JOBS" -gt 1 ] && JOBS_OPT=(-j "$JOBS")
+            pg_restore -h "$DB_HOST" -p "$DB_PORT" -U "$DB_USER" -d "$TGT" --no-owner --exit-on-error ${JOBS_OPT[@]+"${JOBS_OPT[@]}"} "$BACKUP_FILE" >> "$TMP/rd02" 2>&1
         else
             # PSQL carries -v ON_ERROR_STOP=1, so the plain-SQL restore aborts on
             # the first error too.
@@ -206,6 +230,9 @@ elif [ -n "$BACKUP_OK" ]; then
         RESTORE_OK=1
         emit_check critical rd_02_restore_execute "Restore into the scratch database completes" PASS \
             "restore_seconds=$RTO_VALUE" "-" "Restored into scratch database \"$TGT\" in ${RTO_VALUE}s" "$TMP/rd02"
+    elif [ "$crc" -ne 0 ]; then
+        emit_check critical rd_02_restore_execute "Restore into the scratch database completes" FAIL \
+            "restore_seconds=$RTO_VALUE" "-" "Scratch database creation failed (rc=$crc) - restore not attempted" "$TMP/rd02"
     else
         emit_check critical rd_02_restore_execute "Restore into the scratch database completes" FAIL \
             "restore_seconds=$RTO_VALUE" "-" "Restore returned rc=$rrc - see output" "$TMP/rd02"
@@ -263,10 +290,16 @@ SEQ_SQL="SELECT 'seq:'||schemaname||'.'||sequencename, coalesce(last_value::text
 
 # ---- rd_04: object parity (high) --------------------------------------------
 if [ -n "$RESTORE_OK" ]; then
-    { q_src "$OBJ_SQL"; q_src "$SEQ_SQL"; } 2>/dev/null | sort > "$TMP/obj_src"
-    { q_tgt "$OBJ_SQL"; q_tgt "$SEQ_SQL"; } 2>/dev/null | sort > "$TMP/obj_tgt"
+    # Keep stderr: a partially-failed catalog read must FAIL, not silently
+    # compare an incomplete object list.
+    { q_src "$OBJ_SQL"; q_src "$SEQ_SQL"; } 2>"$TMP/obj_src.err" | sort > "$TMP/obj_src"
+    { q_tgt "$OBJ_SQL"; q_tgt "$SEQ_SQL"; } 2>"$TMP/obj_tgt.err" | sort > "$TMP/obj_tgt"
     { echo "source vs restored object counts (kind|count):"; echo "--- source ---"; cat "$TMP/obj_src"; echo "--- restored ---"; cat "$TMP/obj_tgt"; } > "$TMP/rd04"
-    if [ ! -s "$TMP/obj_src" ]; then
+    if [ -s "$TMP/obj_src.err" ] || [ -s "$TMP/obj_tgt.err" ]; then
+        { echo "--- errors (source) ---"; tail -n 20 "$TMP/obj_src.err"; echo "--- errors (restored) ---"; tail -n 20 "$TMP/obj_tgt.err"; } >> "$TMP/rd04"
+        emit_check high rd_04_object_parity "Schema object counts match the source" FAIL \
+            "-" "-" "Object-count query errored on one side - possibly incomplete list, not verified" "$TMP/rd04"
+    elif [ ! -s "$TMP/obj_src" ]; then
         emit_check high rd_04_object_parity "Schema object counts match the source" FAIL \
             "-" "-" "Could not read object counts from the source - not verified" "$TMP/rd04"
     elif d=$(diff "$TMP/obj_src" "$TMP/obj_tgt"); then
@@ -298,7 +331,7 @@ if [ -n "$RESTORE_OK" ]; then
         else
             echo "--- mismatches ---" >> "$TMP/rd05"; echo "$d" >> "$TMP/rd05"
             emit_check high rd_05_rowcount_parity "Per-table row counts match the source" FAIL \
-                "rows=$ROWS_VERIFIED" "-" "Row counts differ between source and restored copy" "$TMP/rd05"
+                "rows=$ROWS_VERIFIED" "-" "Row counts differ between source and restored copy (note: writes to the source between backup and verification also cause mismatches - re-run on a quiesced source to confirm)" "$TMP/rd05"
         fi
     else
         echo "no user tables found" > "$TMP/rd05"
@@ -359,12 +392,15 @@ if [ -n "$BACKUP_OK" ]; then
     RPO_VALUE="$AGE_H"
     echo "backup age ${AGE_H}h vs RPO target ${RPO_TARGET}h" > "$TMP/rd08"
     within=$(awk -v v="$AGE_H" -v t="$RPO_TARGET" 'BEGIN{print (v<=t)?1:0}')
+    # The drill produced this backup itself, so its age reflects this run, not
+    # how fresh a production backup would be - say so in the detail.
+    RPO_NOTE=" (on-demand drill backup - measures this run, not the production backup cadence)"
     if [ "$within" -eq 1 ]; then
         emit_check medium rd_08_rpo_backup_age "Backup is fresh enough for the RPO target" PASS \
-            "backup_age_hours=$AGE_H" "rpo_hours<=$RPO_TARGET" "Backup is ${AGE_H}h old, within the ${RPO_TARGET}h RPO target" "$TMP/rd08"
+            "backup_age_hours=$AGE_H" "rpo_hours<=$RPO_TARGET" "Backup is ${AGE_H}h old, within the ${RPO_TARGET}h RPO target${RPO_NOTE}" "$TMP/rd08"
     else
         emit_check medium rd_08_rpo_backup_age "Backup is fresh enough for the RPO target" WARN \
-            "backup_age_hours=$AGE_H" "rpo_hours<=$RPO_TARGET" "Backup is ${AGE_H}h old, exceeding the ${RPO_TARGET}h RPO target" "$TMP/rd08"
+            "backup_age_hours=$AGE_H" "rpo_hours<=$RPO_TARGET" "Backup is ${AGE_H}h old, exceeding the ${RPO_TARGET}h RPO target${RPO_NOTE}" "$TMP/rd08"
     fi
 else
     emit_check medium rd_08_rpo_backup_age "Backup is fresh enough for the RPO target" FAIL "-" "rpo_hours<=$RPO_TARGET" "Skipped: backup failed" ""
@@ -375,8 +411,11 @@ if [ -z "$VERIFY_ONLY" ]; then
 if [ -n "$RESTORE_OK" ]; then
     CKQ=$(q_src "$CHECKSUM_BUILD")
     if [ -n "$CKQ" ]; then
-        q_src "$CKQ" | sort > "$TMP/ck_src"
-        q_tgt "$CKQ" | sort > "$TMP/ck_tgt"
+        # Pin rendering GUCs in the same session as the checksum query so
+        # database-level settings can't skew the text rendering on either side.
+        CK_GUCS="SET timezone='UTC'; SET datestyle='ISO'; SET extra_float_digits=3;"
+        q_src "$CK_GUCS $CKQ" | sort > "$TMP/ck_src"
+        q_tgt "$CK_GUCS $CKQ" | sort > "$TMP/ck_tgt"
         { echo "per-table content checksum (table|rows|checksum):"; echo "--- source ---"; cat "$TMP/ck_src"; echo "--- restored ---"; cat "$TMP/ck_tgt"; } > "$TMP/rd09"
         if [ ! -s "$TMP/ck_src" ]; then
             emit_check low rd_09_data_checksum "Row-content checksums match the source" FAIL \
@@ -387,7 +426,7 @@ if [ -n "$RESTORE_OK" ]; then
         else
             echo "--- mismatches ---" >> "$TMP/rd09"; echo "$d" >> "$TMP/rd09"
             emit_check low rd_09_data_checksum "Row-content checksums match the source" FAIL \
-                "-" "-" "Content checksums differ - restored data does not match the source" "$TMP/rd09"
+                "-" "-" "Content checksums differ - restored data does not match the source (note: writes to the source between backup and verification also cause mismatches - re-run on a quiesced source to confirm)" "$TMP/rd09"
         fi
     else
         echo "no user tables" > "$TMP/rd09"

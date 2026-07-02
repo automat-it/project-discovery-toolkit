@@ -41,13 +41,18 @@ param(
 )
 
 $ErrorActionPreference = 'Stop'
+if ($PSVersionTable.PSVersion.Major -lt 7) {
+    # The `2>&1` native-command redirect pattern used throughout breaks under
+    # Windows PowerShell 5.1 (stderr becomes ErrorRecords / trips -b handling).
+    [Console]::Error.WriteLine("ERROR: PowerShell 7+ (pwsh) is required; this is $($PSVersionTable.PSVersion)"); exit 2
+}
 if (-not (Get-Command sqlcmd -ErrorAction SilentlyContinue)) {
-    Write-Error "sqlcmd not found on PATH"; exit 2
+    [Console]::Error.WriteLine("ERROR: sqlcmd not found on PATH"); exit 2
 }
 
 $ts = Get-Date -Format "yyyyMMdd_HHmmss"
 if (-not $Scratch) { $Scratch = "${Database}_drill_$ts" }
-if ($Scratch -eq $Database) { Write-Error "scratch database (-Scratch) must differ from the source (-Database)"; exit 2 }
+if ($Scratch -eq $Database) { [Console]::Error.WriteLine("ERROR: scratch database (-Scratch) must differ from the source (-Database)"); exit 2 }
 
 $OutDir = Join-Path $OutRoot "mssql_restore_$ts"
 New-Item -ItemType Directory -Force -Path $OutDir | Out-Null
@@ -127,8 +132,14 @@ function Wait-RdsTask([string]$TaskId, [int]$TimeoutSec = 3600) {
         if ($row) {
             $sawRow = $true
             $fields = @(($row -split '\|') | ForEach-Object { $_.Trim().ToUpper() })
-            if ($fields -contains 'SUCCESS') { return @{ ok = $true;  text = $last } }
-            if (($fields | Where-Object { $_ -in 'ERROR', 'CANCELLED', 'FAILED' }).Count -gt 0) { return @{ ok = $false; text = $last } }
+            # Test the lifecycle column by its known ordinal (rds_task_status
+            # returns task_id, task_type, database_name, % complete, duration,
+            # lifecycle, ... -> index 5), never `-contains` across all fields:
+            # 'SUCCESS'/'ERROR' appearing in task_info or the S3 ARN must not
+            # be mistaken for the task state.
+            $lifecycle = if ($fields.Count -gt 5) { $fields[5] } else { '' }
+            if ($lifecycle -eq 'SUCCESS') { return @{ ok = $true;  text = $last } }
+            if ($lifecycle -in 'ERROR', 'CANCELLED', 'FAILED') { return @{ ok = $false; text = $last } }
         }
         Start-Sleep -Seconds 10
     }
@@ -154,6 +165,18 @@ function Emit {
     switch ($Status) { 'PASS' { $script:pass++ } 'WARN' { $script:warn++ } default { $script:fail++ } }
     ("{0} {1}/{2}" -f $Status, $Tier, $Id) | Out-File -FilePath $SummaryFile -Append -Encoding utf8
     Write-Host ("[{0,-4}] {1,-8} {2}" -f $Status, $Tier, $Id)
+}
+
+# Never clobber a pre-existing database: if the scratch name already exists we
+# must not RESTORE over it (and must never drop it - $scratchCreated stays
+# false). Fail fast before taking the backup. RDS refuses an existing name
+# anyway, but this gives a clear message instead of a mid-drill task error.
+if (-not $VerifyOnly) {
+    $exists = @(Sql-Rows (Run-Sql '' "SET NOCOUNT ON; SELECT CASE WHEN DB_ID(N'$ScrLit') IS NULL THEN 0 ELSE 1 END;" -Raw))
+    if ($script:rc -eq 0 -and $exists.Count -gt 0 -and $exists[0].Trim() -eq '1') {
+        [Console]::Error.WriteLine("ERROR: scratch database [$Scratch] already exists on $Server - refusing to restore over it; pick another -Scratch name or drop it manually")
+        exit 2
+    }
 }
 
 try {  # ensure cleanup + footer run even if a check throws
@@ -185,7 +208,7 @@ if ($rdsMode) {
     $sw.Stop(); $dur = [math]::Round($sw.Elapsed.TotalSeconds, 2)
     if ($script:rc -eq 0) {
         $backupOk = $true
-        $szRows = @(Sql-Rows (Run-Sql 'msdb' "SET NOCOUNT ON; SELECT TOP 1 CONVERT(bigint, backup_size) FROM msdb.dbo.backupset WHERE database_name=N'$DbLit' ORDER BY backup_finish_date DESC;" -Raw))
+        $szRows = @(Sql-Rows (Run-Sql 'msdb' "SET NOCOUNT ON; SELECT TOP 1 CONVERT(bigint, backup_size) FROM msdb.dbo.backupset WHERE database_name=N'$DbLit' AND type='D' AND name=N'restore drill' ORDER BY backup_finish_date DESC;" -Raw))
         if ($szRows.Count -gt 0) { $backupBytes = $szRows[0].Trim() }
         $hb = if ($backupBytes) { Human ([double]$backupBytes) } else { 'n/a' }
         Emit critical rd_01_backup_create "Backup of the source database succeeds" PASS `
@@ -246,6 +269,7 @@ elseif ($backupOk -and $rdsMode) {
 }
 elseif ($backupOk) {
     $flOut = Run-Sql '' "RESTORE FILELISTONLY FROM DISK=N'$BakLit';" -Raw
+    $flRc = $script:rc
     $moves = @()
     $dataDirLit = $DataDir.TrimEnd('/').Replace("'", "''")
     $scrSafe = ($Scratch -replace '[^A-Za-z0-9_]', '_')
@@ -265,8 +289,16 @@ elseif ($backupOk) {
             default { $moves += "MOVE N'$logEsc' TO N'$dataDirLit/${scrSafe}_${safe}.mdf'" }
         }
     }
+    if ($flRc -ne 0 -or $moves.Count -eq 0) {
+        # Without a file list we would generate a syntactically broken RESTORE -
+        # fail explicitly instead.
+        Emit critical rd_02_restore_execute "Restore into the scratch database completes" FAIL `
+            "-" "-" "could not read the backup file list (RESTORE FILELISTONLY rc=$flRc, $($moves.Count) files parsed)" $flOut
+    } else {
     $sw = [Diagnostics.Stopwatch]::StartNew()
-    $restoreSql = "RESTORE DATABASE [$ScrId] FROM DISK=N'$BakLit' WITH " + ($moves -join ', ') + ", REPLACE, RECOVERY;"
+    # No REPLACE: the scratch name is verified fresh above, so a restore over an
+    # existing database is a bug, not something to force through.
+    $restoreSql = "RESTORE DATABASE [$ScrId] FROM DISK=N'$BakLit' WITH " + ($moves -join ', ') + ", RECOVERY;"
     $out = Run-Sql '' $restoreSql
     $sw.Stop(); $rtoValue = [math]::Round($sw.Elapsed.TotalSeconds, 2)
     if ($script:rc -eq 0) {
@@ -278,6 +310,7 @@ elseif ($backupOk) {
         if ((Sql-Rows (Run-Sql '' "SET NOCOUNT ON; SELECT name FROM sys.databases WHERE name=N'$ScrLit';" -Raw)).Count -gt 0) { $scratchCreated = $true }
         Emit critical rd_02_restore_execute "Restore into the scratch database completes" FAIL `
             "restore_seconds=$rtoValue" "-" "RESTORE DATABASE failed - see output" ($flOut + "`n" + $out)
+    }
     }
 } else {
     Emit critical rd_02_restore_execute "Restore into the scratch database completes" FAIL `
@@ -314,17 +347,24 @@ $rowSql = "SET NOCOUNT ON; SELECT t.name, SUM(p.row_count) FROM sys.dm_db_partit
 $ckSql = @"
 SET NOCOUNT ON;
 DECLARE @sql nvarchar(max);
-SELECT @sql = STRING_AGG(CONVERT(nvarchar(max), 'SELECT ''' + t.name + ''' AS t, CONVERT(varchar(20), CHECKSUM_AGG(BINARY_CHECKSUM(*))) AS ck FROM ' + QUOTENAME(s.name) + '.' + QUOTENAME(t.name)), ' UNION ALL ')
+-- Label is schema-qualified (same-named tables in different schemas must not
+-- collide) and quote-doubled so a quote in a schema/table name can't break the
+-- generated literal.
+SELECT @sql = STRING_AGG(CONVERT(nvarchar(max), 'SELECT ''' + REPLACE(s.name, '''', '''''') + '.' + REPLACE(t.name, '''', '''''') + ''' AS t, CONVERT(varchar(20), CHECKSUM_AGG(BINARY_CHECKSUM(*))) AS ck FROM ' + QUOTENAME(s.name) + '.' + QUOTENAME(t.name)), ' UNION ALL ')
 FROM sys.tables t JOIN sys.schemas s ON s.schema_id = t.schema_id;
 IF @sql IS NOT NULL EXEC(@sql);
 "@
 
 # ---- rd_04: object parity (high) --------------------------------------------
 if ($restoreOk) {
-    $src = @(Sql-Rows (Run-Sql $Database $objSql -Raw) | Sort-Object)
-    $tgt = @(Sql-Rows (Run-Sql $Scratch  $objSql -Raw) | Sort-Object)
+    $src = @(Sql-Rows (Run-Sql $Database $objSql -Raw) | Sort-Object); $srcRc = $script:rc
+    $tgt = @(Sql-Rows (Run-Sql $Scratch  $objSql -Raw) | Sort-Object); $tgtRc = $script:rc
     $raw = "source vs restored object counts (kind|count):`n--- source ---`n" + ($src -join "`n") + "`n--- restored ---`n" + ($tgt -join "`n")
-    if ($src.Count -eq 0) {
+    if ($srcRc -ne 0 -or $tgtRc -ne 0) {
+        # Identical error text on both sides must never compare as a PASS.
+        Emit high rd_04_object_parity "Schema object counts match the source" FAIL "-" "-" "source/target query failed (rc=$srcRc/$tgtRc) - not verified" $raw
+    }
+    elseif ($src.Count -eq 0) {
         Emit high rd_04_object_parity "Schema object counts match the source" FAIL "-" "-" "Could not read object counts from the source - not verified" $raw
     }
     elseif (-not (Compare-Object $src $tgt)) {
@@ -336,13 +376,16 @@ if ($restoreOk) {
 
 # ---- rd_05: row-count parity (high) -----------------------------------------
 if ($restoreOk) {
-    $src = @(Sql-Rows (Run-Sql $Database $rowSql -Raw) | Sort-Object)
-    $tgt = @(Sql-Rows (Run-Sql $Scratch  $rowSql -Raw) | Sort-Object)
+    $src = @(Sql-Rows (Run-Sql $Database $rowSql -Raw) | Sort-Object); $srcRc = $script:rc
+    $tgt = @(Sql-Rows (Run-Sql $Scratch  $rowSql -Raw) | Sort-Object); $tgtRc = $script:rc
     # Sum only well-formed integer counts so a stray/error row can't throw.
     $rowsVerified = ($src | ForEach-Object { $v = ($_ -split '\|')[1]; if ("$v".Trim() -match '^\d+$') { [long]("$v".Trim()) } } | Measure-Object -Sum).Sum
     if (-not $rowsVerified) { $rowsVerified = 0 }
     $raw = "per-table row counts (table|rows):`n--- source ---`n" + ($src -join "`n") + "`n--- restored ---`n" + ($tgt -join "`n")
-    if ($src.Count -eq 0) {
+    if ($srcRc -ne 0 -or $tgtRc -ne 0) {
+        Emit high rd_05_rowcount_parity "Per-table row counts match the source" FAIL "-" "-" "source/target query failed (rc=$srcRc/$tgtRc) - not verified" $raw
+    }
+    elseif ($src.Count -eq 0) {
         Emit high rd_05_rowcount_parity "Per-table row counts match the source" WARN "-" "-" "No user tables to compare" $raw
     }
     elseif (-not (Compare-Object $src $tgt)) {
@@ -375,36 +418,49 @@ if ($restoreOk -and $rtoValue -ne '') {
 
 # ---- rd_08: RPO / backup freshness (medium) ---------------------------------
 if ($backupOk) {
+    $rpoNote = ''
     if ($rdsMode) {
         # rds_backup_database does not populate msdb.dbo.backupset; this is an
         # on-demand backup taken seconds ago, so its age is ~0 by construction.
         $rpoValue = '0.00'
+        $rpoNote = ' (no prior production backups in msdb - measured the drill''s own backup)'
     } else {
-        # Correlate with THIS drill's COPY_ONLY backup (name + type='D'), not the
-        # newest row of any type (which could be an unrelated automated backup).
-        $ageRows = @(Sql-Rows (Run-Sql 'msdb' "SET NOCOUNT ON; SELECT TOP 1 CONVERT(decimal(10,2), DATEDIFF(MINUTE, backup_finish_date, GETDATE())/60.0) FROM msdb.dbo.backupset WHERE database_name=N'$DbLit' AND type='D' AND name=N'restore drill' ORDER BY backup_finish_date DESC;" -Raw))
-        $rpoValue = if ($ageRows.Count -gt 0) { "$($ageRows[0])".Trim() } else { '0.00' }
+        # The real RPO is the age of the newest NON-drill full backup (the
+        # production cadence). Only if none exists do we fall back to measuring
+        # the drill's own COPY_ONLY backup, and we say so.
+        $ageRows = @(Sql-Rows (Run-Sql 'msdb' "SET NOCOUNT ON; SELECT TOP 1 CONVERT(decimal(10,2), DATEDIFF(MINUTE, backup_finish_date, GETDATE())/60.0) FROM msdb.dbo.backupset WHERE database_name=N'$DbLit' AND type='D' AND name <> N'restore drill' AND is_copy_only=0 ORDER BY backup_finish_date DESC;" -Raw))
+        if ($script:rc -eq 0 -and $ageRows.Count -gt 0 -and "$($ageRows[0])".Trim() -match '^\.?\d') {
+            $rpoValue = "$($ageRows[0])".Trim()
+        } else {
+            $ageRows = @(Sql-Rows (Run-Sql 'msdb' "SET NOCOUNT ON; SELECT TOP 1 CONVERT(decimal(10,2), DATEDIFF(MINUTE, backup_finish_date, GETDATE())/60.0) FROM msdb.dbo.backupset WHERE database_name=N'$DbLit' AND type='D' AND name=N'restore drill' ORDER BY backup_finish_date DESC;" -Raw))
+            $rpoValue = if ($ageRows.Count -gt 0) { "$($ageRows[0])".Trim() } else { '0.00' }
+            $rpoNote = ' (no prior production backups in msdb - measured the drill''s own backup)'
+        }
         if ($rpoValue -match '^\.') { $rpoValue = "0$rpoValue" }
     }
     if ([double]$rpoValue -le $RpoHours) {
-        Emit medium rd_08_rpo_backup_age "Backup is fresh enough for the RPO target" PASS "backup_age_hours=$rpoValue" "rpo_hours<=$RpoHours" "Backup is ${rpoValue}h old, within the ${RpoHours}h RPO target" "backup age ${rpoValue}h vs RPO target ${RpoHours}h"
+        Emit medium rd_08_rpo_backup_age "Backup is fresh enough for the RPO target" PASS "backup_age_hours=$rpoValue" "rpo_hours<=$RpoHours" "Backup is ${rpoValue}h old, within the ${RpoHours}h RPO target$rpoNote" "backup age ${rpoValue}h vs RPO target ${RpoHours}h"
     } else {
-        Emit medium rd_08_rpo_backup_age "Backup is fresh enough for the RPO target" WARN "backup_age_hours=$rpoValue" "rpo_hours<=$RpoHours" "Backup is ${rpoValue}h old, exceeding the ${RpoHours}h RPO target" "backup age ${rpoValue}h vs RPO target ${RpoHours}h"
+        Emit medium rd_08_rpo_backup_age "Backup is fresh enough for the RPO target" WARN "backup_age_hours=$rpoValue" "rpo_hours<=$RpoHours" "Backup is ${rpoValue}h old, exceeding the ${RpoHours}h RPO target$rpoNote" "backup age ${rpoValue}h vs RPO target ${RpoHours}h"
     }
 } else { Emit medium rd_08_rpo_backup_age "Backup is fresh enough for the RPO target" FAIL "-" "rpo_hours<=$RpoHours" "Skipped: backup failed" "" }
 
 if (-not $VerifyOnly) {
 # ---- rd_09: content checksum parity (low) - CHECKSUM_AGG ---------------------
 if ($restoreOk) {
-    $src = @(Sql-Rows (Run-Sql $Database $ckSql -Raw) | Sort-Object)
-    $tgt = @(Sql-Rows (Run-Sql $Scratch  $ckSql -Raw) | Sort-Object)
+    $src = @(Sql-Rows (Run-Sql $Database $ckSql -Raw) | Sort-Object); $srcRc = $script:rc
+    $tgt = @(Sql-Rows (Run-Sql $Scratch  $ckSql -Raw) | Sort-Object); $tgtRc = $script:rc
     $raw = "per-table content checksum (table|checksum):`n--- source ---`n" + ($src -join "`n") + "`n--- restored ---`n" + ($tgt -join "`n")
-    if ($src.Count -eq 0) {
+    if ($srcRc -ne 0 -or $tgtRc -ne 0) {
+        Emit low rd_09_data_checksum "Row-content checksums match the source" FAIL "-" "-" "source/target query failed (rc=$srcRc/$tgtRc) - not verified" $raw
+    }
+    elseif ($src.Count -eq 0) {
         Emit low rd_09_data_checksum "Row-content checksums match the source" WARN "-" "-" "No user tables to checksum" $raw
     } else {
         $diff = Compare-Object $src $tgt
         if (-not $diff) {
-            Emit low rd_09_data_checksum "Row-content checksums match the source" PASS "-" "-" "Every table's CHECKSUM_AGG matches the source - data is faithful" $raw
+            # BINARY_CHECKSUM ignores xml/text/image (LOB) columns - be honest.
+            Emit low rd_09_data_checksum "Row-content checksums match the source" PASS "-" "-" "Every table's CHECKSUM_AGG matches the source (non-LOB columns) - data is faithful" $raw
         } else {
             Emit low rd_09_data_checksum "Row-content checksums match the source" FAIL "-" "-" "Content checksums differ - restored data does not match the source" ($raw + "`n--- mismatches ---`n" + (($diff | Out-String)))
         }
@@ -427,6 +483,8 @@ finally {
             Run-Sql '' "IF DB_ID(N'$ScrLit') IS NOT NULL BEGIN ALTER DATABASE [$ScrId] SET SINGLE_USER WITH ROLLBACK IMMEDIATE; DROP DATABASE [$ScrId]; END" | Out-Null
         } catch { Write-Host "[warn] could not drop scratch database $Scratch" }
     }
+    # Don't leave the password in the environment after the run.
+    Remove-Item Env:SQLCMDPASSWORD -ErrorAction SilentlyContinue
 }
 
 # ---- verdict + summary footer -----------------------------------------------
@@ -452,6 +510,14 @@ $footer = @(
 )
 $footer -join "`n" | Out-File -FilePath $SummaryFile -Append -Encoding utf8
 $footer | ForEach-Object { Write-Host $_ }
+if (-not $rdsMode -and $backupOk) {
+    # The drill never deletes its .bak server-side (the runner may not have
+    # filesystem access to the instance). Plain extra line - the analyzer only
+    # parses the labelled footer fields, so this cannot break parsing.
+    $bakNote = "NOTE: backup file left on server: $bak - delete it manually"
+    $bakNote | Out-File -FilePath $SummaryFile -Append -Encoding utf8
+    Write-Host $bakNote
+}
 Write-Host "Report directory: $OutDir"
 # Exit non-zero on FAIL (always) and on WARN when -Strict is set.
 if ($verdict -eq 'FAIL') { exit 1 }

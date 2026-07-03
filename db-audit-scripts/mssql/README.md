@@ -367,8 +367,10 @@ exact list.
   `xp_readerrorlog`. Scripts that need these guard the calls with
   `TRY/CATCH`, so lower-privilege runs still get useful output.
 * On Azure SQL Database / Managed Instance, `xp_instance_regread` and
-  some `sys.master_files` queries are not available — affected scripts
-  emit `[note]` lines.
+  `sys.master_files` are not available — affected scripts detect that
+  (OBJECT_ID-guarded dynamic SQL, since a direct reference to a missing
+  catalog view is a batch-aborting compile error that TRY/CATCH cannot
+  intercept) and emit `[note]` lines instead of failing.
 
 See `perf/README.md` and `sec/README.md` for the full per-script
 catalog and version caveats.

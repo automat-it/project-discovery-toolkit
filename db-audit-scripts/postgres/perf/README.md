@@ -167,8 +167,9 @@ PG13–17:
   `dead_tuple_bytes` / `num_dead_item_ids` plus
   `indexes_total` / `indexes_processed`. `perf_20` branches on
   version and uses the right column set.
-- `pg_stat_statements_info` was added in PG14; `perf_01` uses it at
-  the top, guarded by a server-version check.
+- `pg_stat_statements_info` needs PG14+ AND pg_stat_statements
+  extension version >= 1.9 (a pg_upgraded cluster may lag behind);
+  `perf_01` gates it on the view actually existing (`to_regclass`).
 
 ## Required privileges
 
@@ -179,9 +180,10 @@ Specific elevated requirements:
   membership in `pg_read_all_stats` or `pg_monitor` (or be superuser /
   `rds_superuser` on AWS RDS).
 * Scripts that read `pg_stat_statements` (`perf_01`, `perf_04`,
-  `perf_09`, `perf_13`, `perf_16`) require the extension to be loaded
-  via `shared_preload_libraries`. On AWS RDS this is set in the
-  Parameter Group.
+  `perf_09`, `perf_13`, `perf_16`, `perf_23`) give their full output
+  only when the extension is loaded via `shared_preload_libraries`
+  (on AWS RDS this is set in the Parameter Group); without it they
+  skip those sections cleanly with a note row.
 
 ## Recommended execution order
 

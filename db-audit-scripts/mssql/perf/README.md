@@ -264,8 +264,9 @@ Instance-wide `sys.master_files` inventory, current-database file
 layout with filegroup placement, per-filegroup size roll-up, per-table
 filegroup placement, per-file I/O latency from
 `sys.dm_io_virtual_file_stats`, tempdb file layout, drive-letter roll-
-up. All `sys.master_files` blocks are wrapped in TRY/CATCH so the
-script degrades cleanly on Azure SQL Database.
+up. All `sys.master_files` blocks run through OBJECT_ID-guarded dynamic
+SQL (a direct reference is a batch-aborting compile error where the
+view is absent), so the script degrades cleanly on Azure SQL Database.
 
 ### `perf_20_workload_management.sql`
 

@@ -59,7 +59,7 @@ SELECT TOP 50
     sp.modification_counter,
     CAST(100.0 * sp.modification_counter
          / NULLIF(sp.rows, 0) AS DECIMAL(18,2))       AS mod_pct,
-    DATEDIFF(day, sp.last_updated, SYSUTCDATETIME())  AS days_since_update,
+    DATEDIFF(day, sp.last_updated, SYSDATETIME())  AS days_since_update,
     s.no_recompute                                    AS auto_update_disabled
 FROM sys.stats s
 JOIN sys.objects o ON o.object_id = s.object_id

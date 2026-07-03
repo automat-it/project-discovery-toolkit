@@ -124,8 +124,8 @@ SELECT TOP 100
     CASE WHEN o.modify_date > o.create_date THEN 'altered' ELSE 'created' END AS last_change
 FROM sys.objects o
 WHERE o.is_ms_shipped = 0
-  AND (o.create_date > DATEADD(day, -90, SYSUTCDATETIME())
-    OR o.modify_date > DATEADD(day, -90, SYSUTCDATETIME()))
+  AND (o.create_date > DATEADD(day, -90, SYSDATETIME())
+    OR o.modify_date > DATEADD(day, -90, SYSDATETIME()))
 ORDER BY o.modify_date DESC;
 
 -- ---------------------------------------------------------------------------
@@ -139,8 +139,8 @@ SELECT
     CAST(type_desc AS NVARCHAR(60))  COLLATE DATABASE_DEFAULT AS type_desc,
     create_date, modify_date, is_disabled
 FROM sys.server_principals
-WHERE create_date > DATEADD(day, -90, SYSUTCDATETIME())
-   OR modify_date > DATEADD(day, -90, SYSUTCDATETIME())
+WHERE create_date > DATEADD(day, -90, SYSDATETIME())
+   OR modify_date > DATEADD(day, -90, SYSDATETIME())
 UNION ALL
 SELECT
     CAST('database_principal' AS NVARCHAR(20)) COLLATE DATABASE_DEFAULT AS scope,
@@ -148,8 +148,8 @@ SELECT
     CAST(type_desc AS NVARCHAR(60))  COLLATE DATABASE_DEFAULT AS type_desc,
     create_date, modify_date, CAST(NULL AS BIT)
 FROM sys.database_principals
-WHERE create_date > DATEADD(day, -90, SYSUTCDATETIME())
-   OR modify_date > DATEADD(day, -90, SYSUTCDATETIME())
+WHERE create_date > DATEADD(day, -90, SYSDATETIME())
+   OR modify_date > DATEADD(day, -90, SYSDATETIME())
 ORDER BY scope, modify_date DESC;
 
 -- ---------------------------------------------------------------------------

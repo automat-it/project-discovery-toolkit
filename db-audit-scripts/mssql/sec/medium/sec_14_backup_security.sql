@@ -57,7 +57,7 @@ BEGIN TRY
         DATEDIFF(hour,
                  ISNULL(MAX(CASE WHEN bs.type = 'D' THEN bs.backup_finish_date END),
                         '1900-01-01'),
-                 SYSUTCDATETIME())                    AS hours_since_full,
+                 SYSDATETIME())                    AS hours_since_full,
         MAX(CASE WHEN bs.type = 'D' THEN bs.encryptor_type END) AS last_full_encryptor_type
     FROM sys.databases d
     LEFT JOIN msdb.dbo.backupset bs
@@ -108,7 +108,7 @@ BEGIN TRY
         bmf.physical_device_name
     FROM msdb.dbo.backupset bs
     JOIN msdb.dbo.backupmediafamily bmf ON bmf.media_set_id = bs.media_set_id
-    WHERE bs.backup_finish_date >= DATEADD(day, -30, SYSUTCDATETIME())
+    WHERE bs.backup_finish_date >= DATEADD(day, -30, SYSDATETIME())
     ORDER BY bs.backup_finish_date DESC;
 END TRY
 BEGIN CATCH
@@ -125,7 +125,7 @@ SELECT
     r.command,
     r.start_time,
     r.percent_complete,
-    DATEADD(second, r.estimated_completion_time / 1000, SYSUTCDATETIME())
+    DATEADD(second, r.estimated_completion_time / 1000, SYSDATETIME())
                                                       AS estimated_completion,
     LEFT(txt.text, 300)                               AS statement_text
 FROM sys.dm_exec_requests r
@@ -166,9 +166,9 @@ END CATCH;
 BEGIN TRY
     SELECT
         (SELECT COUNT(*) FROM msdb.dbo.backupset
-          WHERE backup_finish_date >= DATEADD(day, -7, SYSUTCDATETIME())) AS backups_last_7d,
+          WHERE backup_finish_date >= DATEADD(day, -7, SYSDATETIME())) AS backups_last_7d,
         (SELECT COUNT(*) FROM msdb.dbo.backupset
-          WHERE backup_finish_date >= DATEADD(day, -7, SYSUTCDATETIME())
+          WHERE backup_finish_date >= DATEADD(day, -7, SYSDATETIME())
             AND encryptor_type IS NULL)                                   AS unencrypted_last_7d,
         (SELECT COUNT(*) FROM sys.databases d
           WHERE d.database_id > 4

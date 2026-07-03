@@ -142,7 +142,7 @@ SELECT
     r.command,
     r.start_time,
     r.percent_complete,
-    DATEADD(second, r.estimated_completion_time / 1000, SYSUTCDATETIME())
+    DATEADD(second, r.estimated_completion_time / 1000, SYSDATETIME())
                                                       AS estimated_completion,
     r.wait_type,
     r.wait_time,
@@ -168,7 +168,7 @@ BEGIN TRY
         DATEDIFF(hour,
                  ISNULL(MAX(CASE WHEN bs.type = 'D' THEN bs.backup_finish_date END),
                         '1900-01-01'),
-                 SYSUTCDATETIME())                    AS hours_since_full
+                 SYSDATETIME())                    AS hours_since_full
     FROM sys.databases d
     LEFT JOIN msdb.dbo.backupset bs
           ON bs.database_name = d.name

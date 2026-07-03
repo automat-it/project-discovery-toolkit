@@ -143,7 +143,7 @@ ORDER BY session_name;
 -- xp_readerrorlog is sysadmin-only in every release and is not available
 -- on Azure SQL Database.
 -- ---------------------------------------------------------------------------
-DECLARE @errlog_since DATETIME = DATEADD(day, -30, SYSUTCDATETIME());
+DECLARE @errlog_since DATETIME = DATEADD(day, -30, SYSDATETIME());
 BEGIN TRY
     EXEC xp_readerrorlog 0, 1, NULL, NULL,
                          @errlog_since, NULL, 'DESC';

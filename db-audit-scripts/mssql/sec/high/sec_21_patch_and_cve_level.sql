@@ -78,7 +78,7 @@ BEGIN TRY
         status_desc,
         process_id,
         last_startup_time,
-        DATEDIFF(day, last_startup_time, SYSUTCDATETIME()) AS days_since_restart,
+        DATEDIFF(day, last_startup_time, SYSDATETIME()) AS days_since_restart,
         service_account,
         is_clustered,
         instant_file_initialization_enabled

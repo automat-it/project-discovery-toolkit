@@ -38,11 +38,11 @@ SELECT
     sp.type_desc,
     sp.create_date,
     sp.modify_date,
-    DATEDIFF(day, sp.modify_date, SYSUTCDATETIME())   AS days_since_modify,
+    DATEDIFF(day, sp.modify_date, SYSDATETIME())   AS days_since_modify,
     sp.is_disabled
 FROM sys.server_principals sp
 WHERE sp.type IN ('S','U','G')
-  AND sp.modify_date < DATEADD(day, -90, SYSUTCDATETIME())
+  AND sp.modify_date < DATEADD(day, -90, SYSDATETIME())
   AND NOT EXISTS (
       SELECT 1 FROM sys.dm_exec_sessions s
        WHERE s.is_user_process = 1
@@ -61,7 +61,7 @@ SELECT
     CAST(LOGINPROPERTY(sp.name, 'PasswordLastSetTime') AS DATETIME2) AS password_last_set_time,
     DATEDIFF(day,
              CAST(LOGINPROPERTY(sp.name, 'PasswordLastSetTime') AS DATETIME2),
-             SYSUTCDATETIME())                        AS days_since_change,
+             SYSDATETIME())                        AS days_since_change,
     sp.is_disabled
 FROM sys.server_principals sp
 JOIN sys.sql_logins sl ON sl.principal_id = sp.principal_id
@@ -145,7 +145,7 @@ SELECT
       WHERE is_disabled = 1 AND type IN ('S','U','G'))    AS disabled_logins,
     (SELECT COUNT(*) FROM sys.server_principals
       WHERE type IN ('S','U','G')
-        AND modify_date < DATEADD(day, -180, SYSUTCDATETIME())) AS logins_unmodified_180d,
+        AND modify_date < DATEADD(day, -180, SYSDATETIME())) AS logins_unmodified_180d,
     (SELECT COUNT(*) FROM sys.server_principals sp
       WHERE sp.type = 'S'
         AND CAST(LOGINPROPERTY(sp.name, 'IsExpired') AS INT) = 1) AS expired_passwords;

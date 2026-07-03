@@ -11,65 +11,79 @@
 -- =============================================================================
 
 -- Portability: this script reads sys.master_files, which is NOT
--- supported on Azure SQL Database (single DB). It works on SQL
--- Server 2019+ on-prem, SQL Managed Instance, and Azure SQL DB
--- Hyperscale. Skip this script on Azure SQL DB.
+-- supported on Azure SQL Database (single DB). Those blocks are guarded
+-- with OBJECT_ID + dynamic SQL so they are skipped there; everything
+-- else runs on SQL Server 2019+, Managed Instance, and Azure SQL DB.
 SET NOCOUNT ON;
 SET TRANSACTION ISOLATION LEVEL READ UNCOMMITTED;  -- read-only audit; avoid taking shared locks on hot objects
 
 -- ---------------------------------------------------------------------------
--- Single-row snapshot of cluster-wide usage indicators. sys.master_files is
--- unavailable on Azure SQL Database; TRY/CATCH lets the block skip cleanly
--- instead of aborting.
+-- Single-row snapshot of cluster-wide usage indicators. sys.master_files
+-- does not exist on Azure SQL Database and a direct reference is a
+-- compile-time error that aborts the whole batch (TRY/CATCH cannot catch
+-- it), so guard with OBJECT_ID + dynamic SQL; TRY/CATCH remains for
+-- runtime/permission errors.
 -- ---------------------------------------------------------------------------
-BEGIN TRY
-    SELECT
-        SYSUTCDATETIME()                                  AS snapshot_at,
-        (SELECT SUM(CAST(size AS BIGINT)) * 8 / 1024
-           FROM sys.master_files
-          WHERE database_id > 4)                          AS total_user_db_mb,
-        (SELECT COUNT(*) FROM sys.databases
-          WHERE database_id > 4)                          AS user_database_count,
-        (SELECT COUNT(*) FROM sys.dm_exec_sessions
-          WHERE is_user_process = 1)                      AS current_user_sessions,
-        (SELECT CAST(value_in_use AS INT) FROM sys.configurations
-          WHERE name = 'user connections')                AS configured_max_connections,
-        (SELECT TOP 1 cntr_value FROM sys.dm_os_performance_counters
-          WHERE counter_name = 'Batch Requests/sec')      AS batch_requests_per_sec,
-        (SELECT TOP 1 cntr_value FROM sys.dm_os_performance_counters
-          WHERE counter_name = 'User Connections')        AS user_connection_counter;
-END TRY
-BEGIN CATCH
-    PRINT '[note] sys.master_files not accessible (likely Azure SQL DB): '
-          + ERROR_MESSAGE();
-END CATCH;
+IF OBJECT_ID('sys.master_files') IS NOT NULL
+BEGIN
+    BEGIN TRY
+        EXEC sp_executesql N'
+            SELECT
+                SYSUTCDATETIME()                                  AS snapshot_at,
+                (SELECT SUM(CAST(size AS BIGINT)) * 8 / 1024
+                   FROM sys.master_files
+                  WHERE database_id > 4)                          AS total_user_db_mb,
+                (SELECT COUNT(*) FROM sys.databases
+                  WHERE database_id > 4)                          AS user_database_count,
+                (SELECT COUNT(*) FROM sys.dm_exec_sessions
+                  WHERE is_user_process = 1)                      AS current_user_sessions,
+                (SELECT CAST(value_in_use AS INT) FROM sys.configurations
+                  WHERE name = ''user connections'')              AS configured_max_connections,
+                (SELECT TOP 1 cntr_value FROM sys.dm_os_performance_counters
+                  WHERE counter_name = ''Batch Requests/sec'')    AS batch_requests_per_sec,
+                (SELECT TOP 1 cntr_value FROM sys.dm_os_performance_counters
+                  WHERE counter_name = ''User Connections'')      AS user_connection_counter;';
+    END TRY
+    BEGIN CATCH
+        PRINT '[note] sys.master_files not accessible: ' + ERROR_MESSAGE();
+    END CATCH;
+END
+ELSE
+    PRINT '[note] sys.master_files not available - skipped';
 
 -- ---------------------------------------------------------------------------
--- Per-database snapshot. sys.master_files is unavailable on Azure SQL
--- Database; TRY/CATCH lets the block skip cleanly instead of aborting.
+-- Per-database snapshot. sys.master_files does not exist on Azure SQL
+-- Database and a direct reference is a compile-time error that aborts the
+-- whole batch (TRY/CATCH cannot catch it), so guard with OBJECT_ID +
+-- dynamic SQL; TRY/CATCH remains for runtime/permission errors.
 -- ---------------------------------------------------------------------------
-BEGIN TRY
-    SELECT
-        SYSUTCDATETIME()                                  AS snapshot_at,
-        d.name                                            AS database_name,
-        d.state_desc,
-        d.recovery_model_desc,
-        SUM(CASE WHEN mf.type = 0 THEN CAST(mf.size AS BIGINT) END) * 8 / 1024 AS data_mb,
-        SUM(CASE WHEN mf.type = 1 THEN CAST(mf.size AS BIGINT) END) * 8 / 1024 AS log_mb,
-        d.create_date,
-        d.is_query_store_on,
-        d.is_cdc_enabled
-    FROM sys.databases d
-    JOIN sys.master_files mf ON mf.database_id = d.database_id
-    WHERE d.database_id > 4
-    GROUP BY d.name, d.state_desc, d.recovery_model_desc, d.create_date,
-             d.is_query_store_on, d.is_cdc_enabled
-    ORDER BY data_mb DESC;
-END TRY
-BEGIN CATCH
-    PRINT '[note] sys.master_files not accessible (likely Azure SQL DB): '
-          + ERROR_MESSAGE();
-END CATCH;
+IF OBJECT_ID('sys.master_files') IS NOT NULL
+BEGIN
+    BEGIN TRY
+        EXEC sp_executesql N'
+            SELECT
+                SYSUTCDATETIME()                                  AS snapshot_at,
+                d.name                                            AS database_name,
+                d.state_desc,
+                d.recovery_model_desc,
+                SUM(CASE WHEN mf.type = 0 THEN CAST(mf.size AS BIGINT) END) * 8 / 1024 AS data_mb,
+                SUM(CASE WHEN mf.type = 1 THEN CAST(mf.size AS BIGINT) END) * 8 / 1024 AS log_mb,
+                d.create_date,
+                d.is_query_store_on,
+                d.is_cdc_enabled
+            FROM sys.databases d
+            JOIN sys.master_files mf ON mf.database_id = d.database_id
+            WHERE d.database_id > 4
+            GROUP BY d.name, d.state_desc, d.recovery_model_desc, d.create_date,
+                     d.is_query_store_on, d.is_cdc_enabled
+            ORDER BY data_mb DESC;';
+    END TRY
+    BEGIN CATCH
+        PRINT '[note] sys.master_files not accessible: ' + ERROR_MESSAGE();
+    END CATCH;
+END
+ELSE
+    PRINT '[note] sys.master_files not available - skipped';
 
 -- ---------------------------------------------------------------------------
 -- Per-table snapshot for the current database (top 50 by size)
@@ -92,31 +106,38 @@ ORDER BY SUM(ps.reserved_page_count) DESC;
 
 -- ---------------------------------------------------------------------------
 -- Per-file I/O snapshot (cumulative, rate = diff between samples).
--- sys.master_files is unavailable on Azure SQL Database; TRY/CATCH lets the
--- block skip cleanly instead of aborting.
+-- sys.master_files does not exist on Azure SQL Database and a direct
+-- reference is a compile-time error that aborts the whole batch (TRY/CATCH
+-- cannot catch it), so guard with OBJECT_ID + dynamic SQL; TRY/CATCH
+-- remains for runtime/permission errors.
 -- ---------------------------------------------------------------------------
-BEGIN TRY
-    SELECT
-        SYSUTCDATETIME()                                  AS snapshot_at,
-        DB_NAME(vfs.database_id)                          AS database_name,
-        mf.name                                           AS logical_file,
-        mf.type_desc,
-        vfs.num_of_reads,
-        vfs.num_of_writes,
-        vfs.num_of_bytes_read,
-        vfs.num_of_bytes_written,
-        vfs.io_stall_read_ms,
-        vfs.io_stall_write_ms
-    FROM sys.dm_io_virtual_file_stats(NULL, NULL) vfs
-    JOIN sys.master_files mf
-          ON mf.database_id = vfs.database_id
-         AND mf.file_id     = vfs.file_id
-    WHERE vfs.database_id > 4;
-END TRY
-BEGIN CATCH
-    PRINT '[note] sys.master_files not accessible (likely Azure SQL DB): '
-          + ERROR_MESSAGE();
-END CATCH;
+IF OBJECT_ID('sys.master_files') IS NOT NULL
+BEGIN
+    BEGIN TRY
+        EXEC sp_executesql N'
+            SELECT
+                SYSUTCDATETIME()                                  AS snapshot_at,
+                DB_NAME(vfs.database_id)                          AS database_name,
+                mf.name                                           AS logical_file,
+                mf.type_desc,
+                vfs.num_of_reads,
+                vfs.num_of_writes,
+                vfs.num_of_bytes_read,
+                vfs.num_of_bytes_written,
+                vfs.io_stall_read_ms,
+                vfs.io_stall_write_ms
+            FROM sys.dm_io_virtual_file_stats(NULL, NULL) vfs
+            JOIN sys.master_files mf
+                  ON mf.database_id = vfs.database_id
+                 AND mf.file_id     = vfs.file_id
+            WHERE vfs.database_id > 4;';
+    END TRY
+    BEGIN CATCH
+        PRINT '[note] sys.master_files not accessible: ' + ERROR_MESSAGE();
+    END CATCH;
+END
+ELSE
+    PRINT '[note] sys.master_files not available - skipped';
 
 -- ---------------------------------------------------------------------------
 -- Identity headroom for future-date alerting

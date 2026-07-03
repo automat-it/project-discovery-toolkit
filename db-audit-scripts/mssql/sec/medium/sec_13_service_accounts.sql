@@ -101,7 +101,7 @@ SELECT
     CAST(LOGINPROPERTY(sp.name, 'PasswordLastSetTime') AS DATETIME2) AS password_last_set_time,
     DATEDIFF(day,
              CAST(LOGINPROPERTY(sp.name, 'PasswordLastSetTime') AS DATETIME2),
-             SYSUTCDATETIME())                        AS days_since_change
+             SYSDATETIME())                        AS days_since_change
 FROM sys.server_principals sp
 JOIN sys.sql_logins sl ON sl.principal_id = sp.principal_id
 WHERE sp.type = 'S'

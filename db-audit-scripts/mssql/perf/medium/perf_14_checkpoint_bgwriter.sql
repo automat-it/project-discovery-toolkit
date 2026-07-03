@@ -10,9 +10,9 @@
 -- =============================================================================
 
 -- Portability: this script reads sys.master_files, which is NOT
--- supported on Azure SQL Database (single DB). It works on SQL
--- Server 2019+ on-prem, SQL Managed Instance, and Azure SQL DB
--- Hyperscale. Skip this script on Azure SQL DB.
+-- supported on Azure SQL Database (single DB). Those blocks are guarded
+-- with OBJECT_ID + dynamic SQL so they are skipped there; everything
+-- else runs on SQL Server 2019+, Managed Instance, and Azure SQL DB.
 SET NOCOUNT ON;
 SET TRANSACTION ISOLATION LEVEL READ UNCOMMITTED;  -- read-only audit; avoid taking shared locks on hot objects
 
@@ -73,60 +73,74 @@ END CATCH;
 
 -- ---------------------------------------------------------------------------
 -- Database log file size and log reuse wait cause
--- (why isn't the log shrinking?). sys.master_files is unavailable on Azure
--- SQL Database; TRY/CATCH lets the block skip cleanly instead of aborting.
+-- (why isn't the log shrinking?). sys.master_files does not exist on Azure
+-- SQL Database and a direct reference is a compile-time error that aborts
+-- the whole batch (TRY/CATCH cannot catch it), so guard with OBJECT_ID +
+-- dynamic SQL; TRY/CATCH remains for runtime/permission errors.
 -- ---------------------------------------------------------------------------
-BEGIN TRY
-    SELECT
-        d.name                                            AS database_name,
-        d.log_reuse_wait_desc,
-        d.recovery_model_desc,
-        mf.name                                           AS logical_log_file,
-        CAST(CAST(mf.size AS BIGINT) * 8.0 / 1024 AS DECIMAL(18,2))       AS log_size_mb,
-        CASE WHEN mf.is_percent_growth = 1
-             THEN CONCAT(mf.growth, '%')
-             ELSE CONCAT(CAST(mf.growth AS BIGINT) * 8 / 1024, ' MB')
-        END                                               AS log_growth_setting,
-        CASE WHEN mf.max_size = -1 THEN 'unlimited'
-             ELSE CAST(CAST(mf.max_size AS BIGINT) * 8 / 1024 AS VARCHAR(20)) + ' MB'
-        END                                               AS log_max_size
-    FROM sys.databases d
-    JOIN sys.master_files mf
-          ON mf.database_id = d.database_id
-         AND mf.type = 1                                   -- log files only
-    WHERE d.database_id > 4
-    ORDER BY d.name;
-END TRY
-BEGIN CATCH
-    PRINT '[note] sys.master_files not accessible (likely Azure SQL DB): '
-          + ERROR_MESSAGE();
-END CATCH;
+IF OBJECT_ID('sys.master_files') IS NOT NULL
+BEGIN
+    BEGIN TRY
+        EXEC sp_executesql N'
+            SELECT
+                d.name                                            AS database_name,
+                d.log_reuse_wait_desc,
+                d.recovery_model_desc,
+                mf.name                                           AS logical_log_file,
+                CAST(CAST(mf.size AS BIGINT) * 8.0 / 1024 AS DECIMAL(18,2))       AS log_size_mb,
+                CASE WHEN mf.is_percent_growth = 1
+                     THEN CONCAT(mf.growth, ''%'')
+                     ELSE CONCAT(CAST(mf.growth AS BIGINT) * 8 / 1024, '' MB'')
+                END                                               AS log_growth_setting,
+                CASE WHEN mf.max_size = -1 THEN ''unlimited''
+                     ELSE CAST(CAST(mf.max_size AS BIGINT) * 8 / 1024 AS VARCHAR(20)) + '' MB''
+                END                                               AS log_max_size
+            FROM sys.databases d
+            JOIN sys.master_files mf
+                  ON mf.database_id = d.database_id
+                 AND mf.type = 1                                   -- log files only
+            WHERE d.database_id > 4
+            ORDER BY d.name;';
+    END TRY
+    BEGIN CATCH
+        PRINT '[note] sys.master_files not accessible: ' + ERROR_MESSAGE();
+    END CATCH;
+END
+ELSE
+    PRINT '[note] sys.master_files not available - skipped';
 
 -- ---------------------------------------------------------------------------
 -- Per-file I/O throughput (focus on log files — checkpoint / commit writes).
--- sys.master_files is unavailable on Azure SQL Database; TRY/CATCH lets the
--- block skip cleanly instead of aborting.
+-- sys.master_files does not exist on Azure SQL Database and a direct
+-- reference is a compile-time error that aborts the whole batch (TRY/CATCH
+-- cannot catch it), so guard with OBJECT_ID + dynamic SQL; TRY/CATCH
+-- remains for runtime/permission errors.
 -- ---------------------------------------------------------------------------
-BEGIN TRY
-    SELECT
-        DB_NAME(vfs.database_id)                          AS database_name,
-        mf.name                                           AS logical_file,
-        mf.type_desc                                      AS file_type,
-        vfs.num_of_writes,
-        CAST(vfs.num_of_bytes_written / 1024.0 / 1024 AS DECIMAL(18,2)) AS mb_written,
-        vfs.io_stall_write_ms                             AS total_write_stall_ms,
-        CAST(vfs.io_stall_write_ms / NULLIF(vfs.num_of_writes, 0) AS DECIMAL(18,2)) AS avg_write_stall_ms
-    FROM sys.dm_io_virtual_file_stats(NULL, NULL) vfs
-    JOIN sys.master_files mf
-          ON mf.database_id = vfs.database_id
-         AND mf.file_id     = vfs.file_id
-    WHERE mf.type = 1                                      -- log files
-    ORDER BY vfs.num_of_writes DESC;
-END TRY
-BEGIN CATCH
-    PRINT '[note] sys.master_files not accessible (likely Azure SQL DB): '
-          + ERROR_MESSAGE();
-END CATCH;
+IF OBJECT_ID('sys.master_files') IS NOT NULL
+BEGIN
+    BEGIN TRY
+        EXEC sp_executesql N'
+            SELECT
+                DB_NAME(vfs.database_id)                          AS database_name,
+                mf.name                                           AS logical_file,
+                mf.type_desc                                      AS file_type,
+                vfs.num_of_writes,
+                CAST(vfs.num_of_bytes_written / 1024.0 / 1024 AS DECIMAL(18,2)) AS mb_written,
+                vfs.io_stall_write_ms                             AS total_write_stall_ms,
+                CAST(vfs.io_stall_write_ms / NULLIF(vfs.num_of_writes, 0) AS DECIMAL(18,2)) AS avg_write_stall_ms
+            FROM sys.dm_io_virtual_file_stats(NULL, NULL) vfs
+            JOIN sys.master_files mf
+                  ON mf.database_id = vfs.database_id
+                 AND mf.file_id     = vfs.file_id
+            WHERE mf.type = 1                                      -- log files
+            ORDER BY vfs.num_of_writes DESC;';
+    END TRY
+    BEGIN CATCH
+        PRINT '[note] sys.master_files not accessible: ' + ERROR_MESSAGE();
+    END CATCH;
+END
+ELSE
+    PRINT '[note] sys.master_files not available - skipped';
 
 -- ---------------------------------------------------------------------------
 -- WRITELOG waits (persistent log-flush pressure)

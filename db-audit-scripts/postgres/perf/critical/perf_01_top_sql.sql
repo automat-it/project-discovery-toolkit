@@ -29,14 +29,16 @@ SELECT EXISTS (
 \if :has_pgss
 
 -- Statistics reset timestamp (interpret all stats relative to this).
--- pg_stat_statements_info is PostgreSQL 14+; guard it separately.
-SELECT current_setting('server_version_num')::int >= 140000 AS has_pgss_info
+-- pg_stat_statements_info needs PG14+ AND extension version >= 1.9 (a
+-- pg_upgraded cluster may still run an older extversion), so gate on the
+-- view actually existing rather than on the server version.
+SELECT to_regclass('pg_stat_statements_info') IS NOT NULL AS has_pgss_info
 \gset
 \if :has_pgss_info
 SELECT stats_reset
 FROM pg_stat_statements_info;
 \else
-SELECT 'pg_stat_statements_info requires PostgreSQL 14+ - skipped' AS note;
+SELECT 'pg_stat_statements_info not available (needs PG14+ and pg_stat_statements >= 1.9) - skipped' AS note;
 \endif
 
 -- ---------------------------------------------------------------------------

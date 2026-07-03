@@ -14,10 +14,14 @@ SET TRANSACTION ISOLATION LEVEL READ UNCOMMITTED;
 
 -- ---------------------------------------------------------------------------
 -- Instance-wide file inventory (all databases)
--- NOTE: sys.master_files is not available on Azure SQL Database; the
--- BEGIN TRY block degrades gracefully.
+-- NOTE: sys.master_files does not exist on Azure SQL Database; a direct
+-- reference there is a batch-aborting compile error, so the query runs via
+-- OBJECT_ID-guarded dynamic SQL (TRY/CATCH alone cannot catch that).
 -- ---------------------------------------------------------------------------
-BEGIN TRY
+IF OBJECT_ID('sys.master_files') IS NOT NULL
+BEGIN
+    BEGIN TRY
+        EXEC sp_executesql N'
     SELECT
         DB_NAME(mf.database_id)                          AS database_name,
         mf.file_id,
@@ -31,12 +35,14 @@ BEGIN TRY
         mf.is_percent_growth,
         mf.is_read_only
     FROM sys.master_files mf
-    ORDER BY database_name, mf.file_id;
-END TRY
-BEGIN CATCH
-    PRINT '[note] sys.master_files not accessible (likely Azure SQL DB): '
-          + ERROR_MESSAGE();
-END CATCH;
+    ORDER BY database_name, mf.file_id;';
+    END TRY
+    BEGIN CATCH
+        PRINT '[note] sys.master_files not accessible: ' + ERROR_MESSAGE();
+    END CATCH;
+END
+ELSE
+    PRINT '[note] sys.master_files not available - skipped';
 
 -- ---------------------------------------------------------------------------
 -- Current-database file layout
@@ -101,7 +107,10 @@ ORDER BY size_mb DESC;
 -- ---------------------------------------------------------------------------
 -- I/O latency per file (top offenders)
 -- ---------------------------------------------------------------------------
-BEGIN TRY
+IF OBJECT_ID('sys.master_files') IS NOT NULL
+BEGIN
+    BEGIN TRY
+        EXEC sp_executesql N'
     SELECT TOP 30
         DB_NAME(vfs.database_id)                         AS database_name,
         mf.name                                          AS logical_name,
@@ -115,17 +124,22 @@ BEGIN TRY
     FROM sys.dm_io_virtual_file_stats(NULL, NULL) vfs
     JOIN sys.master_files mf
           ON mf.database_id = vfs.database_id AND mf.file_id = vfs.file_id
-    ORDER BY (vfs.io_stall_read_ms + vfs.io_stall_write_ms) DESC;
-END TRY
-BEGIN CATCH
-    PRINT '[note] dm_io_virtual_file_stats join to sys.master_files failed (Azure SQL DB?): '
-          + ERROR_MESSAGE();
-END CATCH;
+    ORDER BY (vfs.io_stall_read_ms + vfs.io_stall_write_ms) DESC;';
+    END TRY
+    BEGIN CATCH
+        PRINT '[note] per-file I/O latency unavailable: ' + ERROR_MESSAGE();
+    END CATCH;
+END
+ELSE
+    PRINT '[note] sys.master_files not available - per-file I/O latency skipped';
 
 -- ---------------------------------------------------------------------------
 -- tempdb file layout (multi-file tempdb is a best practice)
 -- ---------------------------------------------------------------------------
-BEGIN TRY
+IF OBJECT_ID('sys.master_files') IS NOT NULL
+BEGIN
+    BEGIN TRY
+        EXEC sp_executesql N'
     SELECT
         mf.name                                          AS logical_name,
         mf.physical_name,
@@ -134,28 +148,37 @@ BEGIN TRY
         mf.growth,
         mf.is_percent_growth
     FROM sys.master_files mf
-    WHERE mf.database_id = DB_ID('tempdb')
-    ORDER BY mf.type_desc, mf.file_id;
-END TRY
-BEGIN CATCH
-    PRINT '[note] tempdb file layout unavailable: ' + ERROR_MESSAGE();
-END CATCH;
+    WHERE mf.database_id = DB_ID(''tempdb'')
+    ORDER BY mf.type_desc, mf.file_id;';
+    END TRY
+    BEGIN CATCH
+        PRINT '[note] tempdb file layout unavailable: ' + ERROR_MESSAGE();
+    END CATCH;
+END
+ELSE
+    PRINT '[note] sys.master_files not available - tempdb layout skipped';
 
 -- ---------------------------------------------------------------------------
 -- Distinct physical drives in use (quick view of I/O spread)
 -- ---------------------------------------------------------------------------
-BEGIN TRY
+IF OBJECT_ID('sys.master_files') IS NOT NULL
+BEGIN
+    BEGIN TRY
+        EXEC sp_executesql N'
     SELECT
         UPPER(LEFT(physical_name, 3))                    AS drive_letter,
         COUNT(*)                                         AS files_on_drive,
         CAST(SUM(size) * 8.0 / 1024 AS DECIMAL(18,2))    AS total_size_mb
     FROM sys.master_files
     GROUP BY UPPER(LEFT(physical_name, 3))
-    ORDER BY total_size_mb DESC;
-END TRY
-BEGIN CATCH
-    PRINT '[note] drive rollup unavailable: ' + ERROR_MESSAGE();
-END CATCH;
+    ORDER BY total_size_mb DESC;';
+    END TRY
+    BEGIN CATCH
+        PRINT '[note] drive rollup unavailable: ' + ERROR_MESSAGE();
+    END CATCH;
+END
+ELSE
+    PRINT '[note] sys.master_files not available - drive rollup skipped';
 
 -- ---------------------------------------------------------------------------
 -- Summary

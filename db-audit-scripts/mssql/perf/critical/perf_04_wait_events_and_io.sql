@@ -9,9 +9,9 @@
 -- =============================================================================
 
 -- Portability: this script reads sys.master_files, which is NOT
--- supported on Azure SQL Database (single DB). It works on SQL
--- Server 2019+ on-prem, SQL Managed Instance, and Azure SQL DB
--- Hyperscale. Skip this script on Azure SQL DB.
+-- supported on Azure SQL Database (single DB). That block is guarded
+-- with OBJECT_ID + dynamic SQL so it is skipped there; everything
+-- else runs on SQL Server 2019+, Managed Instance, and Azure SQL DB.
 SET NOCOUNT ON;
 SET TRANSACTION ISOLATION LEVEL READ UNCOMMITTED;  -- read-only audit; avoid taking shared locks on hot objects
 
@@ -117,34 +117,41 @@ GROUP BY
 ORDER BY total_wait_ms DESC;
 
 -- ---------------------------------------------------------------------------
--- Per-database file I/O totals. sys.master_files is unavailable on Azure
--- SQL Database; TRY/CATCH lets the block skip cleanly instead of aborting.
+-- Per-database file I/O totals. sys.master_files does not exist on Azure
+-- SQL Database and a direct reference is a compile-time error that aborts
+-- the whole batch (TRY/CATCH cannot catch it), so guard with OBJECT_ID +
+-- dynamic SQL; TRY/CATCH remains for runtime/permission errors.
 -- ---------------------------------------------------------------------------
-BEGIN TRY
-    SELECT TOP 50
-        DB_NAME(vfs.database_id)                           AS database_name,
-        mf.name                                            AS logical_file,
-        mf.type_desc                                       AS file_type,
-        mf.physical_name,
-        vfs.num_of_reads,
-        vfs.num_of_writes,
-        CAST(vfs.num_of_bytes_read / 1024.0 / 1024 AS DECIMAL(18,2))  AS mb_read,
-        CAST(vfs.num_of_bytes_written / 1024.0 / 1024 AS DECIMAL(18,2)) AS mb_written,
-        CAST(vfs.io_stall_read_ms / NULLIF(vfs.num_of_reads, 0) AS DECIMAL(18,2))   AS avg_read_stall_ms,
-        CAST(vfs.io_stall_write_ms / NULLIF(vfs.num_of_writes, 0) AS DECIMAL(18,2)) AS avg_write_stall_ms,
-        -- The view exposes a generic `io_stall` column (read+write), not
-        -- `io_stall_ms`. Rename for clarity.
-        vfs.io_stall                                       AS total_stall_ms
-    FROM sys.dm_io_virtual_file_stats(NULL, NULL) vfs
-    JOIN sys.master_files mf
-          ON mf.database_id = vfs.database_id
-         AND mf.file_id     = vfs.file_id
-    ORDER BY vfs.io_stall DESC;
-END TRY
-BEGIN CATCH
-    PRINT '[note] sys.master_files not accessible (likely Azure SQL DB): '
-          + ERROR_MESSAGE();
-END CATCH;
+IF OBJECT_ID('sys.master_files') IS NOT NULL
+BEGIN
+    BEGIN TRY
+        EXEC sp_executesql N'
+            SELECT TOP 50
+                DB_NAME(vfs.database_id)                           AS database_name,
+                mf.name                                            AS logical_file,
+                mf.type_desc                                       AS file_type,
+                mf.physical_name,
+                vfs.num_of_reads,
+                vfs.num_of_writes,
+                CAST(vfs.num_of_bytes_read / 1024.0 / 1024 AS DECIMAL(18,2))  AS mb_read,
+                CAST(vfs.num_of_bytes_written / 1024.0 / 1024 AS DECIMAL(18,2)) AS mb_written,
+                CAST(vfs.io_stall_read_ms / NULLIF(vfs.num_of_reads, 0) AS DECIMAL(18,2))   AS avg_read_stall_ms,
+                CAST(vfs.io_stall_write_ms / NULLIF(vfs.num_of_writes, 0) AS DECIMAL(18,2)) AS avg_write_stall_ms,
+                -- The view exposes a generic io_stall column (read+write),
+                -- not io_stall_ms. Rename for clarity.
+                vfs.io_stall                                       AS total_stall_ms
+            FROM sys.dm_io_virtual_file_stats(NULL, NULL) vfs
+            JOIN sys.master_files mf
+                  ON mf.database_id = vfs.database_id
+                 AND mf.file_id     = vfs.file_id
+            ORDER BY vfs.io_stall DESC;';
+    END TRY
+    BEGIN CATCH
+        PRINT '[note] sys.master_files not accessible: ' + ERROR_MESSAGE();
+    END CATCH;
+END
+ELSE
+    PRINT '[note] sys.master_files not available - skipped';
 
 -- ---------------------------------------------------------------------------
 -- Buffer cache hit ratio (target: > 99% on OLTP)

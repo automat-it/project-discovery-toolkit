@@ -9,56 +9,69 @@
 -- =============================================================================
 
 -- Portability: this script reads sys.master_files, which is NOT
--- supported on Azure SQL Database (single DB). It works on SQL
--- Server 2019+ on-prem, SQL Managed Instance, and Azure SQL DB
--- Hyperscale. Skip this script on Azure SQL DB.
+-- supported on Azure SQL Database (single DB). Those blocks are guarded
+-- with OBJECT_ID + dynamic SQL so they are skipped there; everything
+-- else runs on SQL Server 2019+, Managed Instance, and Azure SQL DB.
 SET NOCOUNT ON;
 SET TRANSACTION ISOLATION LEVEL READ UNCOMMITTED;  -- read-only audit; avoid taking shared locks on hot objects
 
 -- ---------------------------------------------------------------------------
 -- Cluster-wide storage usage (single-statement, T-SQL compatible).
--- sys.master_files is unavailable on Azure SQL Database; TRY/CATCH lets the
--- block skip cleanly instead of aborting.
+-- sys.master_files does not exist on Azure SQL Database and a direct
+-- reference is a compile-time error that aborts the whole batch (TRY/CATCH
+-- cannot catch it), so guard with OBJECT_ID + dynamic SQL; TRY/CATCH
+-- remains for runtime/permission errors.
 -- ---------------------------------------------------------------------------
-BEGIN TRY
-    SELECT
-        (SELECT COUNT(*) FROM sys.databases WHERE database_id > 4)  AS user_databases,
-        (SELECT SUM(CAST(size AS BIGINT)) * 8 / 1024 FROM sys.master_files) AS total_mb,
-        (SELECT SUM(CAST(size AS BIGINT)) * 8 / 1024 FROM sys.master_files WHERE type = 0) AS total_data_mb,
-        (SELECT SUM(CAST(size AS BIGINT)) * 8 / 1024 FROM sys.master_files WHERE type = 1) AS total_log_mb;
-END TRY
-BEGIN CATCH
-    PRINT '[note] sys.master_files not accessible (likely Azure SQL DB): '
-          + ERROR_MESSAGE();
-END CATCH;
+IF OBJECT_ID('sys.master_files') IS NOT NULL
+BEGIN
+    BEGIN TRY
+        EXEC sp_executesql N'
+            SELECT
+                (SELECT COUNT(*) FROM sys.databases WHERE database_id > 4)  AS user_databases,
+                (SELECT SUM(CAST(size AS BIGINT)) * 8 / 1024 FROM sys.master_files) AS total_mb,
+                (SELECT SUM(CAST(size AS BIGINT)) * 8 / 1024 FROM sys.master_files WHERE type = 0) AS total_data_mb,
+                (SELECT SUM(CAST(size AS BIGINT)) * 8 / 1024 FROM sys.master_files WHERE type = 1) AS total_log_mb;';
+    END TRY
+    BEGIN CATCH
+        PRINT '[note] sys.master_files not accessible: ' + ERROR_MESSAGE();
+    END CATCH;
+END
+ELSE
+    PRINT '[note] sys.master_files not available - skipped';
 
 -- ---------------------------------------------------------------------------
--- Per-database size and growth indicators. sys.master_files is unavailable
--- on Azure SQL Database; TRY/CATCH lets the block skip cleanly instead of
--- aborting.
+-- Per-database size and growth indicators. sys.master_files does not exist
+-- on Azure SQL Database and a direct reference is a compile-time error that
+-- aborts the whole batch (TRY/CATCH cannot catch it), so guard with
+-- OBJECT_ID + dynamic SQL; TRY/CATCH remains for runtime/permission errors.
 -- ---------------------------------------------------------------------------
-BEGIN TRY
-    SELECT
-        d.name                                            AS database_name,
-        d.state_desc,
-        d.recovery_model_desc,
-        CAST(SUM(CASE WHEN mf.type = 0 THEN mf.size END) * 8.0 / 1024 AS DECIMAL(18,2)) AS data_mb,
-        CAST(SUM(CASE WHEN mf.type = 1 THEN mf.size END) * 8.0 / 1024 AS DECIMAL(18,2)) AS log_mb,
-        COUNT(CASE WHEN mf.type = 0 THEN 1 END)           AS data_files,
-        COUNT(CASE WHEN mf.type = 1 THEN 1 END)           AS log_files,
-        d.create_date,
-        d.log_reuse_wait_desc
-    FROM sys.databases d
-    JOIN sys.master_files mf ON mf.database_id = d.database_id
-    WHERE d.database_id > 4
-    GROUP BY d.name, d.state_desc, d.recovery_model_desc,
-             d.create_date, d.log_reuse_wait_desc
-    ORDER BY data_mb DESC;
-END TRY
-BEGIN CATCH
-    PRINT '[note] sys.master_files not accessible (likely Azure SQL DB): '
-          + ERROR_MESSAGE();
-END CATCH;
+IF OBJECT_ID('sys.master_files') IS NOT NULL
+BEGIN
+    BEGIN TRY
+        EXEC sp_executesql N'
+            SELECT
+                d.name                                            AS database_name,
+                d.state_desc,
+                d.recovery_model_desc,
+                CAST(SUM(CASE WHEN mf.type = 0 THEN mf.size END) * 8.0 / 1024 AS DECIMAL(18,2)) AS data_mb,
+                CAST(SUM(CASE WHEN mf.type = 1 THEN mf.size END) * 8.0 / 1024 AS DECIMAL(18,2)) AS log_mb,
+                COUNT(CASE WHEN mf.type = 0 THEN 1 END)           AS data_files,
+                COUNT(CASE WHEN mf.type = 1 THEN 1 END)           AS log_files,
+                d.create_date,
+                d.log_reuse_wait_desc
+            FROM sys.databases d
+            JOIN sys.master_files mf ON mf.database_id = d.database_id
+            WHERE d.database_id > 4
+            GROUP BY d.name, d.state_desc, d.recovery_model_desc,
+                     d.create_date, d.log_reuse_wait_desc
+            ORDER BY data_mb DESC;';
+    END TRY
+    BEGIN CATCH
+        PRINT '[note] sys.master_files not accessible: ' + ERROR_MESSAGE();
+    END CATCH;
+END
+ELSE
+    PRINT '[note] sys.master_files not available - skipped';
 
 -- ---------------------------------------------------------------------------
 -- Top tables by rows / size in the current database
@@ -138,23 +151,30 @@ ORDER BY pct_consumed DESC;
 
 -- ---------------------------------------------------------------------------
 -- Filegroup usage per database (data space allocation breakdown).
--- sys.master_files is unavailable on Azure SQL Database; TRY/CATCH lets the
--- block skip cleanly instead of aborting.
+-- sys.master_files does not exist on Azure SQL Database and a direct
+-- reference is a compile-time error that aborts the whole batch (TRY/CATCH
+-- cannot catch it), so guard with OBJECT_ID + dynamic SQL; TRY/CATCH
+-- remains for runtime/permission errors.
 -- ---------------------------------------------------------------------------
-BEGIN TRY
-    SELECT
-        DB_NAME(database_id)                              AS database_name,
-        data_space_id,
-        name                                              AS filegroup_or_logical_file,
-        type_desc,
-        state_desc,
-        CAST(size * 8.0 / 1024 AS DECIMAL(18,2))          AS size_mb,
-        is_read_only
-    FROM sys.master_files
-    WHERE database_id > 4
-    ORDER BY DB_NAME(database_id), type_desc, name;
-END TRY
-BEGIN CATCH
-    PRINT '[note] sys.master_files not accessible (likely Azure SQL DB): '
-          + ERROR_MESSAGE();
-END CATCH;
+IF OBJECT_ID('sys.master_files') IS NOT NULL
+BEGIN
+    BEGIN TRY
+        EXEC sp_executesql N'
+            SELECT
+                DB_NAME(database_id)                              AS database_name,
+                data_space_id,
+                name                                              AS filegroup_or_logical_file,
+                type_desc,
+                state_desc,
+                CAST(size * 8.0 / 1024 AS DECIMAL(18,2))          AS size_mb,
+                is_read_only
+            FROM sys.master_files
+            WHERE database_id > 4
+            ORDER BY DB_NAME(database_id), type_desc, name;';
+    END TRY
+    BEGIN CATCH
+        PRINT '[note] sys.master_files not accessible: ' + ERROR_MESSAGE();
+    END CATCH;
+END
+ELSE
+    PRINT '[note] sys.master_files not available - skipped';

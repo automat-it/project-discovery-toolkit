@@ -9,37 +9,43 @@
 -- =============================================================================
 
 -- Portability: this script reads sys.master_files, which is NOT
--- supported on Azure SQL Database (single DB). It works on SQL
--- Server 2019+ on-prem, SQL Managed Instance, and Azure SQL DB
--- Hyperscale. Skip this script on Azure SQL DB.
+-- supported on Azure SQL Database (single DB). That block is guarded
+-- with OBJECT_ID + dynamic SQL so it is skipped there; everything
+-- else runs on SQL Server 2019+, Managed Instance, and Azure SQL DB.
 SET NOCOUNT ON;
 SET TRANSACTION ISOLATION LEVEL READ UNCOMMITTED;  -- read-only audit; avoid taking shared locks on hot objects
 
 -- ---------------------------------------------------------------------------
--- Database sizes (data + log files). sys.master_files is unavailable on
--- Azure SQL Database; TRY/CATCH lets the block skip cleanly instead of
--- aborting the whole script.
+-- Database sizes (data + log files). sys.master_files does not exist on
+-- Azure SQL Database and a direct reference is a compile-time error that
+-- aborts the whole batch (TRY/CATCH cannot catch it), so guard with
+-- OBJECT_ID + dynamic SQL; TRY/CATCH remains for runtime/permission errors.
 -- ---------------------------------------------------------------------------
-BEGIN TRY
-    SELECT
-        d.name                                            AS database_name,
-        d.state_desc,
-        d.recovery_model_desc,
-        CAST(SUM(CASE WHEN mf.type = 0 THEN mf.size END) * 8.0 / 1024 AS DECIMAL(18,2)) AS data_mb,
-        CAST(SUM(CASE WHEN mf.type = 1 THEN mf.size END) * 8.0 / 1024 AS DECIMAL(18,2)) AS log_mb,
-        CAST(SUM(mf.size) * 8.0 / 1024 AS DECIMAL(18,2))   AS total_mb,
-        COUNT(CASE WHEN mf.type = 0 THEN 1 END)           AS data_file_count,
-        COUNT(CASE WHEN mf.type = 1 THEN 1 END)           AS log_file_count
-    FROM sys.databases d
-    JOIN sys.master_files mf ON mf.database_id = d.database_id
-    WHERE d.database_id > 4
-    GROUP BY d.name, d.state_desc, d.recovery_model_desc
-    ORDER BY total_mb DESC;
-END TRY
-BEGIN CATCH
-    PRINT '[note] sys.master_files not accessible (likely Azure SQL DB): '
-          + ERROR_MESSAGE();
-END CATCH;
+IF OBJECT_ID('sys.master_files') IS NOT NULL
+BEGIN
+    BEGIN TRY
+        EXEC sp_executesql N'
+            SELECT
+                d.name                                            AS database_name,
+                d.state_desc,
+                d.recovery_model_desc,
+                CAST(SUM(CASE WHEN mf.type = 0 THEN mf.size END) * 8.0 / 1024 AS DECIMAL(18,2)) AS data_mb,
+                CAST(SUM(CASE WHEN mf.type = 1 THEN mf.size END) * 8.0 / 1024 AS DECIMAL(18,2)) AS log_mb,
+                CAST(SUM(mf.size) * 8.0 / 1024 AS DECIMAL(18,2))   AS total_mb,
+                COUNT(CASE WHEN mf.type = 0 THEN 1 END)           AS data_file_count,
+                COUNT(CASE WHEN mf.type = 1 THEN 1 END)           AS log_file_count
+            FROM sys.databases d
+            JOIN sys.master_files mf ON mf.database_id = d.database_id
+            WHERE d.database_id > 4
+            GROUP BY d.name, d.state_desc, d.recovery_model_desc
+            ORDER BY total_mb DESC;';
+    END TRY
+    BEGIN CATCH
+        PRINT '[note] sys.master_files not accessible: ' + ERROR_MESSAGE();
+    END CATCH;
+END
+ELSE
+    PRINT '[note] sys.master_files not available - skipped';
 
 -- ---------------------------------------------------------------------------
 -- Schema sizes in the current database

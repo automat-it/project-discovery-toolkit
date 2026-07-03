@@ -100,10 +100,10 @@ SELECT TOP 25
     DB_NAME(s.database_id)                             AS database_name,
     c.client_net_address,
     s.login_time,
-    DATEDIFF(second, s.login_time, SYSUTCDATETIME())   AS connection_age_sec,
+    DATEDIFF(second, s.login_time, SYSDATETIME())   AS connection_age_sec,
     s.status,
     s.last_request_start_time,
-    DATEDIFF(second, s.last_request_end_time, SYSUTCDATETIME()) AS idle_sec,
+    DATEDIFF(second, s.last_request_end_time, SYSDATETIME()) AS idle_sec,
     s.open_transaction_count
 FROM sys.dm_exec_sessions s
 LEFT JOIN sys.dm_exec_connections c ON c.session_id = s.session_id

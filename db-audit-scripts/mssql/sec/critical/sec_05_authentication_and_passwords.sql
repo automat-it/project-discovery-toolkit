@@ -78,7 +78,7 @@ SELECT
     CAST(LOGINPROPERTY(sp.name, 'PasswordLastSetTime') AS DATETIME2) AS password_last_set_time,
     DATEDIFF(day,
              CAST(LOGINPROPERTY(sp.name, 'PasswordLastSetTime') AS DATETIME2),
-             SYSUTCDATETIME())                        AS days_since_change,
+             SYSDATETIME())                        AS days_since_change,
     sl.is_policy_checked,
     sl.is_expiration_checked
 FROM sys.server_principals sp
@@ -86,7 +86,7 @@ JOIN sys.sql_logins sl ON sl.principal_id = sp.principal_id
 WHERE sp.type = 'S'
   AND (LOGINPROPERTY(sp.name, 'PasswordLastSetTime') IS NULL
        OR CAST(LOGINPROPERTY(sp.name, 'PasswordLastSetTime') AS DATETIME2)
-          < DATEADD(day, -180, SYSUTCDATETIME()))
+          < DATEADD(day, -180, SYSDATETIME()))
 ORDER BY password_last_set_time;
 
 -- ---------------------------------------------------------------------------

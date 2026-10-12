@@ -162,6 +162,12 @@ For real Aurora reader-lag data, use CloudWatch
 (`AuroraReplicaLag`) — Aurora replicates at the storage layer, not via
 WAL streaming.
 
+Index usage statistics are **per instance**: `perf_06` run against the
+writer cannot see indexes used only by reader queries. For a drop-unused-
+indexes review on a multi-node cluster use `index_review/` - it captures
+every writer and reader, judges partitioned tables at the parent level, and
+survives stats resets and failovers. See `index_review/README.md`.
+
 ## Running a single script
 
 ```bash
@@ -188,6 +194,10 @@ postgres/
     run_audit.sh
     analyze_report.py
     {critical,high,medium,low}/
+  index_review/              ← cross-node unused-index review (writer + readers)
+    perf_index_bloat_crossnode.sql
+    collect_index_usage.sh
+    merge_index_usage.py
 ```
 
 See `perf/README.md` and `sec/README.md` for the full per-script

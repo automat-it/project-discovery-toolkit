@@ -4,6 +4,7 @@
 # Claude Code: track shared .claude/settings.json, ignore local overrides
 .claude/settings.local.json
 .claude/*.local.json
+CLAUDE.md
 
 # Logs
 *.log
